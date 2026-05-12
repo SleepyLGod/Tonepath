@@ -164,14 +164,24 @@ def current() -> None:
 
 
 @app.command()
-def analyze(features: Annotated[str, typer.Option(help="Feature tier: basic or vocalness.")] = "basic") -> None:
+def analyze(
+    features: Annotated[str, typer.Option(help="Feature tier: basic or vocalness.")] = "basic",
+    method: Annotated[str, typer.Option(help="Vocalness method: spectral, audio-separator, or demucs-cli.")] = "spectral",
+) -> None:
     """Run local audio feature analysis for scanned tracks."""
 
     if features not in {"basic", "vocalness"}:
         raise typer.BadParameter("only basic and vocalness feature analysis are implemented")
+    if method not in {"spectral", "audio-separator", "demucs-cli"}:
+        raise typer.BadParameter("only spectral, audio-separator, and demucs-cli vocalness methods are implemented")
+    if features == "basic" and method != "spectral":
+        raise typer.BadParameter("--method is only supported with --features vocalness")
     store = TonepathStore()
     try:
-        analyzed, skipped = analyze_library(store, features=features)
+        try:
+            analyzed, skipped = analyze_library(store, features=features, method=method)
+        except RuntimeError as exc:
+            raise typer.BadParameter(str(exc)) from exc
     finally:
         store.close()
     console.print(f"Analyzed {analyzed} track(s); skipped {skipped} missing track(s).")

@@ -22,14 +22,14 @@ Tonepath is currently a working terminal prototype. It is not a macOS app, web a
 | Feedback loop | Implemented | The session runtime records feedback and updates upcoming candidates for skip, no-vocals, too-loud, too-slow, and like. |
 | TUI | MVP | Textual screen with prompt intake, timeline, controlled playback, queue, why panel, privacy badge, footer shortcuts, and event log. It does not autoplay on launch. |
 | Enrichment | Local scaffold | Local metadata enrichment is available; online providers are opt-in boundaries and do not make requests yet. |
-| Audio analysis | Basic | `tonepath analyze --features basic` stores approximate loudness, energy, and conservative BPM. `tonepath analyze --features vocalness` adds a local spectral vocalness proxy without heavy ML dependencies. |
+| Audio analysis | Basic | `tonepath analyze --features basic` stores approximate loudness, energy, and conservative BPM. `tonepath analyze --features vocalness` adds a local spectral vocalness proxy without heavy ML dependencies. Optional model adapters are explicit and not default dependencies. |
 | Tests | Implemented | Unit tests cover planner, scanner, config, privacy, explanation, session feedback, enrichment, and TUI launch behavior. |
 
 ## Roadmap
 
 | Area | Planned behavior |
 | --- | --- |
-| Deep audio analysis | Model-backed vocalness, arousal/valence estimates, and stronger confidence scoring. |
+| Deep audio analysis | Optional model-backed vocalness, arousal/valence estimates, and stronger confidence scoring. |
 | TUI polish | More refined timeline, queue interaction, and layout styling after the controlled playback loop is stable. |
 | Profile learning | Better local profile rules and preference learning that users can inspect, export, and delete. |
 | Online enrichment | MusicBrainz, AcoustID, ListenBrainz, or cited web enrichment as explicit opt-in providers with cache and rate-limit handling. |
@@ -126,7 +126,18 @@ Store local basic feature rows:
 ```bash
 uv run tonepath analyze --features basic
 uv run tonepath analyze --features vocalness
+uv run tonepath analyze --features vocalness --method spectral
 ```
+
+Optional local model adapter:
+
+```bash
+uv sync --extra models
+uv run tonepath analyze --features vocalness --method audio-separator
+uv run tonepath analyze --features vocalness --method demucs-cli
+```
+
+`audio-separator` is the recommended optional model route. It is installed only when you run `uv sync --extra models`, and its first real run may download model files into Tonepath's local cache. Full-song separation can take several minutes per track on CPU or Apple Silicon acceleration. `demucs-cli` remains available for users who already have a separate `demucs` command on PATH. If a requested model command is unavailable, Tonepath fails clearly instead of falling back to a fake result.
 
 ## Config
 
@@ -197,6 +208,14 @@ Tonepath separates music understanding into explicit tiers:
 | `local` | Implemented | Stores existing local metadata as source-attributed enrichment records. |
 | `features` | Basic | Stores local basic analysis rows. WAV, MP3, FLAC, and M4A can get approximate loudness, energy, conservative BPM, and spectral vocalness when decodable. Vocalness is a proxy, not source separation. |
 | `online` | Planned | Will require explicit opt-in, cache results, cite sources, and avoid sending local file paths. |
+
+Optional model-backed analysis remains local:
+
+| Method | Status | Behavior |
+| --- | --- | --- |
+| `spectral` | Default | Lightweight local vocalness proxy. No model download and no network access. |
+| `audio-separator` | Recommended optional model | Uses the `models` extra to run local stem separation. Outputs are cached under Tonepath data as `model-audio-separator` with higher confidence, but they are still source-attributed features rather than absolute facts. |
+| `demucs-cli` | Compatibility adapter | Uses a separately installed Demucs CLI to estimate vocalness from the vocal stem. Results are stored as `model-demucs-cli`; this path is for advanced users who already have Demucs installed. |
 
 Online providers are blocked by default:
 

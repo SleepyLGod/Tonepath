@@ -7,26 +7,41 @@ import re
 import shutil
 import subprocess
 import wave
+from hashlib import sha256
 from pathlib import Path
 
+from tonepath import config
 from tonepath.db import TonepathStore
 from tonepath.models import Track, TrackFeatures
 
 
 FEATURE_SOURCE = "basic-local-analysis"
+DEMUCS_FEATURE_SOURCE = "model-demucs-cli"
+AUDIO_SEPARATOR_FEATURE_SOURCE = "model-audio-separator"
 FFMPEG_TIMEOUT_SEC = 30.0
+DEMUCS_TIMEOUT_SEC = 900.0
+SEPARATOR_TIMEOUT_SEC = 1200.0
 FFMPEG_AUDIO_SUFFIXES = {".mp3", ".flac", ".m4a", ".mp4", ".aac", ".ogg", ".opus", ".wav"}
 PCM_ANALYSIS_RATE = 11025
 PCM_ANALYSIS_SECONDS = 90
 VOCALNESS_SECONDS = 45
 MEAN_VOLUME_PATTERN = re.compile(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB")
+VOCALNESS_METHODS = {"spectral", "demucs-cli", "audio-separator"}
 
 
-def analyze_library(store: TonepathStore, features: str = "basic") -> tuple[int, int]:
+def analyze_library(store: TonepathStore, features: str = "basic", method: str = "spectral") -> tuple[int, int]:
     """Analyze scanned local tracks and return analyzed/skipped counts."""
 
     if features not in {"basic", "vocalness"}:
         raise ValueError("Only basic and vocalness feature analysis are implemented.")
+    if method not in VOCALNESS_METHODS:
+        raise ValueError("Only spectral, audio-separator, and demucs-cli vocalness methods are implemented.")
+    if features == "basic" and method != "spectral":
+        raise ValueError("The --method option is only supported with --features vocalness.")
+    if features == "vocalness" and method == "audio-separator" and shutil.which("audio-separator") is None:
+        raise RuntimeError("audio-separator vocalness requires the optional models extra. Run: uv sync --extra models")
+    if features == "vocalness" and method == "demucs-cli" and shutil.which("demucs") is None:
+        raise RuntimeError("demucs-cli vocalness requires the `demucs` command on PATH. Tonepath does not install it.")
 
     analyzed = 0
     skipped = 0
@@ -38,7 +53,7 @@ def analyze_library(store: TonepathStore, features: str = "basic") -> tuple[int,
         if features == "basic":
             result = analyze_track_basic(track, existing)
         else:
-            result = analyze_track_vocalness(track, existing)
+            result = analyze_track_vocalness(track, existing, method=method)
         store.upsert_features(result)
         analyzed += 1
     return analyzed, skipped
@@ -92,11 +107,43 @@ def analyze_track_basic(track: Track, existing: TrackFeatures | None = None) -> 
     )
 
 
-def analyze_track_vocalness(track: Track, existing: TrackFeatures | None = None) -> TrackFeatures:
-    """Analyze one track for conservative local spectral vocalness."""
+def analyze_track_vocalness(track: Track, existing: TrackFeatures | None = None, method: str = "spectral") -> TrackFeatures:
+    """Analyze one track for local vocalness using the requested method."""
 
     if track.id is None:
         raise ValueError("Track must be persisted before analysis.")
+    if method not in VOCALNESS_METHODS:
+        raise ValueError("Only spectral, audio-separator, and demucs-cli vocalness methods are implemented.")
+    if method == "audio-separator":
+        vocalness = analyze_vocalness_with_audio_separator(track.path)
+        if vocalness is None:
+            return preserve_existing_vocalness(track.id, existing)
+        return TrackFeatures(
+            track_id=track.id,
+            bpm=existing.bpm if existing else None,
+            loudness=existing.loudness if existing else None,
+            energy=existing.energy if existing else None,
+            vocalness=vocalness,
+            arousal_estimate=existing.arousal_estimate if existing else None,
+            valence_estimate=existing.valence_estimate if existing else None,
+            feature_source=AUDIO_SEPARATOR_FEATURE_SOURCE,
+            confidence="high",
+        )
+    if method == "demucs-cli":
+        vocalness = analyze_vocalness_with_demucs(track.path)
+        if vocalness is None:
+            return preserve_existing_vocalness(track.id, existing)
+        return TrackFeatures(
+            track_id=track.id,
+            bpm=existing.bpm if existing else None,
+            loudness=existing.loudness if existing else None,
+            energy=existing.energy if existing else None,
+            vocalness=vocalness,
+            arousal_estimate=existing.arousal_estimate if existing else None,
+            valence_estimate=existing.valence_estimate if existing else None,
+            feature_source=DEMUCS_FEATURE_SOURCE,
+            confidence="high",
+        )
 
     samples: list[int] | None = None
     sample_rate = PCM_ANALYSIS_RATE
@@ -121,6 +168,173 @@ def analyze_track_vocalness(track: Track, existing: TrackFeatures | None = None)
         feature_source=FEATURE_SOURCE,
         confidence=confidence,
     )
+
+
+def analyze_vocalness_with_audio_separator(path: Path) -> float | None:
+    """Run optional local audio-separator CLI separation and estimate vocalness."""
+
+    if shutil.which("audio-separator") is None:
+        raise RuntimeError("audio-separator vocalness requires the optional models extra. Run: uv sync --extra models")
+
+    output_root = audio_separator_output_dir(path)
+    model_root = audio_separator_model_dir()
+    shutil.rmtree(output_root, ignore_errors=True)
+    output_root.mkdir(parents=True, exist_ok=True)
+    model_root.mkdir(parents=True, exist_ok=True)
+    command = [
+        "audio-separator",
+        "--single_stem",
+        "Vocals",
+        "--output_format",
+        "WAV",
+        "--output_dir",
+        str(output_root),
+        "--model_file_dir",
+        str(model_root),
+        str(path),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=SEPARATOR_TIMEOUT_SEC,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+
+    vocals_path = find_vocal_stem(output_root)
+    if vocals_path is None:
+        return None
+    vocal_pcm = decode_wave_pcm(vocals_path)
+    if vocal_pcm is None:
+        return None
+    vocal_samples, sample_rate = vocal_pcm
+    mix_samples = decode_track_pcm(path, sample_rate, VOCALNESS_SECONDS)
+    if mix_samples is None:
+        return None
+    return vocalness_from_stem_ratio(vocal_samples, mix_samples)
+
+
+def audio_separator_model_dir() -> Path:
+    """Return the local model cache directory for audio-separator."""
+
+    return config.ensure_data_dir() / "cache" / "models" / "audio-separator"
+
+
+def audio_separator_output_dir(path: Path) -> Path:
+    """Return the local separated-output directory for one audio-separator run."""
+
+    key = sha256(str(path.expanduser().resolve()).encode("utf-8")).hexdigest()[:16]
+    return config.ensure_data_dir() / "cache" / "separated" / "audio-separator" / key
+
+
+def preserve_existing_vocalness(track_id: int, existing: TrackFeatures | None = None) -> TrackFeatures:
+    """Return a feature row that does not overwrite prior vocalness after model failure."""
+
+    return TrackFeatures(
+        track_id=track_id,
+        bpm=existing.bpm if existing else None,
+        loudness=existing.loudness if existing else None,
+        energy=existing.energy if existing else None,
+        vocalness=existing.vocalness if existing else None,
+        arousal_estimate=existing.arousal_estimate if existing else None,
+        valence_estimate=existing.valence_estimate if existing else None,
+        feature_source=existing.feature_source if existing else FEATURE_SOURCE,
+        confidence=existing.confidence if existing else "low",
+    )
+
+
+def analyze_vocalness_with_demucs(path: Path) -> float | None:
+    """Run an optional local Demucs CLI separation and estimate vocalness from the vocal stem."""
+
+    if shutil.which("demucs") is None:
+        raise RuntimeError("demucs-cli vocalness requires the `demucs` command on PATH. Tonepath does not install it.")
+
+    cache_root = demucs_track_cache_dir(path)
+    shutil.rmtree(cache_root, ignore_errors=True)
+    cache_root.mkdir(parents=True, exist_ok=True)
+    command = ["demucs", "--two-stems=vocals", "-o", str(cache_root), str(path)]
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=DEMUCS_TIMEOUT_SEC,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+
+    vocals_path = find_demucs_vocals(cache_root)
+    if vocals_path is None:
+        return None
+
+    vocal_pcm = decode_wave_pcm(vocals_path)
+    if vocal_pcm is None:
+        return None
+    vocal_samples, sample_rate = vocal_pcm
+    mix_samples = decode_track_pcm(path, sample_rate, VOCALNESS_SECONDS)
+    if mix_samples is None:
+        return None
+    return vocalness_from_stem_ratio(vocal_samples, mix_samples)
+
+
+def demucs_track_cache_dir(path: Path) -> Path:
+    """Return the local cache directory for one Demucs separation run."""
+
+    key = sha256(str(path.expanduser().resolve()).encode("utf-8")).hexdigest()[:16]
+    return config.ensure_data_dir() / "cache" / "models" / "demucs" / key
+
+
+def find_demucs_vocals(cache_root: Path) -> Path | None:
+    """Find the vocals stem written by Demucs under one cache directory."""
+
+    return find_vocal_stem(cache_root)
+
+
+def find_vocal_stem(cache_root: Path) -> Path | None:
+    """Find a vocal stem under a separator output directory."""
+
+    exact = sorted(cache_root.rglob("vocals.wav"))
+    if exact:
+        return exact[0]
+    candidates = sorted(path for path in cache_root.rglob("*.wav") if "vocal" in path.name.lower())
+    return candidates[0] if candidates else None
+
+
+def decode_track_pcm(path: Path, sample_rate: int, seconds: int) -> list[int] | None:
+    """Decode a local track to PCM samples without assuming its container format."""
+
+    if path.suffix.lower() == ".wav":
+        wave_pcm = decode_wave_pcm(path)
+        if wave_pcm is not None:
+            samples, _sample_rate = wave_pcm
+            return samples[: sample_rate * seconds]
+    return decode_pcm_with_ffmpeg(path, sample_rate, seconds)
+
+
+def vocalness_from_stem_ratio(vocal_samples: list[int], mix_samples: list[int]) -> float | None:
+    """Estimate vocalness from the vocal stem RMS relative to the original mix RMS."""
+
+    vocal_rms = rms(vocal_samples)
+    mix_rms = rms(mix_samples)
+    if vocal_rms is None or mix_rms is None or mix_rms <= 0.0:
+        return None
+    return round(min(max(vocal_rms / mix_rms, 0.0), 1.0), 2)
+
+
+def rms(samples: list[int]) -> float | None:
+    """Return root mean square amplitude for integer PCM samples."""
+
+    if not samples:
+        return None
+    return math.sqrt(sum(sample * sample for sample in samples) / len(samples))
 
 
 def analyze_with_ffmpeg(path: Path) -> tuple[float, float, float | None] | None:

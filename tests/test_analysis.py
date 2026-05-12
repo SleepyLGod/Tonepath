@@ -11,6 +11,8 @@ from tonepath.analysis import (
     analyze_track_basic,
     analyze_track_vocalness,
     analyze_with_ffmpeg,
+    analyze_vocalness_with_audio_separator,
+    analyze_vocalness_with_demucs,
     estimate_bpm,
     estimate_vocalness,
     loudness_to_unit,
@@ -214,6 +216,179 @@ class AnalysisTest(unittest.TestCase):
             self.assertEqual(features.bpm, 100.0)
             self.assertEqual(features.loudness, -20.0)
             self.assertEqual(features.energy, 0.3)
+
+    def test_demucs_method_requires_external_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            path = Path(tmp) / "song.wav"
+            write_wave(path, amplitude=9000)
+            store.upsert_track(track_for(path, "song.wav"))
+
+            with patch("tonepath.analysis.shutil.which", return_value=None):
+                with self.assertRaisesRegex(RuntimeError, "demucs"):
+                    analyze_library(store, features="vocalness", method="demucs-cli")
+            row = store.conn.execute("SELECT COUNT(*) AS count FROM track_features").fetchone()
+            self.assertEqual(int(row["count"]), 0)
+            store.close()
+
+    def test_audio_separator_method_requires_optional_extra(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            path = Path(tmp) / "song.wav"
+            write_wave(path, amplitude=9000)
+            store.upsert_track(track_for(path, "song.wav"))
+
+            with patch("tonepath.analysis.shutil.which", return_value=None):
+                with self.assertRaisesRegex(RuntimeError, "uv sync --extra models"):
+                    analyze_library(store, features="vocalness", method="audio-separator")
+            row = store.conn.execute("SELECT COUNT(*) AS count FROM track_features").fetchone()
+            self.assertEqual(int(row["count"]), 0)
+            store.close()
+
+    def test_audio_separator_method_writes_high_confidence_vocalness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "song.wav"
+            write_wave(path, amplitude=12000)
+            track = track_for(path, "song.wav", track_id=1)
+            existing = TrackFeatures(
+                track_id=1,
+                bpm=118.0,
+                loudness=-16.0,
+                energy=0.5,
+                feature_source="basic-local-analysis",
+                confidence="medium",
+            )
+
+            def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                output_root = Path(command[command.index("--output_dir") + 1])
+                output_root.mkdir(parents=True, exist_ok=True)
+                write_wave(output_root / "song_(Vocals).wav", amplitude=6000)
+                return subprocess.CompletedProcess(command, returncode=0)
+
+            with patch("tonepath.analysis.shutil.which", return_value="/usr/bin/audio-separator"), patch(
+                "tonepath.analysis.config.ensure_data_dir",
+                return_value=root,
+            ), patch("tonepath.analysis.subprocess.run", side_effect=fake_run):
+                features = analyze_track_vocalness(track, existing, method="audio-separator")
+
+            self.assertEqual(features.feature_source, "model-audio-separator")
+            self.assertEqual(features.confidence, "high")
+            self.assertEqual(features.bpm, 118.0)
+            self.assertIsNotNone(features.vocalness)
+            self.assertGreater(features.vocalness, 0.3)
+            self.assertLess(features.vocalness, 0.8)
+
+    def test_audio_separator_failure_preserves_existing_vocalness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "song.wav"
+            write_wave(path, amplitude=12000)
+            track = track_for(path, "song.wav", track_id=1)
+            existing = TrackFeatures(
+                track_id=1,
+                bpm=118.0,
+                loudness=-16.0,
+                energy=0.5,
+                vocalness=0.22,
+                feature_source="basic-local-analysis",
+                confidence="medium",
+            )
+            result = subprocess.CompletedProcess(args=[], returncode=1)
+
+            with patch("tonepath.analysis.shutil.which", return_value="/usr/bin/audio-separator"), patch(
+                "tonepath.analysis.config.ensure_data_dir",
+                return_value=root,
+            ), patch("tonepath.analysis.subprocess.run", return_value=result):
+                features = analyze_track_vocalness(track, existing, method="audio-separator")
+
+            self.assertEqual(features.vocalness, 0.22)
+            self.assertEqual(features.feature_source, "basic-local-analysis")
+            self.assertEqual(features.confidence, "medium")
+
+    def test_audio_separator_helper_returns_none_when_stem_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "song.wav"
+            write_wave(path, amplitude=12000)
+            result = subprocess.CompletedProcess(args=[], returncode=0)
+            with patch("tonepath.analysis.shutil.which", return_value="/usr/bin/audio-separator"), patch(
+                "tonepath.analysis.config.ensure_data_dir",
+                return_value=Path(tmp),
+            ), patch("tonepath.analysis.subprocess.run", return_value=result):
+                self.assertIsNone(analyze_vocalness_with_audio_separator(path))
+
+    def test_demucs_method_writes_high_confidence_vocalness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "song.wav"
+            write_wave(path, amplitude=12000)
+            track = track_for(path, "song.wav", track_id=1)
+            existing = TrackFeatures(
+                track_id=1,
+                bpm=118.0,
+                loudness=-16.0,
+                energy=0.5,
+                feature_source="basic-local-analysis",
+                confidence="medium",
+            )
+
+            def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                cache_root = Path(command[command.index("-o") + 1])
+                stem_dir = cache_root / "htdemucs" / "song"
+                stem_dir.mkdir(parents=True, exist_ok=True)
+                write_wave(stem_dir / "vocals.wav", amplitude=6000)
+                return subprocess.CompletedProcess(command, returncode=0)
+
+            with patch("tonepath.analysis.shutil.which", return_value="/usr/bin/demucs"), patch(
+                "tonepath.analysis.config.ensure_data_dir",
+                return_value=root,
+            ), patch("tonepath.analysis.subprocess.run", side_effect=fake_run):
+                features = analyze_track_vocalness(track, existing, method="demucs-cli")
+
+            self.assertEqual(features.feature_source, "model-demucs-cli")
+            self.assertEqual(features.confidence, "high")
+            self.assertEqual(features.bpm, 118.0)
+            self.assertIsNotNone(features.vocalness)
+            self.assertGreater(features.vocalness, 0.3)
+            self.assertLess(features.vocalness, 0.8)
+
+    def test_demucs_failure_preserves_existing_vocalness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "song.wav"
+            write_wave(path, amplitude=12000)
+            track = track_for(path, "song.wav", track_id=1)
+            existing = TrackFeatures(
+                track_id=1,
+                bpm=118.0,
+                loudness=-16.0,
+                energy=0.5,
+                vocalness=0.22,
+                feature_source="basic-local-analysis",
+                confidence="medium",
+            )
+            result = subprocess.CompletedProcess(args=[], returncode=1)
+
+            with patch("tonepath.analysis.shutil.which", return_value="/usr/bin/demucs"), patch(
+                "tonepath.analysis.config.ensure_data_dir",
+                return_value=root,
+            ), patch("tonepath.analysis.subprocess.run", return_value=result):
+                features = analyze_track_vocalness(track, existing, method="demucs-cli")
+
+            self.assertEqual(features.vocalness, 0.22)
+            self.assertEqual(features.feature_source, "basic-local-analysis")
+            self.assertEqual(features.confidence, "medium")
+
+    def test_demucs_vocalness_helper_returns_none_when_stem_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "song.wav"
+            write_wave(path, amplitude=12000)
+            result = subprocess.CompletedProcess(args=[], returncode=0)
+            with patch("tonepath.analysis.shutil.which", return_value="/usr/bin/demucs"), patch(
+                "tonepath.analysis.config.ensure_data_dir",
+                return_value=Path(tmp),
+            ), patch("tonepath.analysis.subprocess.run", return_value=result):
+                self.assertIsNone(analyze_vocalness_with_demucs(path))
 
     def test_loudness_mapping_has_useful_music_range(self) -> None:
         self.assertLess(loudness_to_unit(-18.0), loudness_to_unit(-9.0))
