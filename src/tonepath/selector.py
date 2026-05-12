@@ -64,6 +64,8 @@ def score_track(store: TonepathStore, track: Track, phase: SessionPhase) -> Cand
             reasons.append("energy feature contributes to phase fit")
         if features.loudness is not None:
             reasons.append("loudness feature contributes to phase fit")
+        if features.bpm is not None:
+            reasons.append("BPM feature contributes to phase fit")
     else:
         reasons.append("audio features unavailable; selection uses metadata and feedback")
 
@@ -72,9 +74,11 @@ def score_track(store: TonepathStore, track: Track, phase: SessionPhase) -> Cand
             if features.vocalness <= 0.35:
                 score += 2.0
                 reasons.append("vocalness feature supports no-vocals constraint")
-            else:
+            elif features.vocalness >= 0.65:
                 score -= 3.0
                 reasons.append("vocalness feature conflicts with no-vocals constraint")
+            else:
+                reasons.append("vocalness feature is inconclusive for no-vocals constraint")
         elif any(token in genre for token in VOCAL_HEAVY_GENRES):
             score -= 1.0
             reasons.append("genre may be vocal-heavy; confidence is low")
@@ -109,4 +113,18 @@ def feature_fit(features: TrackFeatures, phase: SessionPhase) -> float:
         score += 1.0 - abs(features.arousal_estimate - phase.target_arousal)
     if features.valence_estimate is not None:
         score += 1.0 - abs(features.valence_estimate - phase.target_valence)
+    if features.bpm is not None:
+        score += bpm_fit(features.bpm, phase)
+    return score
+
+
+def bpm_fit(bpm: float, phase: SessionPhase) -> float:
+    """Return a conservative BPM fit score for a phase target."""
+
+    target_bpm = 70.0 + phase.target_energy * 90.0
+    score = 0.75 * (1.0 - min(abs(bpm - target_bpm) / 80.0, 1.0))
+    if phase.target_energy <= 0.5 and bpm > 140.0:
+        score -= 0.5
+    if phase.target_energy >= 0.6 and 90.0 <= bpm <= 165.0:
+        score += 0.25
     return score

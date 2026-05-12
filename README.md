@@ -22,14 +22,14 @@ Tonepath is currently a working terminal prototype. It is not a macOS app, web a
 | Feedback loop | Implemented | The session runtime records feedback and updates upcoming candidates for skip, no-vocals, too-loud, too-slow, and like. |
 | TUI | MVP | Textual screen with prompt intake, timeline, controlled playback, queue, why panel, privacy badge, footer shortcuts, and event log. It does not autoplay on launch. |
 | Enrichment | Local scaffold | Local metadata enrichment is available; online providers are opt-in boundaries and do not make requests yet. |
-| Audio analysis | Basic | `tonepath analyze --features basic` stores local feature rows; WAV uses built-in PCM analysis, and ffmpeg-backed formats such as MP3, FLAC, and M4A get approximate loudness/energy when decodable. |
+| Audio analysis | Basic | `tonepath analyze --features basic` stores approximate loudness, energy, and conservative BPM. `tonepath analyze --features vocalness` adds a local spectral vocalness proxy without heavy ML dependencies. |
 | Tests | Implemented | Unit tests cover planner, scanner, config, privacy, explanation, session feedback, enrichment, and TUI launch behavior. |
 
 ## Roadmap
 
 | Area | Planned behavior |
 | --- | --- |
-| Deep audio analysis | Local BPM, vocalness, arousal/valence estimates, and stronger confidence scoring. |
+| Deep audio analysis | Model-backed vocalness, arousal/valence estimates, and stronger confidence scoring. |
 | TUI polish | More refined timeline, queue interaction, and layout styling after the controlled playback loop is stable. |
 | Profile learning | Better local profile rules and preference learning that users can inspect, export, and delete. |
 | Online enrichment | MusicBrainz, AcoustID, ListenBrainz, or cited web enrichment as explicit opt-in providers with cache and rate-limit handling. |
@@ -125,6 +125,7 @@ Store local basic feature rows:
 
 ```bash
 uv run tonepath analyze --features basic
+uv run tonepath analyze --features vocalness
 ```
 
 ## Config
@@ -194,7 +195,7 @@ Tonepath separates music understanding into explicit tiers:
 | Tier | Status | Behavior |
 | --- | --- | --- |
 | `local` | Implemented | Stores existing local metadata as source-attributed enrichment records. |
-| `features` | Basic | Stores local basic analysis rows. WAV, MP3, FLAC, and M4A can get approximate loudness and energy when decodable; BPM/vocalness are still planned. |
+| `features` | Basic | Stores local basic analysis rows. WAV, MP3, FLAC, and M4A can get approximate loudness, energy, conservative BPM, and spectral vocalness when decodable. Vocalness is a proxy, not source separation. |
 | `online` | Planned | Will require explicit opt-in, cache results, cite sources, and avoid sending local file paths. |
 
 Online providers are blocked by default:

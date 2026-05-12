@@ -432,13 +432,16 @@ class TonepathApp(App[None]):
             return "Queue is empty. Run `tonepath scan` to add local music."
         features = self.store.get_features(candidate.track.id) if self.store is not None and candidate.track.id else None
         energy = "--" if features is None or features.energy is None else f"{features.energy:.2f}"
+        meter = energy_meter(features.energy if features is not None else None)
         loudness = "--" if features is None or features.loudness is None else f"{features.loudness:.1f} dBFS"
+        bpm = bpm_text(features.bpm if features is not None else None)
         return "\n".join(
             [
                 f"{self.playback_status} | {candidate.phase.label} | {confidence_label(candidate.confidence)}",
                 truncate(track_label(candidate.track.title, candidate.track.path.name), 44),
                 candidate.track.artist or "unknown artist",
-                f"energy {energy} · loudness {loudness}",
+                f"energy {energy} {meter} · bpm {bpm}",
+                f"loudness {loudness}",
             ]
         )
 
@@ -457,6 +460,8 @@ class TonepathApp(App[None]):
                 text.append(line, style=f"bold {TEXT}")
             elif index == 2:
                 text.append(line, style=MUTED)
+            elif "▮" in line or "▯" in line:
+                text.append(line, style=AMBER)
             else:
                 text.append(line, style=AMBER_DIM)
         return text
@@ -472,15 +477,23 @@ class TonepathApp(App[None]):
         features = self.store.get_features(candidate.track.id) if self.store is not None and candidate.track.id else None
         energy = "unknown" if features is None or features.energy is None else f"{features.energy:.2f}"
         loudness = "unknown" if features is None or features.loudness is None else f"{features.loudness:.1f} dBFS"
+        bpm = bpm_text(features.bpm if features is not None else None)
+        vocalness = vocalness_text(features.vocalness if features is not None else None)
+        unknowns = []
+        if features is None or features.bpm is None:
+            unknowns.append("BPM")
+        if features is None or features.vocalness is None:
+            unknowns.append("vocalness")
+        unknown = "none" if not unknowns else " · ".join(unknowns)
         return "\n".join(
             [
                 "Fit",
                 f"{candidate.phase.label} · target {candidate.phase.target_energy:.2f}",
                 "Evidence",
                 f"conf {confidence_label(candidate.confidence)} · energy {energy}",
-                f"loudness {loudness}",
-                "Unknown",
-                "BPM · vocalness",
+                f"BPM {bpm} · loud {loudness}",
+                f"vocalness {vocalness}",
+                f"Unknown {unknown}",
             ]
         )
 
@@ -489,7 +502,7 @@ class TonepathApp(App[None]):
 
         text = Text()
         for line in self.why_panel_text().splitlines():
-            if line in {"Fit", "Evidence", "Unknown"}:
+            if line in {"Fit", "Evidence"} or line.startswith("Unknown"):
                 if text:
                     text.append("\n")
                 style = TEAL if line == "Evidence" else AMBER if line == "Fit" else MUTED
@@ -624,6 +637,31 @@ def queue_cell(value: str, current: bool = False, align: str | None = None) -> T
 
     style = f"bold {AMBER}" if current else MUTED
     return Text(value, style=style, justify=align)
+
+
+def bpm_text(bpm: float | None) -> str:
+    """Return a compact BPM label without inventing missing tempo."""
+
+    if bpm is None:
+        return "unknown"
+    return f"{bpm:.0f}"
+
+
+def vocalness_text(vocalness: float | None) -> str:
+    """Return a compact vocalness label without inventing missing vocals."""
+
+    if vocalness is None:
+        return "unknown"
+    return f"{vocalness:.2f}"
+
+
+def energy_meter(energy: float | None) -> str:
+    """Return a five-step static energy strip."""
+
+    if energy is None:
+        return "▯▯▯▯▯"
+    filled = min(max(round(energy * 5), 0), 5)
+    return "▮" * filled + "▯" * (5 - filled)
 
 
 def confidence_label(confidence: str) -> str:

@@ -7,7 +7,7 @@ from unittest.mock import patch
 from tonepath.db import TonepathStore
 from tonepath.models import Track, TrackFeatures
 from tonepath.playback import MpvAdapter
-from tonepath.tui import TonepathApp, confidence_label, queue_marker
+from tonepath.tui import TonepathApp, bpm_text, confidence_label, energy_meter, queue_marker, vocalness_text
 from textual.widgets import Input
 
 
@@ -116,6 +116,12 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                 async with app.run_test() as pilot:
                     self.assertEqual(app.energy_text(track_id), "0.42")
                     self.assertEqual(app.energy_text(None), "--")
+                    self.assertEqual(bpm_text(None), "unknown")
+                    self.assertEqual(bpm_text(118.0), "118")
+                    self.assertEqual(vocalness_text(None), "unknown")
+                    self.assertEqual(vocalness_text(0.24), "0.24")
+                    self.assertEqual(energy_meter(None), "▯▯▯▯▯")
+                    self.assertEqual(energy_meter(0.42), "▮▮▯▯▯")
                     self.assertEqual(queue_marker("now"), "▶")
                     self.assertEqual(queue_marker("+1"), "1")
                     self.assertEqual(confidence_label("medium"), "med")

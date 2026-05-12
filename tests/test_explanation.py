@@ -36,7 +36,7 @@ class ExplanationTest(unittest.TestCase):
             self.assertIn("Vocalness：unknown", explanation)
             store.close()
 
-    def test_explanation_shows_energy_and_loudness_when_stored(self) -> None:
+    def test_explanation_shows_stored_features_without_vocalness(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = TonepathStore(Path(tmp) / "tonepath.db")
             audio = Path(tmp) / "tone.wav"
@@ -56,7 +56,15 @@ class ExplanationTest(unittest.TestCase):
                 )
             )
             store.upsert_features(
-                TrackFeatures(track_id, loudness=-18.5, energy=0.42, feature_source="basic-local-analysis", confidence="medium")
+                TrackFeatures(
+                    track_id,
+                    bpm=118.0,
+                    loudness=-18.5,
+                    energy=0.42,
+                    vocalness=0.24,
+                    feature_source="basic-local-analysis",
+                    confidence="medium",
+                )
             )
             persisted = store.get_track(track_id)
             self.assertIsNotNone(persisted)
@@ -65,8 +73,8 @@ class ExplanationTest(unittest.TestCase):
             explanation = explain_candidate(store, candidate)
             self.assertIn("Energy：0.42", explanation)
             self.assertIn("Loudness：-18.5 dBFS", explanation)
-            self.assertIn("BPM：unknown", explanation)
-            self.assertIn("Vocalness：unknown", explanation)
+            self.assertIn("BPM：118", explanation)
+            self.assertIn("Vocalness：0.24", explanation)
             store.close()
 
 

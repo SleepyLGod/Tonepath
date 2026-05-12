@@ -164,11 +164,11 @@ def current() -> None:
 
 
 @app.command()
-def analyze(features: Annotated[str, typer.Option(help="Feature tier: basic or deep.")] = "basic") -> None:
+def analyze(features: Annotated[str, typer.Option(help="Feature tier: basic or vocalness.")] = "basic") -> None:
     """Run local audio feature analysis for scanned tracks."""
 
-    if features != "basic":
-        raise typer.BadParameter("only basic feature analysis is implemented")
+    if features not in {"basic", "vocalness"}:
+        raise typer.BadParameter("only basic and vocalness feature analysis are implemented")
     store = TonepathStore()
     try:
         analyzed, skipped = analyze_library(store, features=features)
