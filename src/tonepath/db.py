@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from tonepath import config
-from tonepath.models import SessionPhase, SessionPlan, Track, TrackFeatures
+from tonepath.models import EnrichmentRecord, SessionPhase, SessionPlan, Track, TrackFeatures
 
 
 SCHEMA = """
@@ -91,6 +91,19 @@ CREATE TABLE IF NOT EXISTS profile_rules (
   confidence TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS track_enrichment (
+  id INTEGER PRIMARY KEY,
+  track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+  field TEXT NOT NULL,
+  value TEXT NOT NULL,
+  tier TEXT NOT NULL,
+  source TEXT NOT NULL,
+  confidence TEXT NOT NULL,
+  is_online INTEGER NOT NULL DEFAULT 0,
+  fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(track_id, field, tier, source)
 );
 
 CREATE TABLE IF NOT EXISTS app_state (
@@ -273,10 +286,71 @@ class TonepathStore:
         """Return counts of locally stored user data."""
 
         summary: dict[str, int] = {}
-        for table in ("tracks", "track_features", "sessions", "session_phases", "plays", "feedback", "profile_rules"):
+        for table in (
+            "tracks",
+            "track_features",
+            "track_enrichment",
+            "sessions",
+            "session_phases",
+            "plays",
+            "feedback",
+            "profile_rules",
+        ):
             row = self.conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
             summary[table] = int(row["count"])
         return summary
+
+    def upsert_enrichment(self, record: EnrichmentRecord) -> None:
+        """Insert or update a source-attributed track enrichment field."""
+
+        self.conn.execute(
+            """
+            INSERT INTO track_enrichment (
+              track_id, field, value, tier, source, confidence, is_online
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(track_id, field, tier, source) DO UPDATE SET
+              value=excluded.value,
+              confidence=excluded.confidence,
+              is_online=excluded.is_online,
+              fetched_at=CURRENT_TIMESTAMP
+            """,
+            (
+                record.track_id,
+                record.field,
+                record.value,
+                record.tier,
+                record.source,
+                record.confidence,
+                1 if record.is_online else 0,
+            ),
+        )
+        self.conn.commit()
+
+    def list_enrichment(self, track_id: int) -> list[EnrichmentRecord]:
+        """Return source-attributed enrichment fields for one track."""
+
+        rows = self.conn.execute(
+            """
+            SELECT track_id, field, value, tier, source, confidence, is_online
+            FROM track_enrichment
+            WHERE track_id = ?
+            ORDER BY tier, field, source
+            """,
+            (track_id,),
+        ).fetchall()
+        return [
+            EnrichmentRecord(
+                track_id=int(row["track_id"]),
+                field=str(row["field"]),
+                value=str(row["value"]),
+                tier=row["tier"],
+                source=str(row["source"]),
+                confidence=str(row["confidence"]),
+                is_online=bool(row["is_online"]),
+            )
+            for row in rows
+        ]
 
     def delete_profile_data(self) -> None:
         """Delete user profile, play, feedback, and session data while keeping scanned tracks."""
@@ -302,4 +376,3 @@ def track_from_row(row: sqlite3.Row) -> Track:
         duration=row["duration"],
         format=row["format"],
     )
-

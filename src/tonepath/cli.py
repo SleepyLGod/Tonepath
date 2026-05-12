@@ -14,6 +14,7 @@ except ImportError as exc:  # pragma: no cover - exercised before dependency ins
 
 from tonepath.db import TonepathStore
 from tonepath.doctor import run_doctor
+from tonepath.enrichment import EnrichmentProvider, enrich_library
 from tonepath.explanation import explain_candidate
 from tonepath.models import CandidateScore
 from tonepath.planner import plan_session
@@ -125,6 +126,24 @@ def doctor() -> None:
     """Check local Tonepath dependencies."""
 
     console.print(run_doctor())
+
+
+@app.command()
+def enrich(
+    provider: Annotated[EnrichmentProvider, typer.Option(help="Provider: local, musicbrainz, acoustid, listenbrainz, or web.")] = "local",
+    confirm: Annotated[bool, typer.Option("--confirm", help="Confirm opt-in online enrichment when supported.")] = False,
+) -> None:
+    """Store source-attributed metadata enrichment fields."""
+
+    store = TonepathStore()
+    try:
+        count = enrich_library(store, provider=provider, confirm=confirm)
+    except (PermissionError, NotImplementedError) as exc:
+        console.print(str(exc))
+        raise typer.Exit(code=1) from exc
+    finally:
+        store.close()
+    console.print(f"Stored {count} enrichment field(s) from provider: {provider}")
 
 
 @config_app.command("init")

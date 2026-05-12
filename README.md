@@ -2,9 +2,9 @@
 
 Tonepath is a local-first terminal music state-transition agent.
 
-It turns a request like `I am irritated and want to focus in 30 minutes` into an explainable listening path: current state -> intermediate phases -> target state. Tonepath scans your local music library, stores metadata locally, selects tracks with confidence labels, and plays local files through `mpv`.
+It turns a request like `I am irritated and want to focus in 30 minutes` into an explainable listening path: current state -> intermediate phases -> target state. Tonepath scans your local music library, stores metadata locally, selects tracks with confidence labels, and can play local files through `mpv`.
 
-Tonepath is currently a working CLI prototype. It is not yet a full TUI, macOS app, web app, Spotify player, music generator, or therapy product.
+Tonepath is currently a working terminal prototype. It is not a macOS app, web app, Spotify player, music generator, or therapy product.
 
 ## Status
 
@@ -13,23 +13,25 @@ Tonepath is currently a working CLI prototype. It is not yet a full TUI, macOS a
 | Project setup | Implemented | Project-local `uv` workflow, CLI entrypoint, Apache-2.0 license. |
 | Config | Implemented | Local TOML config at `~/.tonepath/config.toml`; `TONEPATH_HOME` can isolate config and data. |
 | Library scanning | Implemented | Scans local audio files and reads metadata with Mutagen, falling back to filenames when tags are missing. |
-| Storage | Implemented | SQLite stores tracks, sessions, phases, feedback, profile summaries, and future audio feature rows. |
+| Storage | Implemented | SQLite stores tracks, sessions, phases, feedback, profile summaries, future audio feature rows, and source-attributed enrichment fields. |
 | Path planning | Implemented | Deterministic prompt parsing and phase planning for state transitions such as irritated -> focus. |
 | Track selection | Implemented | Deterministic scoring with confidence labels; metadata-only selections are intentionally low confidence. |
 | Playback | Implemented | Local `mpv` adapter plus `--dry-run` command preview. |
-| CLI commands | Implemented | `doctor`, `config`, `scan`, `start`, `feedback`, `profile`, `privacy`, and `explain`. |
+| CLI commands | Implemented | `doctor`, `config`, `scan`, `start`, `feedback`, `profile`, `privacy`, `explain`, and `enrich`. |
 | Explanations | Implemented | Explanations only cite stored metadata, features, phases, and feedback; unknown BPM/vocalness stays unknown. |
-| TUI | Placeholder | A basic Textual shell exists; the real product interface is not implemented yet. |
-| Tests | Implemented | Unit tests cover planner, scanner, config, privacy, and explanation behavior. |
+| Feedback loop | Implemented | The session runtime records feedback and updates upcoming candidates for skip, no-vocals, too-loud, too-slow, and like. |
+| TUI | MVP | Textual screen with timeline, now-playing, queue, why panel, privacy badge, footer shortcuts, and event log. |
+| Enrichment | Local scaffold | Local metadata enrichment is available; online providers are opt-in boundaries and do not make requests yet. |
+| Tests | Implemented | Unit tests cover planner, scanner, config, privacy, explanation, session feedback, enrichment, and TUI launch behavior. |
 
 ## Roadmap
 
 | Area | Planned behavior |
 | --- | --- |
-| TUI | Path timeline, current track, queue, feedback hotkeys, why panel, and privacy badge. |
 | Audio analysis | Local BPM, loudness, energy, vocalness, arousal/valence estimates, and confidence scoring. |
-| Feedback loop | Make `like`, `skip`, `too-loud`, `too-slow`, and `no-vocals` change the next candidate during a session. |
+| TUI playback integration | Wire the TUI session screen to actual playback controls rather than display-only session state. |
 | Profile learning | Better local profile rules and preference learning that users can inspect, export, and delete. |
+| Online enrichment | MusicBrainz, AcoustID, ListenBrainz, or cited web enrichment as explicit opt-in providers with cache and rate-limit handling. |
 | Spotify handoff | Optional playlist creation and URI handoff to the official Spotify client only. |
 | App shells | Future macOS app or web remote built on top of the same local-first core. |
 
@@ -68,6 +70,7 @@ uv run tonepath config init
 uv run tonepath config add-music-dir ~/Music
 uv run tonepath doctor
 uv run tonepath scan
+uv run tonepath
 uv run tonepath start "我现在很烦，想半小时后进入写代码状态，不要人声"
 ```
 
@@ -81,6 +84,12 @@ Scan one explicit directory instead of configured directories:
 
 ```bash
 uv run tonepath scan /path/to/music
+```
+
+Store source-attributed local metadata enrichment:
+
+```bash
+uv run tonepath enrich --provider local
 ```
 
 ## Config
@@ -142,6 +151,24 @@ uv run tonepath profile delete --all
 ```
 
 Local test music belongs outside git. The repository ignores `songs/`, `.venv/`, caches, and local database files.
+
+## Enrichment Boundaries
+
+Tonepath separates music understanding into explicit tiers:
+
+| Tier | Status | Behavior |
+| --- | --- | --- |
+| `local` | Implemented | Stores existing local metadata as source-attributed enrichment records. |
+| `features` | Planned | Will store local audio analysis such as BPM, loudness, energy, and vocalness. |
+| `online` | Planned | Will require explicit opt-in, cache results, cite sources, and avoid sending local file paths. |
+
+Online providers are blocked by default:
+
+```bash
+uv run tonepath enrich --provider musicbrainz
+```
+
+This exits without making a network request unless future support enables `network_mode = "online"` and explicit confirmation.
 
 ## Development
 

@@ -8,6 +8,7 @@ from typing import Literal
 
 
 FeedbackType = Literal["like", "skip", "too-loud", "too-slow", "no-vocals"]
+EnrichmentTier = Literal["local", "features", "online"]
 
 
 @dataclass(frozen=True)
@@ -84,3 +85,15 @@ class CandidateScore:
     confidence: str
     reasons: tuple[str, ...] = field(default_factory=tuple)
 
+
+@dataclass(frozen=True)
+class EnrichmentRecord:
+    """A source-attributed enrichment field for one local track."""
+
+    track_id: int
+    field: str
+    value: str
+    tier: EnrichmentTier
+    source: str
+    confidence: str
+    is_online: bool = False

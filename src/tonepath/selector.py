@@ -10,12 +10,17 @@ QUIET_GENRES = ("ambient", "classical", "instrumental", "lofi", "lo-fi", "downte
 VOCAL_HEAVY_GENRES = ("pop", "rap", "hip-hop", "r&b")
 
 
-def select_path(store: TonepathStore, plan: SessionPlan, limit_per_phase: int = 2) -> list[CandidateScore]:
+def select_path(
+    store: TonepathStore,
+    plan: SessionPlan,
+    limit_per_phase: int = 2,
+    excluded_track_ids: set[int] | None = None,
+) -> list[CandidateScore]:
     """Select tracks for every phase in a session plan."""
 
     tracks = store.list_tracks()
     selected: list[CandidateScore] = []
-    used_ids: set[int] = set()
+    used_ids: set[int] = set(excluded_track_ids or set())
     for phase in plan.phases:
         candidates = [
             score_track(store, track, phase)
@@ -98,4 +103,3 @@ def feature_fit(features: TrackFeatures, phase: SessionPhase) -> float:
     if features.valence_estimate is not None:
         score += 1.0 - abs(features.valence_estimate - phase.target_valence)
     return score
-
