@@ -255,8 +255,26 @@ class TonepathStore:
     def current_session_id(self) -> int | None:
         """Return the current session id if one is known."""
 
-        row = self.conn.execute("SELECT value FROM app_state WHERE key = 'current_session_id'").fetchone()
-        return int(row["value"]) if row else None
+        value = self.get_app_state("current_session_id")
+        return int(value) if value else None
+
+    def set_app_state(self, key: str, value: str) -> None:
+        """Set one local application state value."""
+
+        self.conn.execute("INSERT OR REPLACE INTO app_state (key, value) VALUES (?, ?)", (key, value))
+        self.conn.commit()
+
+    def get_app_state(self, key: str) -> str | None:
+        """Return one local application state value."""
+
+        row = self.conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+        return str(row["value"]) if row else None
+
+    def delete_app_state(self, key: str) -> None:
+        """Delete one local application state value."""
+
+        self.conn.execute("DELETE FROM app_state WHERE key = ?", (key,))
+        self.conn.commit()
 
     def record_feedback(
         self,

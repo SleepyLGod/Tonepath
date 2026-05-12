@@ -40,6 +40,7 @@ app.add_typer(privacy_app, name="privacy")
 app.add_typer(explain_app, name="explain")
 
 console = Console()
+CURRENT_MPV_PID_KEY = "current_mpv_pid"
 
 
 @app.callback(invoke_without_command=True)
@@ -83,24 +84,73 @@ def scan(path: Annotated[Path | None, typer.Argument(help="Optional local music 
 def start(
     prompt: Annotated[str, typer.Argument(help="State transition prompt.")],
     dry_run: Annotated[bool, typer.Option(help="Print the selected queue without launching mpv.")] = False,
+    background: Annotated[bool, typer.Option(help="Start mpv in the background and return immediately.")] = False,
     limit_per_phase: Annotated[int, typer.Option(help="Number of tracks to select per phase.")] = 2,
 ) -> None:
     """Start a state-transition music session."""
 
     store = TonepathStore()
-    plan = plan_session(prompt)
-    session_id = store.save_session(plan)
-    candidates = select_path(store, plan, limit_per_phase=limit_per_phase)
-    if not candidates:
-        console.print("No tracks found. Run `tonepath scan ~/Music` first.")
-        raise typer.Exit(code=1)
+    try:
+        plan = plan_session(prompt)
+        session_id = store.save_session(plan)
+        candidates = select_path(store, plan, limit_per_phase=limit_per_phase)
+        if not candidates:
+            console.print("No tracks found. Run `tonepath scan ~/Music` first.")
+            raise typer.Exit(code=1)
 
-    render_plan(candidates)
-    command = MpvAdapter().play([candidate.track.path for candidate in candidates], dry_run=dry_run)
-    if dry_run:
-        console.print("Dry-run mpv command:")
-        console.print(" ".join(command))
-    console.print(f"Session {session_id} started.")
+        render_plan(candidates)
+        paths = [candidate.track.path for candidate in candidates]
+        adapter = MpvAdapter()
+        command = adapter.build_command(paths)
+        if dry_run:
+            console.print("Dry-run mpv command:")
+            console.print(" ".join(command))
+            console.print(f"Session {session_id} planned.")
+            return
+
+        process = adapter.start(paths)
+        store.set_app_state(CURRENT_MPV_PID_KEY, str(process.pid))
+        console.print(f"Session {session_id} started with mpv PID {process.pid}.")
+        if background:
+            console.print("Run `tonepath stop` to stop background playback.")
+            return
+
+        try:
+            adapter.wait_and_stop_on_interrupt(process)
+        except KeyboardInterrupt:
+            console.print("Playback stopped.")
+            raise typer.Exit(code=130) from None
+        finally:
+            store.delete_app_state(CURRENT_MPV_PID_KEY)
+    finally:
+        store.close()
+
+
+@app.command()
+def stop() -> None:
+    """Stop Tonepath-managed mpv playback."""
+
+    store = TonepathStore()
+    try:
+        value = store.get_app_state(CURRENT_MPV_PID_KEY)
+        if value is None:
+            console.print("No active Tonepath playback.")
+            return
+        try:
+            pid = int(value)
+        except ValueError:
+            store.delete_app_state(CURRENT_MPV_PID_KEY)
+            console.print("No active Tonepath playback. Cleared stale PID.")
+            return
+
+        stopped = MpvAdapter().stop_pid(pid)
+        store.delete_app_state(CURRENT_MPV_PID_KEY)
+        if stopped:
+            console.print(f"Stopped Tonepath playback PID {pid}.")
+        else:
+            console.print("No active Tonepath playback. Cleared stale PID.")
+    finally:
+        store.close()
 
 
 @app.command()

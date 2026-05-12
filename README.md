@@ -58,7 +58,7 @@ On macOS, install `mpv` with:
 brew install mpv
 ```
 
-You can still use `--dry-run` without starting audible playback.
+You can still use `--dry-run` without starting audible playback. Foreground playback can be stopped with `Ctrl+C`.
 
 ## Quick Start
 
@@ -78,6 +78,13 @@ Preview the selected path and `mpv` command without playing audio:
 
 ```bash
 uv run tonepath start "from irritated to focused in 30 minutes, no vocals" --dry-run
+```
+
+Run playback in the background and stop only Tonepath-managed `mpv` later:
+
+```bash
+uv run tonepath start "from irritated to focused in 30 minutes" --background
+uv run tonepath stop
 ```
 
 Scan one explicit directory instead of configured directories:
