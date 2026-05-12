@@ -1,64 +1,94 @@
 # Tonepath
 
-Tonepath v0 is a local-first terminal music state-transition agent.
+Tonepath is a local-first terminal music state-transition agent.
 
-It scans your local music library, plans a listening path from your current state to a target state, plays tracks through `mpv`, adapts to feedback during the session, and stores preferences locally with full inspect/export/delete controls.
+It turns a request like `I am irritated and want to focus in 30 minutes` into an explainable listening path: current state -> intermediate phases -> target state. Tonepath scans your local music library, stores metadata locally, selects tracks with confidence labels, and plays local files through `mpv`.
 
-Tonepath does not stream platform audio, scrape Spotify/Kugou/NetEase URLs, run a public radio, generate music, or claim therapeutic effects.
+Tonepath is currently a working CLI prototype. It is not yet a full TUI, macOS app, web app, Spotify player, music generator, or therapy product.
 
-## Repository
+## Status
 
-- Local path: `/Users/von/Projects/music-agents/tonepath`
-- Remote: `https://github.com/SleepyLGod/Tonepath.git`
-- License: Apache-2.0 for Tonepath source code.
+| Area | Status | Notes |
+| --- | --- | --- |
+| Project setup | Implemented | Project-local `uv` workflow, CLI entrypoint, Apache-2.0 license. |
+| Config | Implemented | Local TOML config at `~/.tonepath/config.toml`; `TONEPATH_HOME` can isolate config and data. |
+| Library scanning | Implemented | Scans local audio files and reads metadata with Mutagen, falling back to filenames when tags are missing. |
+| Storage | Implemented | SQLite stores tracks, sessions, phases, feedback, profile summaries, and future audio feature rows. |
+| Path planning | Implemented | Deterministic prompt parsing and phase planning for state transitions such as irritated -> focus. |
+| Track selection | Implemented | Deterministic scoring with confidence labels; metadata-only selections are intentionally low confidence. |
+| Playback | Implemented | Local `mpv` adapter plus `--dry-run` command preview. |
+| CLI commands | Implemented | `doctor`, `config`, `scan`, `start`, `feedback`, `profile`, `privacy`, and `explain`. |
+| Explanations | Implemented | Explanations only cite stored metadata, features, phases, and feedback; unknown BPM/vocalness stays unknown. |
+| TUI | Placeholder | A basic Textual shell exists; the real product interface is not implemented yet. |
+| Tests | Implemented | Unit tests cover planner, scanner, config, privacy, and explanation behavior. |
 
-The Apache-2.0 license applies to this software project only. It does not grant rights to any user's local music library, platform catalog content, generated audio from third-party providers, or metadata governed by external platform terms.
+## Roadmap
 
-## Current Scope
+| Area | Planned behavior |
+| --- | --- |
+| TUI | Path timeline, current track, queue, feedback hotkeys, why panel, and privacy badge. |
+| Audio analysis | Local BPM, loudness, energy, vocalness, arousal/valence estimates, and confidence scoring. |
+| Feedback loop | Make `like`, `skip`, `too-loud`, `too-slow`, and `no-vocals` change the next candidate during a session. |
+| Profile learning | Better local profile rules and preference learning that users can inspect, export, and delete. |
+| Spotify handoff | Optional playlist creation and URI handoff to the official Spotify client only. |
+| App shells | Future macOS app or web remote built on top of the same local-first core. |
 
-- Local music scanning first.
-- Deterministic state-transition planning.
-- SQLite profile, feedback, play, and session storage.
-- Auditable explanations based only on stored metadata, features, phases, and feedback.
-- `mpv` playback adapter for local files.
-- CLI first, with a TUI entrypoint stub for the product surface.
+## Not In Scope
 
-## Spotify Boundary
+Tonepath v0 does not:
 
-Spotify support is intentionally out of v0 playback scope. A future adapter may create playlists or open Spotify URIs for official-client playback. Tonepath will not stream Spotify audio, overlap/mix Spotify content, run non-interactive webcasting, or depend on restricted Spotify audio feature/recommendation endpoints as core functionality.
+- play Spotify, Kugou, NetEase, or other platform audio inside Tonepath;
+- scrape platform audio URLs;
+- run public radio or non-interactive webcasting;
+- generate music;
+- mix, overlap, or remix platform content;
+- make mental health, therapy, or medical claims.
+
+## Requirements
+
+- Python 3.11+
+- `uv`
+- `mpv` for actual local playback
+
+On macOS, install `mpv` with:
+
+```bash
+brew install mpv
+```
+
+You can still use `--dry-run` without starting audible playback.
 
 ## Quick Start
 
 ```bash
-cd /Users/von/Projects/music-agents/tonepath
+git clone https://github.com/SleepyLGod/Tonepath.git
+cd Tonepath
 uv sync
 uv run tonepath config init
 uv run tonepath config add-music-dir ~/Music
 uv run tonepath doctor
-uv run python -m unittest discover -s tests
 uv run tonepath scan
 uv run tonepath start "我现在很烦，想半小时后进入写代码状态，不要人声"
 ```
 
-`uv sync` creates this project's isolated `.venv` under the repository. Use `uv run ...` from this directory instead of installing Tonepath into a global Python environment. Commit `uv.lock` for reproducible dependency resolution.
+Preview the selected path and `mpv` command without playing audio:
 
-Use `--dry-run` with `start` to print the selected path without launching `mpv`.
+```bash
+uv run tonepath start "from irritated to focused in 30 minutes, no vocals" --dry-run
+```
+
+Scan one explicit directory instead of configured directories:
+
+```bash
+uv run tonepath scan /path/to/music
+```
 
 ## Config
 
-Tonepath reads a small local TOML config from:
+Default config path:
 
 ```text
 ~/.tonepath/config.toml
-```
-
-Set `TONEPATH_HOME` to move both the config and local data directory for a project-local or test run.
-
-```bash
-uv run tonepath config init
-uv run tonepath config show
-uv run tonepath config add-music-dir ~/Music
-uv run tonepath scan
 ```
 
 Default config:
@@ -74,22 +104,60 @@ send_to_llm = false
 store_play_history = true
 ```
 
-`tonepath scan <dir>` still scans one explicit directory. `tonepath scan` with no argument scans every configured `music_dirs` entry.
+Useful commands:
 
-## Project Boundaries
+```bash
+uv run tonepath config show
+uv run tonepath config add-music-dir /path/to/music
+uv run tonepath doctor
+```
 
-- v0 uses local music files first.
-- v0 does not play Spotify audio inside Tonepath.
-- v0 does not scrape Kugou, NetEase, Spotify, or other platform audio URLs.
-- Future Spotify support is limited to metadata, playlist creation, and URI handoff to the official Spotify client.
-- Privacy is local by default.
+Set `TONEPATH_HOME` to use an isolated config and data directory for tests or alternate profiles:
 
-## Privacy
+```bash
+TONEPATH_HOME=/tmp/tonepath-demo uv run tonepath config init
+```
 
-Tonepath is offline by default. Local data is stored under:
+## Data and Privacy
+
+Tonepath is offline by default. v0 does not upload audio files, full library data, or playback history.
+
+Default local data path:
 
 ```text
 ~/.tonepath/tonepath.db
 ```
 
-Set `TONEPATH_HOME` or `data_dir` in the config to change the data directory. No audio files or full library data are uploaded by v0.
+Inspect local storage:
+
+```bash
+uv run tonepath privacy status
+uv run tonepath profile inspect
+```
+
+Delete local profile, session, feedback, and play data while keeping scanned tracks:
+
+```bash
+uv run tonepath profile delete --all
+```
+
+Local test music belongs outside git. The repository ignores `songs/`, `.venv/`, caches, and local database files.
+
+## Development
+
+Use the project-local environment:
+
+```bash
+uv sync
+uv run python -m unittest discover -s tests
+uv run tonepath doctor
+uv run tonepath --help
+```
+
+Do not install Tonepath into a global Python environment for development. Use `uv run ...` from the repository so commands use the project-local `.venv`.
+
+## License
+
+Tonepath source code is licensed under Apache-2.0.
+
+The license covers this software project only. It does not grant rights to user music libraries, third-party platform catalogs, generated audio from external providers, or metadata governed by external platform terms.
