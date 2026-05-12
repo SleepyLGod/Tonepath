@@ -5,9 +5,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tonepath.db import TonepathStore
-from tonepath.models import Track
+from tonepath.models import Track, TrackFeatures
 from tonepath.playback import MpvAdapter
-from tonepath.tui import TonepathApp
+from tonepath.tui import TonepathApp, confidence_label, queue_marker
 from textual.widgets import Input
 
 
@@ -83,10 +83,43 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                         self.assertIsNotNone(app.query_one("#queue"))
                         self.assertIsNotNone(app.query_one("#why-panel"))
                         self.assertIsNotNone(app.query_one("#event-log"))
+                        self.assertEqual(app.query_one("#queue").ordered_columns[3].label.plain, "Energy")
+                        self.assertIn("Fit", app.why_panel_text())
+                        self.assertIn("Evidence", app.why_panel_text())
+                        self.assertIn("Unknown", app.why_panel_text())
+                        self.assertIn("◇", app.timeline_text())
+                        self.assertIn("✓ offline", app.privacy_text())
+                        self.assertEqual(len(app.privacy_text().splitlines()), 3)
                         await pilot.press("w")
                         await pilot.press("s")
                         await pilot.press("q")
                 self.assertEqual(start.call_count, 0)
+
+    async def test_tui_queue_energy_uses_features_or_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                track_id = self.add_track(store, tmp, "a.mp3")
+                self.add_track(store, tmp, "b.mp3")
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id=track_id,
+                        energy=0.42,
+                        loudness=-18.0,
+                        feature_source="test",
+                        confidence="medium",
+                    )
+                )
+                store.close()
+
+                app = TonepathApp("我现在很烦，想半小时后进入写代码状态，不要人声")
+                async with app.run_test() as pilot:
+                    self.assertEqual(app.energy_text(track_id), "0.42")
+                    self.assertEqual(app.energy_text(None), "--")
+                    self.assertEqual(queue_marker("now"), "▶")
+                    self.assertEqual(queue_marker("+1"), "1")
+                    self.assertEqual(confidence_label("medium"), "med")
+                    await pilot.press("q")
 
     async def test_tui_play_starts_playback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

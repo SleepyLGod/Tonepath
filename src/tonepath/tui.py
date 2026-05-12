@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from rich.text import Text
+
 from tonepath import config
 from tonepath.db import TonepathStore
 from tonepath.models import FeedbackType
@@ -20,6 +22,11 @@ except ImportError as exc:  # pragma: no cover - exercised before dependency ins
 
 
 PROMPT_PLACEHOLDER = "我现在很烦，想半小时后进入写代码状态，不要人声"
+AMBER = "#d8a657"
+AMBER_DIM = "#8f7242"
+MUTED = "#a7afa5"
+TEAL = "#6fb7a6"
+TEXT = "#e6e0cf"
 
 
 class TonepathApp(App[None]):
@@ -32,69 +39,94 @@ class TonepathApp(App[None]):
     CSS = """
     Screen {
         layout: vertical;
+        background: #101311;
+        color: #e6e0cf;
     }
 
     #status-bar {
-        height: 3;
-        padding: 1 2;
+        height: 1;
+        padding: 0 2;
         text-style: bold;
-        background: $surface;
+        background: #1d211d;
+        color: #d8a657;
     }
 
     #prompt-input {
         height: 3;
         margin: 0 1;
+        background: #171b18;
+        border: round #8f7242;
+        border-title-color: #d8a657;
+        color: #e6e0cf;
     }
 
     #timeline {
         height: 3;
         padding: 1 2;
         text-style: bold;
-        background: $surface;
+        background: #151914;
+        color: #d8a657;
     }
 
     #body {
         height: 1fr;
+        padding: 0 1;
     }
 
     #left-pane {
-        width: 64%;
+        width: 60%;
         min-width: 50;
+        padding-right: 1;
     }
 
     #right-pane {
-        width: 36%;
+        width: 40%;
         min-width: 28;
-        border-left: solid $primary;
     }
 
     #now-playing,
     #privacy-badge,
     #why-panel {
         padding: 1 2;
+        background: #171b18;
+        border: round #3a4038;
+        color: #e6e0cf;
     }
 
     #now-playing {
         height: 8;
-        border-bottom: solid $primary;
+        margin-bottom: 1;
+        border-left: heavy #d8a657;
+        border-title-color: #d8a657;
     }
 
     #queue {
         height: 1fr;
+        background: #171b18;
+        border: round #3a4038;
+        border-title-color: #d8a657;
+        color: #e6e0cf;
     }
 
     #why-panel {
         height: 1fr;
-        border-bottom: solid $primary;
+        margin-bottom: 1;
+        border-title-color: #6fb7a6;
     }
 
     #privacy-badge {
-        height: 6;
+        height: 7;
+        border-title-color: #6fb7a6;
+        color: #6fb7a6;
     }
 
     #event-log {
-        height: 7;
-        border-top: solid $primary;
+        height: 6;
+        margin: 0 1;
+        background: #151914;
+        border: round #3a4038;
+        border-title-color: #a7afa5;
+        color: #a7afa5;
     }
     """
 
@@ -143,8 +175,9 @@ class TonepathApp(App[None]):
         """Load local state and render the first session view."""
 
         self.store = TonepathStore()
+        self.apply_panel_titles()
         table = self.query_one("#queue", DataTable)
-        table.add_columns("#", "Phase", "Track", "Conf")
+        table.add_columns("#", "Phase", "Track", "Energy", "Conf")
 
         if not self.store.list_tracks():
             self.show_empty_library()
@@ -345,11 +378,13 @@ class TonepathApp(App[None]):
             self.render_intake()
             return
 
-        self.query_one("#status-bar", Static).update(f"Tonepath · {self.playback_status} · / prompt · n new")
+        self.query_one("#status-bar", Static).update(
+            f"● {self.playback_status}   Local · {self.library_count()} tracks · offline · / prompt · n new"
+        )
         self.query_one("#timeline", Static).update(self.timeline_text())
-        self.query_one("#now-playing", Static).update(self.now_playing_text())
-        self.query_one("#why-panel", Static).update(self.why_panel_text())
-        self.query_one("#privacy-badge", Static).update(self.privacy_text())
+        self.query_one("#now-playing", Static).update(self.now_playing_renderable())
+        self.query_one("#why-panel", Static).update(self.why_panel_renderable())
+        self.query_one("#privacy-badge", Static).update(self.privacy_renderable())
         self.refresh_queue()
 
     def refresh_queue(self) -> None:
@@ -366,11 +401,13 @@ class TonepathApp(App[None]):
         candidates.extend((f"+{index}", candidate) for index, candidate in enumerate(self.runner.upcoming(), start=1))
 
         for position, candidate in candidates:
+            current = position == "now"
             table.add_row(
-                position,
-                candidate.phase.label,
-                truncate(track_label(candidate.track.title, candidate.track.path.name), 30),
-                candidate.confidence,
+                queue_cell(queue_marker(position), current=current, align="center"),
+                queue_cell(candidate.phase.label, current=current),
+                queue_cell(truncate(track_label(candidate.track.title, candidate.track.path.name), 28), current=current),
+                queue_cell(self.energy_text(candidate.track.id), current=current),
+                queue_cell(confidence_label(candidate.confidence), current=current),
             )
 
     def timeline_text(self) -> str:
@@ -382,7 +419,7 @@ class TonepathApp(App[None]):
         labels = [phase.label for phase in self.runner.active_plan().phases]
         if labels and labels[-1] == request.target_state:
             labels = labels[:-1]
-        path = " -> ".join([request.source_state, *labels, request.target_state])
+        path = "  ◇  ".join([request.source_state, *labels, request.target_state])
         return f"{path} · {request.duration_sec // 60}m"
 
     def now_playing_text(self) -> str:
@@ -393,15 +430,36 @@ class TonepathApp(App[None]):
         candidate = self.runner.current()
         if candidate is None:
             return "Queue is empty. Run `tonepath scan` to add local music."
+        features = self.store.get_features(candidate.track.id) if self.store is not None and candidate.track.id else None
+        energy = "--" if features is None or features.energy is None else f"{features.energy:.2f}"
+        loudness = "--" if features is None or features.loudness is None else f"{features.loudness:.1f} dBFS"
         return "\n".join(
             [
-                f"Status: {self.playback_status}",
-                f"Track: {truncate(track_label(candidate.track.title, candidate.track.path.name), 42)}",
-                f"Artist: {candidate.track.artist or 'unknown'}",
-                f"Phase: {candidate.phase.label}",
-                f"Confidence: {candidate.confidence}",
+                f"{self.playback_status} | {candidate.phase.label} | {confidence_label(candidate.confidence)}",
+                truncate(track_label(candidate.track.title, candidate.track.path.name), 44),
+                candidate.track.artist or "unknown artist",
+                f"energy {energy} · loudness {loudness}",
             ]
         )
+
+    def now_playing_renderable(self) -> Text:
+        """Return styled now-playing content."""
+
+        lines = self.now_playing_text().splitlines()
+        text = Text()
+        if not lines:
+            return text
+        text.append("● ", style=AMBER)
+        text.append(lines[0], style=f"bold {AMBER}")
+        for index, line in enumerate(lines[1:], start=1):
+            text.append("\n")
+            if index == 1:
+                text.append(line, style=f"bold {TEXT}")
+            elif index == 2:
+                text.append(line, style=MUTED)
+            else:
+                text.append(line, style=AMBER_DIM)
+        return text
 
     def why_panel_text(self) -> str:
         """Return a compact explanation preview for the right panel."""
@@ -416,71 +474,120 @@ class TonepathApp(App[None]):
         loudness = "unknown" if features is None or features.loudness is None else f"{features.loudness:.1f} dBFS"
         return "\n".join(
             [
-                "Why this",
-                f"Phase: {candidate.phase.label}",
-                f"Target energy: {candidate.phase.target_energy:.2f}",
-                f"Confidence: {candidate.confidence}",
-                f"Energy: {energy}",
-                f"Loudness: {loudness}",
-                "BPM: unknown",
-                "Vocalness: unknown",
-                "",
-                "Press w for full audit log.",
+                "Fit",
+                f"{candidate.phase.label} · target {candidate.phase.target_energy:.2f}",
+                "Evidence",
+                f"conf {confidence_label(candidate.confidence)} · energy {energy}",
+                f"loudness {loudness}",
+                "Unknown",
+                "BPM · vocalness",
             ]
         )
+
+    def why_panel_renderable(self) -> Text:
+        """Return styled explanation preview content."""
+
+        text = Text()
+        for line in self.why_panel_text().splitlines():
+            if line in {"Fit", "Evidence", "Unknown"}:
+                if text:
+                    text.append("\n")
+                style = TEAL if line == "Evidence" else AMBER if line == "Fit" else MUTED
+                text.append(line, style=f"bold {style}")
+                continue
+            text.append("\n")
+            style = MUTED if line == "BPM · vocalness" else TEXT
+            text.append(line, style=style)
+        return text
 
     def render_intake(self) -> None:
         """Render the no-session intake state."""
 
-        self.query_one("#status-bar", Static).update("Tonepath · Local state-transition player · offline")
+        self.query_one("#status-bar", Static).update(
+            f"● Ready   Local · {self.library_count()} tracks · offline · Enter to plan"
+        )
         self.query_one("#timeline", Static).update("No session yet · type a listening goal and press Enter")
         self.query_one("#now-playing", Static).update(
-            "\n".join(
-                [
-                    "No session yet",
-                    "Use the prompt bar above.",
-                    "Example:",
-                    PROMPT_PLACEHOLDER,
-                ]
+            Text.assemble(
+                ("● No session yet\n", f"bold {AMBER}"),
+                ("Use the prompt bar above.\n", TEXT),
+                ("Example:\n", MUTED),
+                (PROMPT_PLACEHOLDER, AMBER_DIM),
             )
         )
         self.query_one("#why-panel", Static).update(
-            self.why_panel_text()
+            self.why_panel_renderable()
         )
-        self.query_one("#privacy-badge", Static).update(self.privacy_text())
+        self.query_one("#privacy-badge", Static).update(self.privacy_renderable())
         table = self.query_one("#queue", DataTable)
         table.clear(columns=False)
+
+    def energy_text(self, track_id: int | None) -> str:
+        """Return a compact energy value for queue rows."""
+
+        if self.store is None or track_id is None:
+            return "--"
+        features = self.store.get_features(track_id)
+        if features is None or features.energy is None:
+            return "--"
+        return f"{features.energy:.2f}"
+
+    def library_count(self) -> int:
+        """Return the number of scanned tracks available to the TUI."""
+
+        if self.store is None:
+            return 0
+        return len(self.store.list_tracks())
 
     def privacy_text(self) -> str:
         """Return the local privacy badge text."""
 
         return "\n".join(
             [
-                "Privacy",
-                "Offline by default",
-                f"DB: {config.db_path().name}",
-                "Audio files stay local.",
+                "✓ offline",
+                f"✓ {config.db_path().name}",
+                "✓ audio local",
             ]
         )
+
+    def privacy_renderable(self) -> Text:
+        """Return styled local privacy badge content."""
+
+        text = Text()
+        for index, line in enumerate(self.privacy_text().splitlines()):
+            if index:
+                text.append("\n")
+            text.append(line, style=f"bold {TEAL}" if index == 0 else TEAL)
+        return text
 
     def show_empty_library(self) -> None:
         """Render setup guidance when no local tracks are available."""
 
         self.query_one("#timeline", Static).update("Tonepath: local library required")
         self.playback_status = "No tracks"
-        self.query_one("#status-bar", Static).update("Tonepath · setup required")
+        self.query_one("#status-bar", Static).update("● No tracks   Local · 0 tracks · offline · setup required")
         self.query_one("#prompt-input", Input).value = ""
         self.query_one("#now-playing", Static).update(
             "No scanned tracks.\n\nRun:\nuv run tonepath config add-music-dir /path/to/music\nuv run tonepath scan"
         )
         self.query_one("#why-panel", Static).update("Why panel appears after a local session starts.")
-        self.query_one("#privacy-badge", Static).update(self.privacy_text())
+        self.query_one("#privacy-badge", Static).update(self.privacy_renderable())
         self.log_event("No local tracks found.")
 
     def log_event(self, message: str) -> None:
         """Append an event to the bottom log panel."""
 
         self.query_one("#event-log", RichLog).write(message)
+
+    def apply_panel_titles(self) -> None:
+        """Apply stable panel titles to the TUI widgets."""
+
+        self.query_one("#now-playing", Static).border_title = "Now"
+        self.query_one("#queue", DataTable).border_title = "Queue"
+        self.query_one("#why-panel", Static).border_title = "Why"
+        self.query_one("#privacy-badge", Static).border_title = "Local Privacy"
+        self.query_one("#event-log", RichLog).border_title = "Events"
+        self.query_one("#prompt-input", Input).border_title = "Request"
 
 
 def run_tui(prompt: str | None = None) -> None:
@@ -502,3 +609,26 @@ def truncate(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
     return f"{value[: max(limit - 1, 0)]}…"
+
+
+def queue_marker(position: str) -> str:
+    """Return a compact queue marker for the current and upcoming tracks."""
+
+    if position == "now":
+        return "▶"
+    return position.replace("+", "")
+
+
+def queue_cell(value: str, current: bool = False, align: str | None = None) -> Text:
+    """Return a styled queue table cell."""
+
+    style = f"bold {AMBER}" if current else MUTED
+    return Text(value, style=style, justify=align)
+
+
+def confidence_label(confidence: str) -> str:
+    """Return a compact confidence label for narrow queue cells."""
+
+    if confidence == "medium":
+        return "med"
+    return confidence
