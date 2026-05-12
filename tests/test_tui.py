@@ -8,6 +8,7 @@ from tonepath.db import TonepathStore
 from tonepath.models import Track
 from tonepath.playback import MpvAdapter
 from tonepath.tui import TonepathApp
+from textual.widgets import Input
 
 
 class FakeProcess:
@@ -32,7 +33,42 @@ class FinishedProcess(FakeProcess):
 
 
 class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
-    async def test_tui_launches_session_screen(self) -> None:
+    async def test_tui_launches_intake_without_session_or_playback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_track(store, tmp, "a.mp3")
+                self.add_track(store, tmp, "b.mp3")
+                store.close()
+
+                app = TonepathApp()
+                with patch.object(MpvAdapter, "start", return_value=FakeProcess()) as start:
+                    async with app.run_test() as pilot:
+                        self.assertIsNotNone(app.query_one("#prompt-input", Input))
+                        self.assertIsNone(app.runner)
+                        await pilot.press("space")
+                        await pilot.press("s")
+                        await pilot.press("q")
+                self.assertEqual(start.call_count, 0)
+
+    async def test_tui_prompt_submit_creates_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_track(store, tmp, "a.mp3")
+                self.add_track(store, tmp, "b.mp3")
+                store.close()
+
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    prompt_input = app.query_one("#prompt-input", Input)
+                    prompt_input.value = "我现在很烦，想半小时后进入写代码状态，不要人声"
+                    await pilot.press("enter")
+                    self.assertIsNotNone(app.runner)
+                    self.assertIn("irritated", app.timeline_text())
+                    await pilot.press("q")
+
+    async def test_tui_launches_session_screen_with_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
                 store = TonepathStore()

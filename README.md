@@ -20,7 +20,7 @@ Tonepath is currently a working terminal prototype. It is not a macOS app, web a
 | CLI commands | Implemented | `doctor`, `config`, `scan`, `start`, `feedback`, `profile`, `privacy`, `explain`, and `enrich`. |
 | Explanations | Implemented | Explanations only cite stored metadata, features, phases, and feedback; unknown BPM/vocalness stays unknown. |
 | Feedback loop | Implemented | The session runtime records feedback and updates upcoming candidates for skip, no-vocals, too-loud, too-slow, and like. |
-| TUI | MVP | Textual screen with timeline, controlled playback, queue, why panel, privacy badge, footer shortcuts, and event log. It does not autoplay on launch. |
+| TUI | MVP | Textual screen with prompt intake, timeline, controlled playback, queue, why panel, privacy badge, footer shortcuts, and event log. It does not autoplay on launch. |
 | Enrichment | Local scaffold | Local metadata enrichment is available; online providers are opt-in boundaries and do not make requests yet. |
 | Audio analysis | Basic | `tonepath analyze --features basic` stores local feature rows; WAV uses built-in PCM analysis, and ffmpeg-backed formats such as MP3, FLAC, and M4A get approximate loudness/energy when decodable. |
 | Tests | Implemented | Unit tests cover planner, scanner, config, privacy, explanation, session feedback, enrichment, and TUI launch behavior. |
@@ -77,9 +77,14 @@ uv run tonepath tui "我现在很烦，想半小时后进入写代码状态，�
 uv run tonepath start "我现在很烦，想半小时后进入写代码状态，不要人声"
 ```
 
-The TUI opens with a planned local session but does not autoplay. Playback events are recorded locally in SQLite for future preference learning. Use these keys:
+The TUI opens as a local workbench. Run `uv run tonepath` or `uv run tonepath tui`, type a listening goal, and press Enter to create a session. Passing a prompt to `tonepath tui "..."` creates the session immediately, but still does not autoplay. Playback events are recorded locally in SQLite for future preference learning.
+
+Use these keys:
 
 ```text
+/          focus prompt
+n          new prompt
+Enter      submit prompt when input is focused
 space / p  play current track
 x          stop playback
 s          skip

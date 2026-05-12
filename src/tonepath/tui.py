@@ -14,12 +14,12 @@ try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical
-    from textual.widgets import DataTable, Footer, Header, RichLog, Static
+    from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
 except ImportError as exc:  # pragma: no cover - exercised before dependency install
     raise RuntimeError("Textual is not installed. Run `uv sync` before launching the TUI.") from exc
 
 
-DEFAULT_TUI_PROMPT = "我现在很烦，想半小时后进入写代码状态，不要人声"
+PROMPT_PLACEHOLDER = "我现在很烦，想半小时后进入写代码状态，不要人声"
 
 
 class TonepathApp(App[None]):
@@ -32,6 +32,18 @@ class TonepathApp(App[None]):
     CSS = """
     Screen {
         layout: vertical;
+    }
+
+    #status-bar {
+        height: 3;
+        padding: 1 2;
+        text-style: bold;
+        background: $surface;
+    }
+
+    #prompt-input {
+        height: 3;
+        margin: 0 1;
     }
 
     #timeline {
@@ -87,6 +99,8 @@ class TonepathApp(App[None]):
     """
 
     BINDINGS = [
+        Binding("/", "focus_prompt", "Prompt"),
+        Binding("n", "new_prompt", "New"),
         Binding("space", "play", "Play"),
         Binding("p", "play", "Play", show=False),
         Binding("x", "stop_playback", "Stop"),
@@ -99,9 +113,9 @@ class TonepathApp(App[None]):
         Binding("q", "quit", "Quit"),
     ]
 
-    def __init__(self, prompt: str = DEFAULT_TUI_PROMPT) -> None:
+    def __init__(self, prompt: str | None = None) -> None:
         super().__init__()
-        self.prompt = prompt
+        self.initial_prompt = prompt
         self.store: TonepathStore | None = None
         self.runner: SessionRunner | None = None
         self.playback: PlaybackController | None = None
@@ -112,6 +126,8 @@ class TonepathApp(App[None]):
         """Compose the terminal product surface with Textual built-ins."""
 
         yield Header()
+        yield Static("", id="status-bar")
+        yield Input(placeholder=PROMPT_PLACEHOLDER, id="prompt-input")
         yield Static("", id="timeline")
         with Horizontal(id="body"):
             with Vertical(id="left-pane"):
@@ -134,11 +150,13 @@ class TonepathApp(App[None]):
             self.show_empty_library()
             return
 
-        self.runner = SessionRunner(self.store, self.prompt)
         self.playback = PlaybackController(self.store)
-        self.playback_status = "Ready"
-        self.log_event(f"Ready. Press Space to play. Session: {self.prompt}")
-        self.refresh_session_view()
+        if self.initial_prompt is None:
+            self.render_intake()
+            self.log_event("Type a listening goal, then press Enter.")
+            self.query_one("#prompt-input", Input).focus()
+            return
+        self.create_session(self.initial_prompt)
 
     def on_unmount(self) -> None:
         """Close local storage when the terminal app exits."""
@@ -158,6 +176,9 @@ class TonepathApp(App[None]):
     def action_skip(self) -> None:
         """Skip the current candidate and refresh upcoming recommendations."""
 
+        if self.runner is None:
+            self.log_event("Enter a listening goal first.")
+            return
         was_playing = self.playback_status == "Playing"
         self.apply_feedback("skip")
         if was_playing:
@@ -174,6 +195,10 @@ class TonepathApp(App[None]):
     def action_play(self) -> None:
         """Start playback for the current candidate."""
 
+        if self.runner is None:
+            self.log_event("Enter a listening goal first.")
+            self.query_one("#prompt-input", Input).focus()
+            return
         self.start_current_playback()
 
     def action_stop_playback(self) -> None:
@@ -186,6 +211,24 @@ class TonepathApp(App[None]):
         self.playback_status = "Stopped"
         self.log_event("Stopped playback." if stopped else "No active Tonepath playback.")
         self.refresh_session_view()
+
+    def action_focus_prompt(self) -> None:
+        """Focus the prompt input bar."""
+
+        self.query_one("#prompt-input", Input).focus()
+
+    def action_new_prompt(self) -> None:
+        """Return to the prompt intake state."""
+
+        if self.playback is not None:
+            self.playback.stop_current()
+        self.runner = None
+        self.playback_status = "Ready"
+        prompt_input = self.query_one("#prompt-input", Input)
+        prompt_input.value = ""
+        self.render_intake()
+        prompt_input.focus()
+        self.log_event("New request. Type a listening goal, then press Enter.")
 
     def action_like(self) -> None:
         """Record local like feedback."""
@@ -211,7 +254,7 @@ class TonepathApp(App[None]):
         """Write the current auditable explanation to the event log."""
 
         if self.runner is None:
-            self.log_event("No active session.")
+            self.log_event("Enter a listening goal first.")
             return
         self.log_event(self.runner.current_explanation())
 
@@ -223,6 +266,35 @@ class TonepathApp(App[None]):
             return
         message = self.runner.apply_feedback(feedback_type)
         self.log_event(message)
+        self.refresh_session_view()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Create a new local session when the prompt input is submitted."""
+
+        if event.input.id != "prompt-input":
+            return
+        self.create_session(event.value)
+
+    def create_session(self, prompt: str) -> None:
+        """Create a local session from a user prompt and refresh the TUI."""
+
+        cleaned = prompt.strip()
+        if not cleaned:
+            self.log_event("Prompt is empty. Type a listening goal first.")
+            self.query_one("#prompt-input", Input).focus()
+            return
+        if self.store is None:
+            self.log_event("Local store is unavailable.")
+            return
+        if self.playback is not None:
+            self.playback.stop_current()
+        self.runner = SessionRunner(self.store, cleaned)
+        self.playback = self.playback or PlaybackController(self.store)
+        self.playback_status = "Ready"
+        prompt_input = self.query_one("#prompt-input", Input)
+        prompt_input.value = cleaned
+        prompt_input.blur()
+        self.log_event(f"Ready. Press Space to play. Session: {cleaned}")
         self.refresh_session_view()
 
     def start_current_playback(self, mark_previous_skipped: bool = False) -> None:
@@ -270,11 +342,13 @@ class TonepathApp(App[None]):
         """Refresh timeline, queue, why panel, and privacy badge."""
 
         if self.runner is None:
+            self.render_intake()
             return
 
+        self.query_one("#status-bar", Static).update(f"Tonepath · {self.playback_status} · / prompt · n new")
         self.query_one("#timeline", Static).update(self.timeline_text())
         self.query_one("#now-playing", Static).update(self.now_playing_text())
-        self.query_one("#why-panel", Static).update(self.runner.current_explanation())
+        self.query_one("#why-panel", Static).update(self.why_panel_text())
         self.query_one("#privacy-badge", Static).update(self.privacy_text())
         self.refresh_queue()
 
@@ -304,9 +378,12 @@ class TonepathApp(App[None]):
 
         if self.runner is None:
             return "Tonepath"
-        phase_labels = " -> ".join(phase.label for phase in self.runner.active_plan().phases)
         request = self.runner.active_plan().request
-        return f"{request.source_state} -> {phase_labels} -> {request.target_state} · {request.duration_sec // 60}m"
+        labels = [phase.label for phase in self.runner.active_plan().phases]
+        if labels and labels[-1] == request.target_state:
+            labels = labels[:-1]
+        path = " -> ".join([request.source_state, *labels, request.target_state])
+        return f"{path} · {request.duration_sec // 60}m"
 
     def now_playing_text(self) -> str:
         """Return the now-playing panel text."""
@@ -326,6 +403,54 @@ class TonepathApp(App[None]):
             ]
         )
 
+    def why_panel_text(self) -> str:
+        """Return a compact explanation preview for the right panel."""
+
+        if self.runner is None:
+            return "Why panel\n\nA verifiable explanation appears after Tonepath creates a listening path."
+        candidate = self.runner.current()
+        if candidate is None:
+            return "Why panel\n\nNo current track."
+        features = self.store.get_features(candidate.track.id) if self.store is not None and candidate.track.id else None
+        energy = "unknown" if features is None or features.energy is None else f"{features.energy:.2f}"
+        loudness = "unknown" if features is None or features.loudness is None else f"{features.loudness:.1f} dBFS"
+        return "\n".join(
+            [
+                "Why this",
+                f"Phase: {candidate.phase.label}",
+                f"Target energy: {candidate.phase.target_energy:.2f}",
+                f"Confidence: {candidate.confidence}",
+                f"Energy: {energy}",
+                f"Loudness: {loudness}",
+                "BPM: unknown",
+                "Vocalness: unknown",
+                "",
+                "Press w for full audit log.",
+            ]
+        )
+
+    def render_intake(self) -> None:
+        """Render the no-session intake state."""
+
+        self.query_one("#status-bar", Static).update("Tonepath · Local state-transition player · offline")
+        self.query_one("#timeline", Static).update("No session yet · type a listening goal and press Enter")
+        self.query_one("#now-playing", Static).update(
+            "\n".join(
+                [
+                    "No session yet",
+                    "Use the prompt bar above.",
+                    "Example:",
+                    PROMPT_PLACEHOLDER,
+                ]
+            )
+        )
+        self.query_one("#why-panel", Static).update(
+            self.why_panel_text()
+        )
+        self.query_one("#privacy-badge", Static).update(self.privacy_text())
+        table = self.query_one("#queue", DataTable)
+        table.clear(columns=False)
+
     def privacy_text(self) -> str:
         """Return the local privacy badge text."""
 
@@ -343,6 +468,8 @@ class TonepathApp(App[None]):
 
         self.query_one("#timeline", Static).update("Tonepath: local library required")
         self.playback_status = "No tracks"
+        self.query_one("#status-bar", Static).update("Tonepath · setup required")
+        self.query_one("#prompt-input", Input).value = ""
         self.query_one("#now-playing", Static).update(
             "No scanned tracks.\n\nRun:\nuv run tonepath config add-music-dir /path/to/music\nuv run tonepath scan"
         )
@@ -356,7 +483,7 @@ class TonepathApp(App[None]):
         self.query_one("#event-log", RichLog).write(message)
 
 
-def run_tui(prompt: str = DEFAULT_TUI_PROMPT) -> None:
+def run_tui(prompt: str | None = None) -> None:
     """Run the Tonepath terminal interface."""
 
     TonepathApp(prompt=prompt).run()
