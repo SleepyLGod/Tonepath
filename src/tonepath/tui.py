@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from tonepath import config
 from tonepath.db import TonepathStore
 from tonepath.models import FeedbackType
@@ -104,6 +106,7 @@ class TonepathApp(App[None]):
         self.runner: SessionRunner | None = None
         self.playback: PlaybackController | None = None
         self.playback_status = "Ready"
+        self.playback_timer: Any | None = None
 
     def compose(self) -> ComposeResult:
         """Compose the terminal product surface with Textual built-ins."""
@@ -245,6 +248,22 @@ class TonepathApp(App[None]):
             return
         self.playback_status = "Playing"
         self.log_event(f"Playing: {track_label(candidate.track.title, candidate.track.path.name)}")
+        self.ensure_playback_polling()
+        self.refresh_session_view()
+
+    def ensure_playback_polling(self) -> None:
+        """Start a lightweight TUI-local poller for natural mpv exits."""
+
+        if self.playback_timer is None:
+            self.playback_timer = self.set_interval(0.5, self.poll_playback_finished)
+
+    def poll_playback_finished(self) -> None:
+        """Update local session state when mpv exits without an explicit stop."""
+
+        if self.playback is None or not self.playback.finish_if_exited():
+            return
+        self.playback_status = "Finished"
+        self.log_event("Playback finished.")
         self.refresh_session_view()
 
     def refresh_session_view(self) -> None:

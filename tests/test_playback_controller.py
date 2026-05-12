@@ -11,6 +11,10 @@ class FakeProcess:
     def __init__(self, pid: int) -> None:
         self.pid = pid
         self.terminated = False
+        self.returncode: int | None = None
+
+    def poll(self) -> int | None:
+        return self.returncode
 
 
 class FakeAdapter:
@@ -97,6 +101,24 @@ class PlaybackControllerTest(unittest.TestCase):
             self.assertIsNotNone(row["ended_at"])
             self.assertEqual(row["skipped"], 1)
             self.assertIsNone(store.get_app_state(CURRENT_PLAY_ID_KEY))
+            store.close()
+
+    def test_finish_if_exited_clears_play_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            track_id = self.add_track(store, tmp)
+            adapter = FakeAdapter()
+            controller = PlaybackController(store, adapter=adapter)  # type: ignore[arg-type]
+            process = controller.start([Path(tmp) / "song.mp3"], session_id=None, track_id=track_id)
+            process.returncode = 0
+            finished = controller.finish_if_exited()
+            play_id = store.get_app_state(CURRENT_PLAY_ID_KEY)
+            row = store.conn.execute("SELECT ended_at, skipped FROM plays").fetchone()
+            self.assertTrue(finished)
+            self.assertIsNone(play_id)
+            self.assertIsNone(store.get_app_state(CURRENT_MPV_PID_KEY))
+            self.assertIsNotNone(row["ended_at"])
+            self.assertEqual(row["skipped"], 0)
             store.close()
 
     def add_track(self, store: TonepathStore, tmp: str) -> int:

@@ -1,10 +1,12 @@
 import math
+import subprocess
 import tempfile
 import unittest
 import wave
 from pathlib import Path
+from unittest.mock import patch
 
-from tonepath.analysis import analyze_library, analyze_track_basic
+from tonepath.analysis import analyze_library, analyze_track_basic, analyze_with_ffmpeg, loudness_to_unit
 from tonepath.db import TonepathStore
 from tonepath.models import Track
 
@@ -59,10 +61,58 @@ class AnalysisTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "song.mp3"
             path.write_bytes(b"not decoded as audio")
-            features = analyze_track_basic(track_for(path, "song.mp3", track_id=1))
+            with patch("tonepath.analysis.shutil.which", return_value=None):
+                features = analyze_track_basic(track_for(path, "song.mp3", track_id=1))
             self.assertEqual(features.confidence, "low")
             self.assertIsNone(features.energy)
             self.assertIsNone(features.loudness)
+
+    def test_ffmpeg_analysis_extracts_mean_volume(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "song.mp3"
+            path.write_bytes(b"fake")
+            result = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stderr="[Parsed_volumedetect_0] mean_volume: -18.4 dB\n",
+            )
+            with patch("tonepath.analysis.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
+                "tonepath.analysis.subprocess.run",
+                return_value=result,
+            ):
+                features = analyze_track_basic(track_for(path, "song.mp3", track_id=1))
+            self.assertEqual(features.confidence, "medium")
+            self.assertEqual(features.loudness, -18.4)
+            self.assertIsNotNone(features.energy)
+
+    def test_loudness_mapping_has_useful_music_range(self) -> None:
+        self.assertLess(loudness_to_unit(-18.0), loudness_to_unit(-9.0))
+        self.assertAlmostEqual(loudness_to_unit(-30.0), 0.0)
+        self.assertAlmostEqual(loudness_to_unit(0.0), 1.0)
+
+    def test_ffmpeg_analysis_handles_common_audio_suffixes_without_crashing(self) -> None:
+        result = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stderr="[Parsed_volumedetect_0] mean_volume: -24.0 dB\n",
+        )
+        with patch("tonepath.analysis.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
+            "tonepath.analysis.subprocess.run",
+            return_value=result,
+        ):
+            for suffix in (".mp3", ".flac", ".m4a", ".wav"):
+                with self.subTest(suffix=suffix):
+                    features = analyze_with_ffmpeg(Path(f"/tmp/song{suffix}"))
+                    self.assertIsNotNone(features)
+
+    def test_ffmpeg_analysis_returns_none_for_unreadable_output(self) -> None:
+        result = subprocess.CompletedProcess(args=[], returncode=1, stderr="invalid data")
+        with patch("tonepath.analysis.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
+            "tonepath.analysis.subprocess.run",
+            return_value=result,
+        ):
+            features = analyze_with_ffmpeg(Path("/tmp/song.mp3"))
+        self.assertIsNone(features)
 
 
 def track_for(path: Path, title: str, track_id: int | None = None) -> Track:

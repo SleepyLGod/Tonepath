@@ -82,6 +82,14 @@ class PlaybackController:
         self.clear(mark_skipped=mark_skipped)
         return stopped
 
+    def finish_if_exited(self) -> bool:
+        """Clear playback state when the managed process has naturally exited."""
+
+        if self.process is None or self.process.poll() is None:
+            return False
+        self.clear()
+        return True
+
     def current_pid(self) -> int | None:
         """Return the recorded Tonepath mpv PID if it is valid."""
 

@@ -26,6 +26,11 @@ class FakeProcess:
         return None
 
 
+class FinishedProcess(FakeProcess):
+    def poll(self) -> int | None:
+        return 0
+
+
 class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
     async def test_tui_launches_session_screen(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -112,6 +117,27 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                         await pilot.press("x")
                         await pilot.press("q")
                 self.assertTrue(stop.called)
+
+    async def test_tui_natural_finish_records_play_end(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
+                store = TonepathStore()
+                self.add_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                with patch.object(MpvAdapter, "start", return_value=FinishedProcess()):
+                    async with app.run_test() as pilot:
+                        await pilot.press("space")
+                        app.poll_playback_finished()
+                        await pilot.press("q")
+
+                store = TonepathStore()
+                row = store.conn.execute("SELECT ended_at, skipped FROM plays").fetchone()
+                self.assertIsNotNone(row["ended_at"])
+                self.assertEqual(row["skipped"], 0)
+                store.close()
 
     def add_track(self, store: TonepathStore, tmp: str, name: str) -> int:
         path = Path(tmp) / name
