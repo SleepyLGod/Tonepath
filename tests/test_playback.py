@@ -1,4 +1,5 @@
 import signal
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -31,6 +32,15 @@ class PlaybackTest(unittest.TestCase):
         command = MpvAdapter().build_command([Path("/tmp/a.mp3")])
         self.assertEqual(command[:4], ["mpv", "--no-terminal", "--force-window=no", "--audio-display=no"])
         self.assertEqual(command[-1], "/tmp/a.mp3")
+
+    def test_start_suppresses_child_process_output(self) -> None:
+        with patch.object(MpvAdapter, "available", return_value=True), patch("tonepath.playback.subprocess.Popen") as popen:
+            MpvAdapter().start([Path("/tmp/a.mp3")])
+        popen.assert_called_once()
+        kwargs = popen.call_args.kwargs
+        self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertIs(kwargs["stdout"], subprocess.DEVNULL)
+        self.assertIs(kwargs["stderr"], subprocess.DEVNULL)
 
     def test_foreground_playback_terminates_on_keyboard_interrupt(self) -> None:
         process = FakeInterruptProcess()

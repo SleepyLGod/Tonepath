@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import signal
 import subprocess
 import time
-import os
 from pathlib import Path
 
 
@@ -31,7 +31,12 @@ class MpvAdapter:
 
         if not self.available():
             raise RuntimeError("mpv is not installed or not available on PATH. Install mpv or run tonepath doctor.")
-        return subprocess.Popen(self.build_command(paths))
+        return subprocess.Popen(
+            self.build_command(paths),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     def wait_and_stop_on_interrupt(self, process: subprocess.Popen[bytes]) -> int:
         """Wait for playback, stopping mpv cleanly when the user interrupts."""

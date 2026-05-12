@@ -27,9 +27,19 @@ def explain_candidate(store: TonepathStore, candidate: CandidateScore) -> str:
         lines.append("- Duration：unknown")
 
     if features is None:
+        lines.append("- Energy：unknown（未做本地音频分析）")
+        lines.append("- Loudness：unknown（未做本地音频分析）")
         lines.append("- BPM：unknown（未做本地音频分析）")
         lines.append("- Vocalness：unknown（未做本地音频分析）")
     else:
+        if features.energy is None:
+            lines.append("- Energy：unknown")
+        else:
+            lines.append(f"- Energy：{features.energy:.2f}")
+        if features.loudness is None:
+            lines.append("- Loudness：unknown")
+        else:
+            lines.append(f"- Loudness：{features.loudness:.1f} dBFS")
         if features.bpm is None:
             lines.append("- BPM：unknown")
         else:
@@ -47,4 +57,3 @@ def explain_candidate(store: TonepathStore, candidate: CandidateScore) -> str:
     for reason in candidate.reasons:
         lines.append(f"- Scoring note：{reason}")
     return "\n".join(lines)
-

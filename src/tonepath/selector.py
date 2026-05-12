@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tonepath.analysis import loudness_to_unit
 from tonepath.db import TonepathStore
 from tonepath.models import CandidateScore, SessionPlan, SessionPhase, Track, TrackFeatures
 
@@ -59,6 +60,10 @@ def score_track(store: TonepathStore, track: Track, phase: SessionPhase) -> Cand
         confidence = features.confidence
         score += feature_fit(features, phase)
         reasons.append(f"audio features available from {features.feature_source}")
+        if features.energy is not None:
+            reasons.append("energy feature contributes to phase fit")
+        if features.loudness is not None:
+            reasons.append("loudness feature contributes to phase fit")
     else:
         reasons.append("audio features unavailable; selection uses metadata and feedback")
 
@@ -98,6 +103,8 @@ def feature_fit(features: TrackFeatures, phase: SessionPhase) -> float:
     score = 0.0
     if features.energy is not None:
         score += 1.0 - abs(features.energy - phase.target_energy)
+    if features.loudness is not None:
+        score += 1.0 - abs(loudness_to_unit(features.loudness) - phase.target_energy)
     if features.arousal_estimate is not None:
         score += 1.0 - abs(features.arousal_estimate - phase.target_arousal)
     if features.valence_estimate is not None:

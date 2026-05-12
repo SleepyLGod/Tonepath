@@ -5,21 +5,27 @@ from __future__ import annotations
 from tonepath import config
 from tonepath.db import TonepathStore
 from tonepath.models import FeedbackType
+from tonepath.playback_controller import PlaybackController
 from tonepath.session import SessionRunner
 
 try:
     from textual.app import App, ComposeResult
+    from textual.binding import Binding
     from textual.containers import Horizontal, Vertical
     from textual.widgets import DataTable, Footer, Header, RichLog, Static
 except ImportError as exc:  # pragma: no cover - exercised before dependency install
     raise RuntimeError("Textual is not installed. Run `uv sync` before launching the TUI.") from exc
 
 
-DEFAULT_TUI_PROMPT = "from irritated to focused in 30 minutes, no vocals"
+DEFAULT_TUI_PROMPT = "我现在很烦，想半小时后进入写代码状态，不要人声"
 
 
 class TonepathApp(App[None]):
     """Terminal session screen for a local Tonepath listening path."""
+
+    TITLE = "Tonepath"
+    SUB_TITLE = "Local state-transition player"
+    ENABLE_COMMAND_PALETTE = False
 
     CSS = """
     Screen {
@@ -38,13 +44,13 @@ class TonepathApp(App[None]):
     }
 
     #left-pane {
-        width: 58%;
+        width: 64%;
         min-width: 50;
     }
 
     #right-pane {
-        width: 42%;
-        min-width: 38;
+        width: 36%;
+        min-width: 28;
         border-left: solid $primary;
     }
 
@@ -79,13 +85,16 @@ class TonepathApp(App[None]):
     """
 
     BINDINGS = [
-        ("s", "skip", "Skip"),
-        ("l", "like", "Like"),
-        ("v", "no_vocals", "No vocals"),
-        ("+", "too_loud", "Too loud"),
-        ("-", "too_slow", "Too slow"),
-        ("w", "why", "Why"),
-        ("q", "quit", "Quit"),
+        Binding("space", "play", "Play"),
+        Binding("p", "play", "Play", show=False),
+        Binding("x", "stop_playback", "Stop"),
+        Binding("s", "skip", "Skip"),
+        Binding("l", "like", "Like"),
+        Binding("v", "no_vocals", "No vocals"),
+        Binding("+", "too_loud", "Quieter", show=False),
+        Binding("-", "too_slow", "More energy", show=False),
+        Binding("w", "why", "Why"),
+        Binding("q", "quit", "Quit"),
     ]
 
     def __init__(self, prompt: str = DEFAULT_TUI_PROMPT) -> None:
@@ -93,6 +102,8 @@ class TonepathApp(App[None]):
         self.prompt = prompt
         self.store: TonepathStore | None = None
         self.runner: SessionRunner | None = None
+        self.playback: PlaybackController | None = None
+        self.playback_status = "Ready"
 
     def compose(self) -> ComposeResult:
         """Compose the terminal product surface with Textual built-ins."""
@@ -114,26 +125,64 @@ class TonepathApp(App[None]):
 
         self.store = TonepathStore()
         table = self.query_one("#queue", DataTable)
-        table.add_columns("Pos", "Phase", "Track", "Conf", "Score")
+        table.add_columns("#", "Phase", "Track", "Conf")
 
         if not self.store.list_tracks():
             self.show_empty_library()
             return
 
         self.runner = SessionRunner(self.store, self.prompt)
-        self.log_event(f"Started local session: {self.prompt}")
+        self.playback = PlaybackController(self.store)
+        self.playback_status = "Ready"
+        self.log_event(f"Ready. Press Space to play. Session: {self.prompt}")
         self.refresh_session_view()
 
     def on_unmount(self) -> None:
         """Close local storage when the terminal app exits."""
 
+        if self.playback is not None:
+            self.playback.stop_current()
         if self.store is not None:
             self.store.close()
+
+    def action_quit(self) -> None:
+        """Stop local playback before exiting the TUI."""
+
+        if self.playback is not None:
+            self.playback.stop_current()
+        self.exit()
 
     def action_skip(self) -> None:
         """Skip the current candidate and refresh upcoming recommendations."""
 
+        was_playing = self.playback_status == "Playing"
         self.apply_feedback("skip")
+        if was_playing:
+            self.start_current_playback(mark_previous_skipped=True)
+            return
+        candidate = self.runner.current() if self.runner is not None else None
+        if candidate is None:
+            self.playback_status = "No tracks"
+            self.log_event("Skipped. No next track available.")
+        else:
+            self.log_event(f"Skipped to: {candidate.track.title or candidate.track.path.name}")
+        self.refresh_session_view()
+
+    def action_play(self) -> None:
+        """Start playback for the current candidate."""
+
+        self.start_current_playback()
+
+    def action_stop_playback(self) -> None:
+        """Stop active playback without exiting the TUI."""
+
+        if self.playback is None:
+            self.log_event("No playback controller.")
+            return
+        stopped = self.playback.stop_current()
+        self.playback_status = "Stopped"
+        self.log_event("Stopped playback." if stopped else "No active Tonepath playback.")
+        self.refresh_session_view()
 
     def action_like(self) -> None:
         """Record local like feedback."""
@@ -173,6 +222,31 @@ class TonepathApp(App[None]):
         self.log_event(message)
         self.refresh_session_view()
 
+    def start_current_playback(self, mark_previous_skipped: bool = False) -> None:
+        """Start playback for the current candidate if one exists."""
+
+        if self.runner is None or self.playback is None:
+            return
+        candidate = self.runner.current()
+        if candidate is None:
+            self.playback_status = "No tracks"
+            self.log_event("No current track to play.")
+            self.refresh_session_view()
+            return
+        try:
+            self.playback.replace(
+                [candidate.track.path],
+                session_id=self.runner.session_id,
+                track_id=candidate.track.id,
+                mark_current_skipped=mark_previous_skipped,
+            )
+        except RuntimeError as exc:
+            self.log_event(str(exc))
+            return
+        self.playback_status = "Playing"
+        self.log_event(f"Playing: {track_label(candidate.track.title, candidate.track.path.name)}")
+        self.refresh_session_view()
+
     def refresh_session_view(self) -> None:
         """Refresh timeline, queue, why panel, and privacy badge."""
 
@@ -202,9 +276,8 @@ class TonepathApp(App[None]):
             table.add_row(
                 position,
                 candidate.phase.label,
-                candidate.track.title or "unknown",
+                truncate(track_label(candidate.track.title, candidate.track.path.name), 30),
                 candidate.confidence,
-                f"{candidate.score:.2f}",
             )
 
     def timeline_text(self) -> str:
@@ -214,7 +287,7 @@ class TonepathApp(App[None]):
             return "Tonepath"
         phase_labels = " -> ".join(phase.label for phase in self.runner.active_plan().phases)
         request = self.runner.active_plan().request
-        return f"{request.source_state} -> {phase_labels} -> {request.target_state}"
+        return f"{request.source_state} -> {phase_labels} -> {request.target_state} · {request.duration_sec // 60}m"
 
     def now_playing_text(self) -> str:
         """Return the now-playing panel text."""
@@ -226,8 +299,8 @@ class TonepathApp(App[None]):
             return "Queue is empty. Run `tonepath scan` to add local music."
         return "\n".join(
             [
-                "Now Playing",
-                f"Track: {candidate.track.title or 'unknown'}",
+                f"Status: {self.playback_status}",
+                f"Track: {truncate(track_label(candidate.track.title, candidate.track.path.name), 42)}",
                 f"Artist: {candidate.track.artist or 'unknown'}",
                 f"Phase: {candidate.phase.label}",
                 f"Confidence: {candidate.confidence}",
@@ -240,9 +313,9 @@ class TonepathApp(App[None]):
         return "\n".join(
             [
                 "Privacy",
-                "Network: offline by default",
-                f"DB: {config.db_path()}",
-                "No web/LLM enrichment during playback.",
+                "Offline by default",
+                f"DB: {config.db_path().name}",
+                "Audio files stay local.",
             ]
         )
 
@@ -250,6 +323,7 @@ class TonepathApp(App[None]):
         """Render setup guidance when no local tracks are available."""
 
         self.query_one("#timeline", Static).update("Tonepath: local library required")
+        self.playback_status = "No tracks"
         self.query_one("#now-playing", Static).update(
             "No scanned tracks.\n\nRun:\nuv run tonepath config add-music-dir /path/to/music\nuv run tonepath scan"
         )
@@ -267,3 +341,18 @@ def run_tui(prompt: str = DEFAULT_TUI_PROMPT) -> None:
     """Run the Tonepath terminal interface."""
 
     TonepathApp(prompt=prompt).run()
+
+
+def track_label(title: str | None, fallback: str) -> str:
+    """Return a display-safe track label."""
+
+    label = title or fallback
+    return label.replace("(null)", "").strip() or fallback
+
+
+def truncate(value: str, limit: int) -> str:
+    """Truncate long labels for stable terminal layout."""
+
+    if len(value) <= limit:
+        return value
+    return f"{value[: max(limit - 1, 0)]}…"

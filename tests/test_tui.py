@@ -6,7 +6,24 @@ from unittest.mock import patch
 
 from tonepath.db import TonepathStore
 from tonepath.models import Track
+from tonepath.playback import MpvAdapter
 from tonepath.tui import TonepathApp
+
+
+class FakeProcess:
+    pid = 9876
+
+    def poll(self) -> int | None:
+        return None
+
+    def terminate(self) -> None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+    def kill(self) -> None:
+        return None
 
 
 class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
@@ -19,13 +36,82 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                 store.close()
 
                 app = TonepathApp("from irritated to focus in 30 minutes")
-                async with app.run_test() as pilot:
-                    self.assertIsNotNone(app.query_one("#timeline"))
-                    self.assertIsNotNone(app.query_one("#queue"))
-                    self.assertIsNotNone(app.query_one("#why-panel"))
-                    self.assertIsNotNone(app.query_one("#event-log"))
-                    await pilot.press("w")
-                    await pilot.press("s")
+                with patch.object(MpvAdapter, "start", return_value=FakeProcess()) as start:
+                    async with app.run_test() as pilot:
+                        self.assertIsNotNone(app.query_one("#timeline"))
+                        self.assertIsNotNone(app.query_one("#queue"))
+                        self.assertIsNotNone(app.query_one("#why-panel"))
+                        self.assertIsNotNone(app.query_one("#event-log"))
+                        await pilot.press("w")
+                        await pilot.press("s")
+                        await pilot.press("q")
+                self.assertEqual(start.call_count, 0)
+
+    async def test_tui_play_starts_playback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                with patch.object(MpvAdapter, "start", return_value=FakeProcess()) as start:
+                    async with app.run_test() as pilot:
+                        await pilot.press("space")
+                        await pilot.press("q")
+                self.assertEqual(start.call_count, 1)
+
+    async def test_tui_quit_stops_playback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                with patch.object(MpvAdapter, "start", return_value=FakeProcess()), patch.object(
+                    MpvAdapter, "stop_process"
+                ) as stop:
+                    async with app.run_test() as pilot:
+                        await pilot.press("space")
+                        await pilot.press("q")
+                self.assertTrue(stop.called)
+
+    async def test_tui_skip_replaces_playback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_track(store, tmp, "a.mp3")
+                self.add_track(store, tmp, "b.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                with patch.object(MpvAdapter, "start", return_value=FakeProcess()) as start, patch.object(
+                    MpvAdapter, "stop_process"
+                ) as stop:
+                    async with app.run_test() as pilot:
+                        await pilot.press("space")
+                        await pilot.press("s")
+                        await pilot.press("q")
+                self.assertGreaterEqual(start.call_count, 2)
+                self.assertTrue(stop.called)
+
+    async def test_tui_stop_key_stops_playback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                with patch.object(MpvAdapter, "start", return_value=FakeProcess()), patch.object(
+                    MpvAdapter, "stop_process"
+                ) as stop:
+                    async with app.run_test() as pilot:
+                        await pilot.press("p")
+                        await pilot.press("x")
+                        await pilot.press("q")
+                self.assertTrue(stop.called)
 
     def add_track(self, store: TonepathStore, tmp: str, name: str) -> int:
         path = Path(tmp) / name

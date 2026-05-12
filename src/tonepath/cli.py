@@ -12,6 +12,7 @@ try:
 except ImportError as exc:  # pragma: no cover - exercised before dependency install
     raise RuntimeError("Tonepath CLI dependencies are missing. Run `uv sync` first.") from exc
 
+from tonepath.analysis import analyze_library
 from tonepath.db import TonepathStore
 from tonepath.doctor import run_doctor
 from tonepath.enrichment import EnrichmentProvider, enrich_library
@@ -19,6 +20,7 @@ from tonepath.explanation import explain_candidate
 from tonepath.models import CandidateScore
 from tonepath.planner import plan_session
 from tonepath.playback import MpvAdapter
+from tonepath.playback_controller import PlaybackController
 from tonepath.privacy import delete_profile, privacy_status
 from tonepath.scanner import scan_directory
 from tonepath.selector import select_path
@@ -40,7 +42,6 @@ app.add_typer(privacy_app, name="privacy")
 app.add_typer(explain_app, name="explain")
 
 console = Console()
-CURRENT_MPV_PID_KEY = "current_mpv_pid"
 
 
 @app.callback(invoke_without_command=True)
@@ -49,6 +50,18 @@ def main(ctx: typer.Context) -> None:
 
     if ctx.invoked_subcommand is None:
         run_tui()
+
+
+@app.command("tui")
+def tui_command(
+    prompt: Annotated[str | None, typer.Argument(help="Optional state transition prompt for the TUI.")] = None,
+) -> None:
+    """Open the controlled Textual session screen."""
+
+    if prompt is None:
+        run_tui()
+        return
+    run_tui(prompt=prompt)
 
 
 @app.command()
@@ -108,20 +121,18 @@ def start(
             console.print(f"Session {session_id} planned.")
             return
 
-        process = adapter.start(paths)
-        store.set_app_state(CURRENT_MPV_PID_KEY, str(process.pid))
+        controller = PlaybackController(store, adapter=adapter)
+        process = controller.start(paths)
         console.print(f"Session {session_id} started with mpv PID {process.pid}.")
         if background:
             console.print("Run `tonepath stop` to stop background playback.")
             return
 
         try:
-            adapter.wait_and_stop_on_interrupt(process)
+            controller.wait_foreground(process)
         except KeyboardInterrupt:
             console.print("Playback stopped.")
             raise typer.Exit(code=130) from None
-        finally:
-            store.delete_app_state(CURRENT_MPV_PID_KEY)
     finally:
         store.close()
 
@@ -132,19 +143,9 @@ def stop() -> None:
 
     store = TonepathStore()
     try:
-        value = store.get_app_state(CURRENT_MPV_PID_KEY)
-        if value is None:
-            console.print("No active Tonepath playback.")
-            return
-        try:
-            pid = int(value)
-        except ValueError:
-            store.delete_app_state(CURRENT_MPV_PID_KEY)
-            console.print("No active Tonepath playback. Cleared stale PID.")
-            return
-
-        stopped = MpvAdapter().stop_pid(pid)
-        store.delete_app_state(CURRENT_MPV_PID_KEY)
+        controller = PlaybackController(store)
+        pid = controller.current_pid()
+        stopped = controller.stop_recorded()
         if stopped:
             console.print(f"Stopped Tonepath playback PID {pid}.")
         else:
@@ -164,11 +165,16 @@ def current() -> None:
 
 @app.command()
 def analyze(features: Annotated[str, typer.Option(help="Feature tier: basic or deep.")] = "basic") -> None:
-    """Placeholder for local audio feature analysis."""
+    """Run local audio feature analysis for scanned tracks."""
 
-    if features not in {"basic", "deep"}:
-        raise typer.BadParameter("features must be 'basic' or 'deep'")
-    console.print(f"Audio feature analysis '{features}' is planned for v0.1.")
+    if features != "basic":
+        raise typer.BadParameter("only basic feature analysis is implemented")
+    store = TonepathStore()
+    try:
+        analyzed, skipped = analyze_library(store, features=features)
+    finally:
+        store.close()
+    console.print(f"Analyzed {analyzed} track(s); skipped {skipped} missing track(s).")
 
 
 @app.command()

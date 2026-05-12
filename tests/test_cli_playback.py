@@ -6,10 +6,11 @@ from unittest.mock import patch
 
 from typer.testing import CliRunner
 
-from tonepath.cli import CURRENT_MPV_PID_KEY, app
+from tonepath.cli import app
 from tonepath.db import TonepathStore
 from tonepath.models import Track
 from tonepath.playback import MpvAdapter
+from tonepath.playback_controller import CURRENT_MPV_PID_KEY
 
 
 class FakeProcess:

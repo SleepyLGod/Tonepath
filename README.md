@@ -20,16 +20,17 @@ Tonepath is currently a working terminal prototype. It is not a macOS app, web a
 | CLI commands | Implemented | `doctor`, `config`, `scan`, `start`, `feedback`, `profile`, `privacy`, `explain`, and `enrich`. |
 | Explanations | Implemented | Explanations only cite stored metadata, features, phases, and feedback; unknown BPM/vocalness stays unknown. |
 | Feedback loop | Implemented | The session runtime records feedback and updates upcoming candidates for skip, no-vocals, too-loud, too-slow, and like. |
-| TUI | MVP | Textual screen with timeline, now-playing, queue, why panel, privacy badge, footer shortcuts, and event log. |
+| TUI | MVP | Textual screen with timeline, controlled playback, queue, why panel, privacy badge, footer shortcuts, and event log. It does not autoplay on launch. |
 | Enrichment | Local scaffold | Local metadata enrichment is available; online providers are opt-in boundaries and do not make requests yet. |
+| Audio analysis | Basic | `tonepath analyze --features basic` stores local feature rows; WAV files get approximate loudness/energy, other formats stay low-confidence partial rows. |
 | Tests | Implemented | Unit tests cover planner, scanner, config, privacy, explanation, session feedback, enrichment, and TUI launch behavior. |
 
 ## Roadmap
 
 | Area | Planned behavior |
 | --- | --- |
-| Audio analysis | Local BPM, loudness, energy, vocalness, arousal/valence estimates, and confidence scoring. |
-| TUI playback integration | Wire the TUI session screen to actual playback controls rather than display-only session state. |
+| Deep audio analysis | Local BPM, vocalness, arousal/valence estimates, and stronger confidence scoring. |
+| TUI polish | More refined timeline, queue interaction, and layout styling after the controlled playback loop is stable. |
 | Profile learning | Better local profile rules and preference learning that users can inspect, export, and delete. |
 | Online enrichment | MusicBrainz, AcoustID, ListenBrainz, or cited web enrichment as explicit opt-in providers with cache and rate-limit handling. |
 | Spotify handoff | Optional playlist creation and URI handoff to the official Spotify client only. |
@@ -70,8 +71,24 @@ uv run tonepath config init
 uv run tonepath config add-music-dir ~/Music
 uv run tonepath doctor
 uv run tonepath scan
+uv run tonepath analyze --features basic
 uv run tonepath
+uv run tonepath tui "我现在很烦，想半小时后进入写代码状态，不要人声"
 uv run tonepath start "我现在很烦，想半小时后进入写代码状态，不要人声"
+```
+
+The TUI opens with a planned local session but does not autoplay. Playback events are recorded locally in SQLite for future preference learning. Use these keys:
+
+```text
+space / p  play current track
+x          stop playback
+s          skip
+l          like
+v          no-vocals
++          too-loud
+-          too-slow
+w          show why
+q          stop playback and quit
 ```
 
 Preview the selected path and `mpv` command without playing audio:
@@ -97,6 +114,12 @@ Store source-attributed local metadata enrichment:
 
 ```bash
 uv run tonepath enrich --provider local
+```
+
+Store local basic feature rows:
+
+```bash
+uv run tonepath analyze --features basic
 ```
 
 ## Config
@@ -166,7 +189,7 @@ Tonepath separates music understanding into explicit tiers:
 | Tier | Status | Behavior |
 | --- | --- | --- |
 | `local` | Implemented | Stores existing local metadata as source-attributed enrichment records. |
-| `features` | Planned | Will store local audio analysis such as BPM, loudness, energy, and vocalness. |
+| `features` | Basic | Stores local basic analysis rows. WAV files get approximate loudness and energy; BPM/vocalness are still planned. |
 | `online` | Planned | Will require explicit opt-in, cache results, cite sources, and avoid sending local file paths. |
 
 Online providers are blocked by default:

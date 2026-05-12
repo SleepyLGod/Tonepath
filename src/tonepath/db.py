@@ -202,6 +202,40 @@ class TonepathStore:
             confidence=row["confidence"],
         )
 
+    def upsert_features(self, features: TrackFeatures) -> None:
+        """Insert or update locally analyzed features for one track."""
+
+        self.conn.execute(
+            """
+            INSERT INTO track_features (
+              track_id, bpm, loudness, energy, vocalness, arousal_estimate,
+              valence_estimate, feature_source, confidence
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(track_id) DO UPDATE SET
+              bpm=excluded.bpm,
+              loudness=excluded.loudness,
+              energy=excluded.energy,
+              vocalness=excluded.vocalness,
+              arousal_estimate=excluded.arousal_estimate,
+              valence_estimate=excluded.valence_estimate,
+              feature_source=excluded.feature_source,
+              confidence=excluded.confidence
+            """,
+            (
+                features.track_id,
+                features.bpm,
+                features.loudness,
+                features.energy,
+                features.vocalness,
+                features.arousal_estimate,
+                features.valence_estimate,
+                features.feature_source,
+                features.confidence,
+            ),
+        )
+        self.conn.commit()
+
     def save_session(self, plan: SessionPlan) -> int:
         """Persist a session and its phases."""
 
@@ -288,6 +322,29 @@ class TonepathStore:
         self.conn.execute(
             "INSERT INTO feedback (session_id, track_id, type, value) VALUES (?, ?, ?, ?)",
             (session_id, track_id, feedback_type, value),
+        )
+        self.conn.commit()
+
+    def start_play(self, session_id: int | None, track_id: int) -> int:
+        """Record the start of one local playback event."""
+
+        cursor = self.conn.execute(
+            "INSERT INTO plays (session_id, track_id) VALUES (?, ?)",
+            (session_id, track_id),
+        )
+        self.conn.commit()
+        return int(cursor.lastrowid)
+
+    def end_play(self, play_id: int, skipped: bool = False) -> None:
+        """Mark one local playback event as ended."""
+
+        self.conn.execute(
+            """
+            UPDATE plays
+            SET ended_at = CURRENT_TIMESTAMP, skipped = ?
+            WHERE id = ?
+            """,
+            (1 if skipped else 0, play_id),
         )
         self.conn.commit()
 
