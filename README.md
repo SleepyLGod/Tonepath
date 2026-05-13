@@ -17,7 +17,7 @@ Tonepath is currently a working terminal prototype. It is not a macOS app, web a
 | Path planning | Implemented | Deterministic prompt parsing and phase planning for state transitions such as irritated -> focus. |
 | Track selection | Implemented | Deterministic scoring with confidence labels; metadata-only selections are intentionally low confidence. |
 | Playback | Implemented | Local `mpv` adapter plus `--dry-run` command preview. |
-| CLI commands | Implemented | `doctor`, `config`, `scan`, `start`, `feedback`, `profile`, `privacy`, `explain`, and `enrich`. |
+| CLI commands | Implemented | `doctor`, `config`, `scan`, `start`, `feedback`, `profile`, `privacy`, `explain`, `eval`, and `enrich`. |
 | Explanations | Implemented | Explanations only cite stored metadata, features, phases, and feedback; unknown BPM/vocalness stays unknown. |
 | Feedback loop | Implemented | The session runtime records feedback and updates upcoming candidates for skip, no-vocals, too-loud, too-slow, and like. |
 | TUI | MVP | Textual screen with prompt intake, timeline, controlled playback, queue, why panel, privacy badge, footer shortcuts, and event log. It does not autoplay on launch. |
@@ -148,6 +148,13 @@ uv run tonepath analyze --features vocalness --method audio-separator --force --
 ```
 
 By default, model methods skip existing results from the same method. Use `--force` to recompute. Use `--limit` for small batches and rerun with `--only-missing` after an interruption.
+
+Evaluate selection quality without playback or profile writes:
+
+```bash
+uv run tonepath eval selection "我现在很烦，想半小时后进入写代码状态，不要人声" --limit 8
+uv run tonepath eval selection "我现在很烦，想半小时后进入写代码状态，不要人声" --json
+```
 
 ## Config
 

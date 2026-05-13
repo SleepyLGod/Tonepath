@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Annotated
 
 try:
     import typer
+    from rich import box
     from rich.console import Console
     from rich.table import Table
 except ImportError as exc:  # pragma: no cover - exercised before dependency install
@@ -16,6 +19,7 @@ from tonepath.analysis import AnalysisProgress, analyze_library
 from tonepath.db import TonepathStore
 from tonepath.doctor import run_doctor
 from tonepath.enrichment import EnrichmentProvider, enrich_library
+from tonepath.evaluation import evaluate_selection
 from tonepath.explanation import explain_candidate
 from tonepath.models import CandidateScore, Track
 from tonepath.planner import plan_session
@@ -34,12 +38,14 @@ feedback_app = typer.Typer(help="Record local feedback.")
 profile_app = typer.Typer(help="Inspect, export, or delete local profile data.")
 privacy_app = typer.Typer(help="Inspect local privacy status.")
 explain_app = typer.Typer(help="Explain selections.")
+eval_app = typer.Typer(help="Evaluate local selection quality.")
 
 app.add_typer(config_app, name="config")
 app.add_typer(feedback_app, name="feedback")
 app.add_typer(profile_app, name="profile")
 app.add_typer(privacy_app, name="privacy")
 app.add_typer(explain_app, name="explain")
+app.add_typer(eval_app, name="eval")
 
 console = Console()
 
@@ -257,6 +263,28 @@ def enrich(
     console.print(f"Stored {count} enrichment field(s) from provider: {provider}")
 
 
+@eval_app.command("selection")
+def eval_selection(
+    prompt: Annotated[str, typer.Argument(help="State transition prompt to evaluate.")],
+    limit: Annotated[int, typer.Option("--limit", help="Maximum number of candidates to print.")] = 8,
+    json_output: Annotated[bool, typer.Option("--json", help="Print stable JSON for comparison.")] = False,
+) -> None:
+    """Evaluate selection candidates without playback or profile writes."""
+
+    if limit <= 0:
+        raise typer.BadParameter("--limit must be greater than zero")
+    store = TonepathStore()
+    try:
+        payload = evaluate_selection(store, prompt, limit)
+    finally:
+        store.close()
+
+    if json_output:
+        console.print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    render_eval_table(payload)
+
+
 @config_app.command("init")
 def config_init(overwrite: Annotated[bool, typer.Option("--overwrite", help="Overwrite an existing config.")] = False) -> None:
     """Create a default local config file."""
@@ -404,3 +432,83 @@ def render_plan(candidates: list[CandidateScore]) -> None:
             f"{candidate.score:.2f}",
         )
     console.print(table)
+
+
+def render_eval_table(rows: list[dict[str, object]]) -> None:
+    """Render selection evaluation rows for manual product review."""
+
+    if not rows:
+        console.print("No candidates found. Run `tonepath scan ~/Music` first.")
+        return
+    table = Table("Phase", "Track", "Score", "Conf", "Features", "Reasons", box=box.SIMPLE, expand=True)
+    for row in rows:
+        track = row["track"]
+        if not isinstance(track, dict):
+            raise TypeError("Evaluation row track payload must be a dict.")
+        features = row["features"]
+        if not isinstance(features, dict):
+            raise TypeError("Evaluation row features payload must be a dict.")
+        reasons = row["reasons"]
+        if not isinstance(reasons, list):
+            raise TypeError("Evaluation row reasons payload must be a list.")
+        table.add_row(
+            str(row["phase"]),
+            eval_track_label(track),
+            str(row["score"]),
+            str(row["confidence"]),
+            eval_feature_summary(features),
+            "\n".join(summarize_eval_reasons(str(reason) for reason in reasons)),
+        )
+    console.print(table)
+
+
+def eval_track_label(track: dict[str, object]) -> str:
+    """Return a compact track label for evaluation tables."""
+
+    title = track.get("title") or "unknown"
+    artist = track.get("artist") or "unknown"
+    return f"{title} - {artist}"
+
+
+def eval_cell(value: object) -> str:
+    """Render missing evaluation values without inventing facts."""
+
+    return "--" if value is None else str(value)
+
+
+def eval_feature_summary(features: dict[str, object]) -> str:
+    """Return compact feature details for selection review."""
+
+    return (
+        f"src={eval_cell(features['source'])}\n"
+        f"energy={eval_cell(features['energy'])} loud={eval_cell(features['loudness'])}\n"
+        f"bpm={eval_cell(features['bpm'])} vocal={eval_cell(features['vocalness'])}"
+    )
+
+
+def summarize_eval_reasons(reasons: Iterable[str]) -> list[str]:
+    """Return short reason labels for narrow terminal evaluation tables."""
+
+    labels: list[str] = []
+    for reason in reasons:
+        if "supports no-vocals" in reason:
+            labels.append("no-vocals supported")
+        elif "conflicts with no-vocals" in reason:
+            labels.append("no-vocals conflict")
+        elif "unknown" in reason and "no-vocals" in reason:
+            labels.append("vocalness unknown")
+        elif "inconclusive" in reason:
+            labels.append("vocalness inconclusive")
+        elif "energy feature" in reason:
+            labels.append("energy fit")
+        elif "loudness feature" in reason:
+            labels.append("loudness fit")
+        elif "BPM feature" in reason:
+            labels.append("BPM fit")
+        elif "feedback" in reason:
+            labels.append("feedback adjusted")
+        elif "genre" in reason:
+            labels.append("genre signal")
+        elif "duration is known" in reason:
+            labels.append("duration known")
+    return labels[:4] or ["no strong reason"]
