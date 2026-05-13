@@ -37,7 +37,7 @@ class CliAnalyzeTest(unittest.TestCase):
                 result = CliRunner().invoke(app, ["analyze", "--features", "basic"])
 
                 self.assertEqual(result.exit_code, 0, result.output)
-                self.assertIn("Analyzed 1 track(s); skipped 0 missing track(s).", result.output)
+                self.assertIn("Analyzed 1 track(s); skipped 0 track(s).", result.output)
                 store = TonepathStore()
                 self.assertIsNotNone(store.get_features(track_id))
                 store.close()
@@ -68,7 +68,7 @@ class CliAnalyzeTest(unittest.TestCase):
                     result = CliRunner().invoke(app, ["analyze", "--features", "vocalness"])
 
                 self.assertEqual(result.exit_code, 0, result.output)
-                self.assertIn("Analyzed 1 track(s); skipped 0 missing track(s).", result.output)
+                self.assertIn("Analyzed 1 track(s); skipped 0 track(s).", result.output)
                 store = TonepathStore()
                 features = store.get_features(track_id)
                 self.assertIsNotNone(features)
@@ -136,6 +136,44 @@ class CliAnalyzeTest(unittest.TestCase):
 
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("--method is only supported with --features vocalness", result.output)
+
+    def test_analyze_limit_prints_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                for index in range(2):
+                    path = Path(tmp) / f"song-{index}.mp3"
+                    path.write_bytes(b"not decoded as audio")
+                    store.upsert_track(
+                        Track(
+                            id=None,
+                            path=path,
+                            file_hash=f"hash-{index}",
+                            mtime=1.0,
+                            title=f"song-{index}",
+                            artist="artist",
+                            album=None,
+                            genre=None,
+                            duration=None,
+                            format="mp3",
+                        )
+                    )
+                store.close()
+
+                with patch("tonepath.analysis.decode_pcm_with_ffmpeg", return_value=None):
+                    result = CliRunner().invoke(app, ["analyze", "--features", "vocalness", "--limit", "1"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertIn("[1/1] analyzing: song-0 - artist", result.output)
+                self.assertIn("Analyzed 1 track(s); skipped 0 track(s).", result.output)
+
+    def test_analyze_keyboard_interrupt_reports_resume_hint(self) -> None:
+        with patch("tonepath.cli.analyze_library", side_effect=KeyboardInterrupt()):
+            result = CliRunner().invoke(app, ["analyze", "--features", "vocalness"])
+
+        self.assertEqual(result.exit_code, 130)
+        self.assertIn("rerun with --only-missing", result.output)
+        self.assertIn("resume", result.output)
 
 
 if __name__ == "__main__":

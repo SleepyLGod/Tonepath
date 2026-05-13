@@ -19,6 +19,7 @@ from tonepath.analysis import (
 )
 from tonepath.db import TonepathStore
 from tonepath.models import Track, TrackFeatures
+from tonepath.scanner import read_track
 
 
 class AnalysisTest(unittest.TestCase):
@@ -316,6 +317,135 @@ class AnalysisTest(unittest.TestCase):
                 return_value=Path(tmp),
             ), patch("tonepath.analysis.subprocess.run", return_value=result):
                 self.assertIsNone(analyze_vocalness_with_audio_separator(path))
+
+    def test_model_analysis_skips_existing_same_source_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            path = Path(tmp) / "song.wav"
+            write_wave(path, amplitude=12000)
+            track_id = store.upsert_track(track_for(path, "song.wav"))
+            store.upsert_features(
+                TrackFeatures(
+                    track_id=track_id,
+                    vocalness=0.2,
+                    feature_source="model-audio-separator",
+                    confidence="high",
+                )
+            )
+
+            with patch("tonepath.analysis.shutil.which", return_value="/usr/bin/audio-separator"), patch(
+                "tonepath.analysis.analyze_vocalness_with_audio_separator",
+                side_effect=AssertionError("should not re-run"),
+            ):
+                analyzed, skipped = analyze_library(store, features="vocalness", method="audio-separator")
+
+            self.assertEqual(analyzed, 0)
+            self.assertEqual(skipped, 1)
+            store.close()
+
+    def test_force_reanalyzes_existing_model_feature(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            path = Path(tmp) / "song.wav"
+            write_wave(path, amplitude=12000)
+            track_id = store.upsert_track(track_for(path, "song.wav"))
+            store.upsert_features(
+                TrackFeatures(
+                    track_id=track_id,
+                    vocalness=0.2,
+                    feature_source="model-audio-separator",
+                    confidence="high",
+                )
+            )
+
+            with patch("tonepath.analysis.shutil.which", return_value="/usr/bin/audio-separator"), patch(
+                "tonepath.analysis.analyze_vocalness_with_audio_separator",
+                return_value=0.6,
+            ):
+                analyzed, skipped = analyze_library(store, features="vocalness", method="audio-separator", force=True)
+
+            features = store.get_features(track_id)
+            self.assertEqual(analyzed, 1)
+            self.assertEqual(skipped, 0)
+            self.assertEqual(features.vocalness, 0.6)
+            store.close()
+
+    def test_limit_restricts_eligible_tracks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            for index in range(3):
+                path = Path(tmp) / f"song-{index}.wav"
+                write_wave(path, amplitude=12000)
+                store.upsert_track(track_for(path, f"song-{index}.wav"))
+
+            with patch("tonepath.analysis.decode_wave_pcm", return_value=(voiced_like_samples(11025, 12.0), 11025)):
+                analyzed, skipped = analyze_library(store, features="vocalness", limit=2)
+
+            rows = store.conn.execute("SELECT COUNT(*) AS count FROM track_features").fetchone()
+            self.assertEqual(analyzed, 2)
+            self.assertEqual(skipped, 0)
+            self.assertEqual(int(rows["count"]), 2)
+            store.close()
+
+    def test_changed_only_processes_changed_tracks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            stable = Path(tmp) / "stable.wav"
+            changed = Path(tmp) / "changed.wav"
+            write_wave(stable, amplitude=9000)
+            write_wave(changed, amplitude=9000)
+            store.upsert_track(read_track(stable))
+            store.upsert_track(track_for(changed, "changed.wav"))
+
+            analyzed, skipped = analyze_library(store, features="basic", changed_only=True)
+
+            row = store.conn.execute("SELECT COUNT(*) AS count FROM track_features").fetchone()
+            self.assertEqual(analyzed, 1)
+            self.assertEqual(skipped, 1)
+            self.assertEqual(int(row["count"]), 1)
+            store.close()
+
+    def test_model_failure_skips_track_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            track_ids = []
+            for index in range(3):
+                path = Path(tmp) / f"song-{index}.wav"
+                write_wave(path, amplitude=12000)
+                track_ids.append(store.upsert_track(track_for(path, f"song-{index}.wav")))
+
+            with patch("tonepath.analysis.shutil.which", return_value="/usr/bin/audio-separator"), patch(
+                "tonepath.analysis.analyze_vocalness_with_audio_separator",
+                side_effect=[0.2, RuntimeError("separator failed"), 0.8],
+            ):
+                analyzed, skipped = analyze_library(store, features="vocalness", method="audio-separator")
+
+            self.assertEqual(analyzed, 2)
+            self.assertEqual(skipped, 1)
+            self.assertEqual(store.get_features(track_ids[0]).vocalness, 0.2)
+            self.assertIsNone(store.get_features(track_ids[1]))
+            self.assertEqual(store.get_features(track_ids[2]).vocalness, 0.8)
+            store.close()
+
+    def test_keyboard_interrupt_keeps_completed_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            track_ids = []
+            for index in range(2):
+                path = Path(tmp) / f"song-{index}.wav"
+                write_wave(path, amplitude=12000)
+                track_ids.append(store.upsert_track(track_for(path, f"song-{index}.wav")))
+
+            with patch("tonepath.analysis.shutil.which", return_value="/usr/bin/audio-separator"), patch(
+                "tonepath.analysis.analyze_vocalness_with_audio_separator",
+                side_effect=[0.2, KeyboardInterrupt()],
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    analyze_library(store, features="vocalness", method="audio-separator")
+
+            self.assertEqual(store.get_features(track_ids[0]).vocalness, 0.2)
+            self.assertIsNone(store.get_features(track_ids[1]))
+            store.close()
 
     def test_demucs_method_writes_high_confidence_vocalness(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

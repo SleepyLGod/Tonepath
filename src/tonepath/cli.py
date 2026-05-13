@@ -12,12 +12,12 @@ try:
 except ImportError as exc:  # pragma: no cover - exercised before dependency install
     raise RuntimeError("Tonepath CLI dependencies are missing. Run `uv sync` first.") from exc
 
-from tonepath.analysis import analyze_library
+from tonepath.analysis import AnalysisProgress, analyze_library
 from tonepath.db import TonepathStore
 from tonepath.doctor import run_doctor
 from tonepath.enrichment import EnrichmentProvider, enrich_library
 from tonepath.explanation import explain_candidate
-from tonepath.models import CandidateScore
+from tonepath.models import CandidateScore, Track
 from tonepath.planner import plan_session
 from tonepath.playback import MpvAdapter
 from tonepath.playback_controller import PlaybackController
@@ -167,6 +167,10 @@ def current() -> None:
 def analyze(
     features: Annotated[str, typer.Option(help="Feature tier: basic or vocalness.")] = "basic",
     method: Annotated[str, typer.Option(help="Vocalness method: spectral, audio-separator, or demucs-cli.")] = "spectral",
+    only_missing: Annotated[bool, typer.Option("--only-missing", help="Analyze only tracks missing the requested feature.")] = False,
+    changed_only: Annotated[bool, typer.Option("--changed-only", help="Analyze only files changed since the last scan.")] = False,
+    force: Annotated[bool, typer.Option("--force", help="Re-analyze tracks even when existing results are present.")] = False,
+    limit: Annotated[int | None, typer.Option("--limit", help="Maximum number of eligible tracks to analyze.")] = None,
 ) -> None:
     """Run local audio feature analysis for scanned tracks."""
 
@@ -179,12 +183,53 @@ def analyze(
     store = TonepathStore()
     try:
         try:
-            analyzed, skipped = analyze_library(store, features=features, method=method)
+            analyzed, skipped = analyze_library(
+                store,
+                features=features,
+                method=method,
+                only_missing=only_missing,
+                changed_only=changed_only,
+                force=force,
+                limit=limit,
+                progress=print_analysis_progress,
+            )
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
         except RuntimeError as exc:
             raise typer.BadParameter(str(exc)) from exc
+        except KeyboardInterrupt as exc:
+            console.print("Analysis interrupted. Completed results were kept; rerun with --only-missing to resume.")
+            raise typer.Exit(code=130) from exc
     finally:
         store.close()
-    console.print(f"Analyzed {analyzed} track(s); skipped {skipped} missing track(s).")
+    console.print(f"Analyzed {analyzed} track(s); skipped {skipped} track(s).")
+
+
+def print_analysis_progress(event: AnalysisProgress) -> None:
+    """Print one local analysis progress event."""
+
+    label = display_track(event.track)
+    console.print(f"[{event.index}/{event.total}] analyzing: {label}")
+    if event.error is not None:
+        console.print(f"error: {event.error}")
+        return
+    if event.result is None:
+        console.print("result: skipped")
+        return
+    vocalness = "unknown" if event.result.vocalness is None else f"{event.result.vocalness:.2f}"
+    runtime = 0.0 if event.runtime_sec is None else event.runtime_sec
+    console.print(
+        f"result: vocalness={vocalness} source={event.result.feature_source} "
+        f"confidence={event.result.confidence} runtime={runtime:.1f}s"
+    )
+
+
+def display_track(track: Track) -> str:
+    """Return a compact track label for terminal progress output."""
+
+    title = track.title or track.path.stem
+    artist = track.artist or "unknown"
+    return f"{title} - {artist}"
 
 
 @app.command()

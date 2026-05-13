@@ -6,13 +6,17 @@ import math
 import re
 import shutil
 import subprocess
+import time
 import wave
+from collections.abc import Callable
+from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
 from tonepath import config
 from tonepath.db import TonepathStore
 from tonepath.models import Track, TrackFeatures
+from tonepath.scanner import fingerprint, read_track
 
 
 FEATURE_SOURCE = "basic-local-analysis"
@@ -29,7 +33,29 @@ MEAN_VOLUME_PATTERN = re.compile(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB")
 VOCALNESS_METHODS = {"spectral", "demucs-cli", "audio-separator"}
 
 
-def analyze_library(store: TonepathStore, features: str = "basic", method: str = "spectral") -> tuple[int, int]:
+@dataclass(frozen=True)
+class AnalysisProgress:
+    """A progress event from offline library analysis."""
+
+    index: int
+    total: int
+    track: Track
+    result: TrackFeatures | None = None
+    runtime_sec: float | None = None
+    error: str | None = None
+
+
+def analyze_library(
+    store: TonepathStore,
+    features: str = "basic",
+    method: str = "spectral",
+    *,
+    only_missing: bool = False,
+    changed_only: bool = False,
+    force: bool = False,
+    limit: int | None = None,
+    progress: Callable[[AnalysisProgress], None] | None = None,
+) -> tuple[int, int]:
     """Analyze scanned local tracks and return analyzed/skipped counts."""
 
     if features not in {"basic", "vocalness"}:
@@ -42,21 +68,165 @@ def analyze_library(store: TonepathStore, features: str = "basic", method: str =
         raise RuntimeError("audio-separator vocalness requires the optional models extra. Run: uv sync --extra models")
     if features == "vocalness" and method == "demucs-cli" and shutil.which("demucs") is None:
         raise RuntimeError("demucs-cli vocalness requires the `demucs` command on PATH. Tonepath does not install it.")
+    if limit is not None and limit < 1:
+        raise ValueError("Limit must be greater than zero.")
+    if force and only_missing:
+        raise ValueError("Use either force or only_missing, not both.")
 
     analyzed = 0
+    skipped = 0
+    selected, missing = select_tracks_for_analysis(
+        store,
+        features=features,
+        method=method,
+        only_missing=only_missing,
+        changed_only=changed_only,
+        force=force,
+        limit=limit,
+    )
+    skipped += missing
+    total = len(selected)
+    for index, track in enumerate(selected, start=1):
+        if track.id is None or not track.path.exists():
+            skipped += 1
+            continue
+        existing = store.get_features(track.id)
+        started = time.monotonic()
+        result: TrackFeatures | None = None
+        try:
+            if features == "basic":
+                result = analyze_track_basic(track, existing)
+            else:
+                result = analyze_track_vocalness(track, existing, method=method)
+        except RuntimeError as exc:
+            skipped += 1
+            if progress is not None:
+                progress(AnalysisProgress(index, total, track, None, time.monotonic() - started, str(exc)))
+            continue
+        if should_persist_result(existing, result, features, method):
+            store.upsert_features(result)
+        analyzed += 1
+        if progress is not None:
+            progress(AnalysisProgress(index, total, track, result, time.monotonic() - started))
+    return analyzed, skipped
+
+
+def select_tracks_for_analysis(
+    store: TonepathStore,
+    *,
+    features: str,
+    method: str,
+    only_missing: bool,
+    changed_only: bool,
+    force: bool,
+    limit: int | None,
+) -> tuple[list[Track], int]:
+    """Return tracks eligible for the requested local analysis pass."""
+
+    selected: list[Track] = []
     skipped = 0
     for track in store.list_tracks():
         if track.id is None or not track.path.exists():
             skipped += 1
             continue
         existing = store.get_features(track.id)
-        if features == "basic":
-            result = analyze_track_basic(track, existing)
-        else:
-            result = analyze_track_vocalness(track, existing, method=method)
-        store.upsert_features(result)
-        analyzed += 1
-    return analyzed, skipped
+        if not force and not track_needs_analysis(track, existing, features, method, only_missing, changed_only):
+            skipped += 1
+            continue
+        selected.append(refresh_track_if_changed(store, track) if changed_only else track)
+        if limit is not None and len(selected) >= limit:
+            break
+    return selected, skipped
+
+
+def track_needs_analysis(
+    track: Track,
+    existing: TrackFeatures | None,
+    features: str,
+    method: str,
+    only_missing: bool,
+    changed_only: bool,
+) -> bool:
+    """Return whether one track should be analyzed in this pass."""
+
+    if changed_only and not track_file_changed(track):
+        return False
+    if changed_only:
+        return True
+    if features == "basic":
+        if only_missing:
+            return existing is None or existing.energy is None or existing.loudness is None
+        return True
+
+    source = feature_source_for_method(method)
+    if method in {"audio-separator", "demucs-cli"}:
+        return existing is None or existing.vocalness is None or existing.feature_source != source
+    if only_missing:
+        return existing is None or existing.vocalness is None
+    return True
+
+
+def track_file_changed(track: Track) -> bool:
+    """Return whether a file no longer matches its stored mtime or fingerprint."""
+
+    try:
+        stat = track.path.stat()
+    except OSError:
+        return True
+    if abs(stat.st_mtime - track.mtime) > 0.0001:
+        return True
+    try:
+        return fingerprint(track.path) != track.file_hash
+    except OSError:
+        return True
+
+
+def refresh_track_if_changed(store: TonepathStore, track: Track) -> Track:
+    """Refresh stale track metadata before analyzing changed files."""
+
+    if not track_file_changed(track):
+        return track
+    refreshed = read_track(track.path)
+    track_id = store.upsert_track(refreshed)
+    return Track(
+        id=track_id,
+        path=refreshed.path,
+        file_hash=refreshed.file_hash,
+        mtime=refreshed.mtime,
+        title=refreshed.title,
+        artist=refreshed.artist,
+        album=refreshed.album,
+        genre=refreshed.genre,
+        duration=refreshed.duration,
+        format=refreshed.format,
+    )
+
+
+def feature_source_for_method(method: str) -> str:
+    """Return the feature_source written by one vocalness method."""
+
+    if method == "audio-separator":
+        return AUDIO_SEPARATOR_FEATURE_SOURCE
+    if method == "demucs-cli":
+        return DEMUCS_FEATURE_SOURCE
+    return FEATURE_SOURCE
+
+
+def feature_changed(existing: TrackFeatures | None, result: TrackFeatures) -> bool:
+    """Return whether a new feature result should be persisted and counted."""
+
+    if existing is None:
+        return True
+    return existing != result
+
+
+def should_persist_result(existing: TrackFeatures | None, result: TrackFeatures, features: str, method: str) -> bool:
+    """Return whether an analysis result should be stored."""
+
+    if features == "vocalness" and method in {"audio-separator", "demucs-cli"}:
+        if result.vocalness is None and existing is None:
+            return False
+    return feature_changed(existing, result)
 
 
 def analyze_track_basic(track: Track, existing: TrackFeatures | None = None) -> TrackFeatures:

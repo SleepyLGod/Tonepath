@@ -133,11 +133,21 @@ Optional local model adapter:
 
 ```bash
 uv sync --extra models
-uv run tonepath analyze --features vocalness --method audio-separator
+uv run tonepath analyze --features vocalness --method audio-separator --only-missing --limit 20
 uv run tonepath analyze --features vocalness --method demucs-cli
 ```
 
-`audio-separator` is the recommended optional model route. It is installed only when you run `uv sync --extra models`, and its first real run may download model files into Tonepath's local cache. Full-song separation can take several minutes per track on CPU or Apple Silicon acceleration. `demucs-cli` remains available for users who already have a separate `demucs` command on PATH. If a requested model command is unavailable, Tonepath fails clearly instead of falling back to a fake result.
+`audio-separator` is the recommended optional model route. It is installed only when you run `uv sync --extra models`, and its first real run may download model files into Tonepath's local cache. Full-song separation can take several minutes per track on CPU or Apple Silicon acceleration, so run model analysis before listening; Tonepath never runs source separation during playback. `demucs-cli` remains available for users who already have a separate `demucs` command on PATH. If a requested model command is unavailable, Tonepath fails clearly instead of falling back to a fake result.
+
+Model analysis is resumable and incremental:
+
+```bash
+uv run tonepath analyze --features vocalness --method audio-separator --only-missing
+uv run tonepath analyze --features vocalness --method audio-separator --changed-only
+uv run tonepath analyze --features vocalness --method audio-separator --force --limit 5
+```
+
+By default, model methods skip existing results from the same method. Use `--force` to recompute. Use `--limit` for small batches and rerun with `--only-missing` after an interruption.
 
 ## Config
 
@@ -214,7 +224,7 @@ Optional model-backed analysis remains local:
 | Method | Status | Behavior |
 | --- | --- | --- |
 | `spectral` | Default | Lightweight local vocalness proxy. No model download and no network access. |
-| `audio-separator` | Recommended optional model | Uses the `models` extra to run local stem separation. Outputs are cached under Tonepath data as `model-audio-separator` with higher confidence, but they are still source-attributed features rather than absolute facts. |
+| `audio-separator` | Recommended optional model | Uses the `models` extra to run local offline stem separation. Outputs are cached under Tonepath data as `model-audio-separator` with higher confidence, but they are still source-attributed features rather than absolute facts. |
 | `demucs-cli` | Compatibility adapter | Uses a separately installed Demucs CLI to estimate vocalness from the vocal stem. Results are stored as `model-demucs-cli`; this path is for advanced users who already have Demucs installed. |
 
 Online providers are blocked by default:
