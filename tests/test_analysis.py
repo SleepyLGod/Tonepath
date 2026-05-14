@@ -7,7 +7,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tonepath.analysis import (
+    ESSENTIA_MIR_FEATURE_SOURCE,
+    ESSENTIA_TAGS_FEATURE_SOURCE,
+    ESSENTIA_VOICE_FEATURE_SOURCE,
     analyze_library,
+    analyze_track_mir,
+    analyze_track_tags,
     analyze_track_basic,
     analyze_track_vocalness,
     analyze_with_ffmpeg,
@@ -244,6 +249,121 @@ class AnalysisTest(unittest.TestCase):
                     analyze_library(store, features="vocalness", method="audio-separator")
             row = store.conn.execute("SELECT COUNT(*) AS count FROM track_features").fetchone()
             self.assertEqual(int(row["count"]), 0)
+            store.close()
+
+    def test_mir_analysis_writes_features_and_enrichment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            path = Path(tmp) / "song.mp3"
+            path.write_bytes(b"fake")
+            track_id = store.upsert_track(track_for(path, "song.mp3"))
+
+            with patch("tonepath.analysis.import_essentia_standard", return_value=object()), patch(
+                "tonepath.analysis.extract_mir_with_essentia",
+                return_value={
+                    "bpm": 112.4,
+                    "loudness": -14.0,
+                    "key": "F#",
+                    "scale": "major",
+                    "key_strength": 0.86,
+                    "danceability": 1.2,
+                    "dynamic_complexity": 3.5,
+                },
+            ):
+                analyzed, skipped = analyze_library(store, features="mir", method="essentia")
+
+            features = store.get_features(track_id)
+            self.assertEqual(analyzed, 1)
+            self.assertEqual(skipped, 0)
+            self.assertEqual(features.feature_source, ESSENTIA_MIR_FEATURE_SOURCE)
+            self.assertEqual(features.confidence, "high")
+            self.assertEqual(features.bpm, 112.4)
+            self.assertEqual(features.loudness, -14.0)
+            self.assertIsNotNone(features.energy)
+            enrichment = store.list_enrichment(track_id)
+            fields = {record.field: record.value for record in enrichment}
+            self.assertEqual(fields["key"], "F#")
+            self.assertEqual(fields["scale"], "major")
+            self.assertEqual(fields["danceability"], "1.2")
+            store.close()
+
+    def test_mir_analysis_requires_essentia_extra(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "song.mp3"
+            path.write_bytes(b"fake")
+            with patch("tonepath.analysis.import_essentia_standard", side_effect=RuntimeError("uv sync --extra mir")):
+                with self.assertRaisesRegex(RuntimeError, "uv sync --extra mir"):
+                    analyze_track_mir(track_for(path, "song.mp3", track_id=1))
+
+    def test_tag_analysis_maps_voice_and_tags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            path = Path(tmp) / "song.mp3"
+            path.write_bytes(b"fake")
+            track_id = store.upsert_track(track_for(path, "song.mp3"))
+            store.upsert_features(
+                TrackFeatures(
+                    track_id=track_id,
+                    bpm=100.0,
+                    loudness=-16.0,
+                    energy=0.4,
+                    vocalness=0.7,
+                    feature_source="model-audio-separator",
+                    confidence="high",
+                )
+            )
+
+            with patch(
+                "tonepath.analysis.ensure_essentia_tagging_available",
+                return_value=None,
+            ), patch(
+                "tonepath.analysis.extract_tags_with_essentia",
+                return_value={
+                    "vocalness": 0.18,
+                    "tags": [("mood/theme---focus", 0.82), ("instrument---piano", 0.61)],
+                },
+            ):
+                analyzed, skipped = analyze_library(store, features="tags", method="essentia", force=True)
+
+            features = store.get_features(track_id)
+            self.assertEqual(analyzed, 1)
+            self.assertEqual(skipped, 0)
+            self.assertEqual(features.feature_source, ESSENTIA_VOICE_FEATURE_SOURCE)
+            self.assertEqual(features.vocalness, 0.18)
+            self.assertEqual(features.bpm, 100.0)
+            enrichment = store.list_enrichment(track_id)
+            fields = {record.field: record.value for record in enrichment}
+            self.assertEqual(fields["tag:mood/theme---focus"], "0.82")
+            self.assertEqual(fields["tag:instrument---piano"], "0.61")
+            self.assertTrue(all(record.source == ESSENTIA_TAGS_FEATURE_SOURCE for record in enrichment))
+            store.close()
+
+    def test_separator_does_not_overwrite_essentia_voice_without_force(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            path = Path(tmp) / "song.wav"
+            write_wave(path, amplitude=9000)
+            track_id = store.upsert_track(track_for(path, "song.wav"))
+            store.upsert_features(
+                TrackFeatures(
+                    track_id=track_id,
+                    vocalness=0.12,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            with patch("tonepath.analysis.shutil.which", return_value="/usr/bin/audio-separator"), patch(
+                "tonepath.analysis.analyze_vocalness_with_audio_separator",
+                return_value=0.9,
+            ):
+                analyzed, skipped = analyze_library(store, features="vocalness", method="audio-separator")
+
+            features = store.get_features(track_id)
+            self.assertEqual(analyzed, 0)
+            self.assertEqual(skipped, 1)
+            self.assertEqual(features.vocalness, 0.12)
+            self.assertEqual(features.feature_source, ESSENTIA_VOICE_FEATURE_SOURCE)
             store.close()
 
     def test_audio_separator_method_writes_high_confidence_vocalness(self) -> None:

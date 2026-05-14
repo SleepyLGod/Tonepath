@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tonepath.analysis import AUDIO_SEPARATOR_FEATURE_SOURCE, ESSENTIA_VOICE_FEATURE_SOURCE
 from tonepath.db import TonepathStore
 from tonepath.models import SessionPhase, Track, TrackFeatures
 from tonepath.selector import score_track
@@ -143,6 +144,39 @@ class SelectorFeaturesTest(unittest.TestCase):
             self.assertIn("vocalness feature supports no-vocals constraint", instrumental.reasons)
             self.assertIn("vocalness feature conflicts with no-vocals constraint", vocal.reasons)
             self.assertIn("no-vocals requested but vocalness is unknown", unknown.reasons)
+            store.close()
+
+    def test_essentia_voice_source_is_weighted_above_separator_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            classifier_id = store.upsert_track(track_for(tmp, "classifier.wav"))
+            separator_id = store.upsert_track(track_for(tmp, "separator.wav"))
+            store.upsert_features(
+                TrackFeatures(
+                    classifier_id,
+                    vocalness=0.2,
+                    loudness=-20.0,
+                    energy=0.4,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+            store.upsert_features(
+                TrackFeatures(
+                    separator_id,
+                    vocalness=0.2,
+                    loudness=-20.0,
+                    energy=0.4,
+                    feature_source=AUDIO_SEPARATOR_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            phase = SessionPhase("focus", 0, 600, 0.5, 0.6, 0.5, "avoid")
+            classifier = score_track(store, store.get_track(classifier_id), phase)
+            separator = score_track(store, store.get_track(separator_id), phase)
+
+            self.assertGreater(classifier.score, separator.score)
             store.close()
 
 

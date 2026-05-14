@@ -135,7 +135,68 @@ class CliAnalyzeTest(unittest.TestCase):
         result = CliRunner().invoke(app, ["analyze", "--features", "basic", "--method", "audio-separator"])
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("--method is only supported with --features vocalness", result.output)
+        self.assertIn("--method is only supported", result.output)
+        self.assertIn("tags", result.output)
+
+    def test_analyze_mir_command_is_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                path = Path(tmp) / "song.mp3"
+                path.write_bytes(b"not decoded as audio")
+                store.upsert_track(
+                    Track(
+                        id=None,
+                        path=path,
+                        file_hash="hash",
+                        mtime=1.0,
+                        title="song",
+                        artist="artist",
+                        album=None,
+                        genre=None,
+                        duration=None,
+                        format="mp3",
+                    )
+                )
+                store.close()
+
+                with patch("tonepath.analysis.import_essentia_standard", return_value=object()), patch(
+                    "tonepath.analysis.extract_mir_with_essentia",
+                    return_value={"bpm": 100.0, "loudness": -18.0, "key": "C", "scale": "major"},
+                ):
+                    result = CliRunner().invoke(app, ["analyze", "--features", "mir", "--method", "essentia"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertIn("energy=", result.output)
+                self.assertIn("bpm=100.0", result.output)
+
+    def test_analyze_tags_missing_reports_clear_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                path = Path(tmp) / "song.mp3"
+                path.write_bytes(b"not decoded as audio")
+                store.upsert_track(
+                    Track(
+                        id=None,
+                        path=path,
+                        file_hash="hash",
+                        mtime=1.0,
+                        title="song",
+                        artist="artist",
+                        album=None,
+                        genre=None,
+                        duration=None,
+                        format="mp3",
+                    )
+                )
+                store.close()
+
+                with patch("tonepath.analysis.ensure_essentia_tagging_available", side_effect=RuntimeError("TensorFlow model support")):
+                    result = CliRunner().invoke(app, ["analyze", "--features", "tags", "--method", "essentia"])
+
+                self.assertNotEqual(result.exit_code, 0)
+                self.assertIn("TensorFlow model support", result.output)
 
     def test_analyze_limit_prints_progress(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

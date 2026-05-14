@@ -2,24 +2,30 @@
 
 from __future__ import annotations
 
+import contextlib
 import math
+import os
 import re
 import shutil
 import subprocess
 import time
 import wave
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
 from tonepath import config
 from tonepath.db import TonepathStore
-from tonepath.models import Track, TrackFeatures
+from tonepath.models import EnrichmentRecord, Track, TrackFeatures
 from tonepath.scanner import fingerprint, read_track
 
 
 FEATURE_SOURCE = "basic-local-analysis"
+ESSENTIA_MIR_FEATURE_SOURCE = "model-essentia-mir"
+ESSENTIA_VOICE_FEATURE_SOURCE = "model-essentia-voice-instrumental"
+ESSENTIA_TAGS_FEATURE_SOURCE = "model-essentia-tags"
 DEMUCS_FEATURE_SOURCE = "model-demucs-cli"
 AUDIO_SEPARATOR_FEATURE_SOURCE = "model-audio-separator"
 FFMPEG_TIMEOUT_SEC = 30.0
@@ -31,6 +37,7 @@ PCM_ANALYSIS_SECONDS = 90
 VOCALNESS_SECONDS = 45
 MEAN_VOLUME_PATTERN = re.compile(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB")
 VOCALNESS_METHODS = {"spectral", "demucs-cli", "audio-separator"}
+ANALYSIS_FEATURES = {"basic", "vocalness", "mir", "tags"}
 
 
 @dataclass(frozen=True)
@@ -58,16 +65,22 @@ def analyze_library(
 ) -> tuple[int, int]:
     """Analyze scanned local tracks and return analyzed/skipped counts."""
 
-    if features not in {"basic", "vocalness"}:
-        raise ValueError("Only basic and vocalness feature analysis are implemented.")
-    if method not in VOCALNESS_METHODS:
+    if features not in ANALYSIS_FEATURES:
+        raise ValueError("Only basic, vocalness, mir, and tags feature analysis are implemented.")
+    if features == "vocalness" and method not in VOCALNESS_METHODS:
         raise ValueError("Only spectral, audio-separator, and demucs-cli vocalness methods are implemented.")
+    if features in {"mir", "tags"} and method != "essentia":
+        raise ValueError("Only essentia is supported for mir and tags analysis.")
     if features == "basic" and method != "spectral":
-        raise ValueError("The --method option is only supported with --features vocalness.")
+        raise ValueError("The --method option is only supported with --features vocalness, mir, or tags.")
     if features == "vocalness" and method == "audio-separator" and shutil.which("audio-separator") is None:
         raise RuntimeError("audio-separator vocalness requires the optional models extra. Run: uv sync --extra models")
     if features == "vocalness" and method == "demucs-cli" and shutil.which("demucs") is None:
         raise RuntimeError("demucs-cli vocalness requires the `demucs` command on PATH. Tonepath does not install it.")
+    if features == "mir" and method == "essentia":
+        import_essentia_standard()
+    if features == "tags" and method == "essentia":
+        ensure_essentia_tagging_available()
     if limit is not None and limit < 1:
         raise ValueError("Limit must be greater than zero.")
     if force and only_missing:
@@ -96,8 +109,14 @@ def analyze_library(
         try:
             if features == "basic":
                 result = analyze_track_basic(track, existing)
+            elif features == "vocalness":
+                result = analyze_track_vocalness(track, existing, method=method, force=force)
+            elif features == "mir":
+                result, enrichment = analyze_track_mir(track, existing, method=method)
+                upsert_enrichment_records(store, enrichment)
             else:
-                result = analyze_track_vocalness(track, existing, method=method)
+                result, enrichment = analyze_track_tags(track, existing, method=method, force=force)
+                upsert_enrichment_records(store, enrichment)
         except RuntimeError as exc:
             skipped += 1
             if progress is not None:
@@ -157,9 +176,21 @@ def track_needs_analysis(
         if only_missing:
             return existing is None or existing.energy is None or existing.loudness is None
         return True
+    if features == "mir":
+        if only_missing:
+            return existing is None or existing.energy is None or existing.loudness is None or existing.bpm is None
+        return True
+    if features == "tags":
+        if existing is not None and existing.feature_source == ESSENTIA_VOICE_FEATURE_SOURCE and existing.vocalness is not None:
+            return False
+        if only_missing:
+            return existing is None or existing.vocalness is None or existing.feature_source != ESSENTIA_VOICE_FEATURE_SOURCE
+        return True
 
     source = feature_source_for_method(method)
     if method in {"audio-separator", "demucs-cli"}:
+        if existing is not None and existing.feature_source == ESSENTIA_VOICE_FEATURE_SOURCE:
+            return False
         return existing is None or existing.vocalness is None or existing.feature_source != source
     if only_missing:
         return existing is None or existing.vocalness is None
@@ -210,6 +241,13 @@ def feature_source_for_method(method: str) -> str:
     if method == "demucs-cli":
         return DEMUCS_FEATURE_SOURCE
     return FEATURE_SOURCE
+
+
+def upsert_enrichment_records(store: TonepathStore, records: Sequence[EnrichmentRecord]) -> None:
+    """Persist source-attributed enrichment records from one analysis pass."""
+
+    for record in records:
+        store.upsert_enrichment(record)
 
 
 def feature_changed(existing: TrackFeatures | None, result: TrackFeatures) -> bool:
@@ -277,13 +315,21 @@ def analyze_track_basic(track: Track, existing: TrackFeatures | None = None) -> 
     )
 
 
-def analyze_track_vocalness(track: Track, existing: TrackFeatures | None = None, method: str = "spectral") -> TrackFeatures:
+def analyze_track_vocalness(
+    track: Track,
+    existing: TrackFeatures | None = None,
+    method: str = "spectral",
+    *,
+    force: bool = False,
+) -> TrackFeatures:
     """Analyze one track for local vocalness using the requested method."""
 
     if track.id is None:
         raise ValueError("Track must be persisted before analysis.")
     if method not in VOCALNESS_METHODS:
         raise ValueError("Only spectral, audio-separator, and demucs-cli vocalness methods are implemented.")
+    if existing is not None and existing.feature_source == ESSENTIA_VOICE_FEATURE_SOURCE and method in {"audio-separator", "demucs-cli"} and not force:
+        return existing
     if method == "audio-separator":
         vocalness = analyze_vocalness_with_audio_separator(track.path)
         if vocalness is None:
@@ -338,6 +384,215 @@ def analyze_track_vocalness(track: Track, existing: TrackFeatures | None = None,
         feature_source=FEATURE_SOURCE,
         confidence=confidence,
     )
+
+
+def analyze_track_mir(
+    track: Track,
+    existing: TrackFeatures | None = None,
+    method: str = "essentia",
+) -> tuple[TrackFeatures, list[EnrichmentRecord]]:
+    """Analyze one track with an optional local MIR backend."""
+
+    if track.id is None:
+        raise ValueError("Track must be persisted before analysis.")
+    if method != "essentia":
+        raise ValueError("Only essentia MIR analysis is implemented.")
+
+    values = extract_mir_with_essentia(track.path)
+    features = TrackFeatures(
+        track_id=track.id,
+        bpm=number_or_none(values.get("bpm")),
+        loudness=number_or_none(values.get("loudness")),
+        energy=energy_from_mir_loudness(values.get("loudness")),
+        vocalness=existing.vocalness if existing else None,
+        arousal_estimate=existing.arousal_estimate if existing else None,
+        valence_estimate=existing.valence_estimate if existing else None,
+        feature_source=ESSENTIA_MIR_FEATURE_SOURCE,
+        confidence="high",
+    )
+    enrichment = mir_enrichment_records(track.id, values)
+    return features, enrichment
+
+
+def extract_mir_with_essentia(path: Path) -> dict[str, object]:
+    """Extract local MIR descriptors using Essentia MusicExtractor."""
+
+    essentia_standard = import_essentia_standard()
+    try:
+        with suppress_native_output():
+            results, _frames = essentia_standard.MusicExtractor()(str(path))
+    except Exception as exc:  # pragma: no cover - Essentia raises C++ backed exceptions
+        raise RuntimeError(f"Essentia MIR analysis failed for {path.name}.") from exc
+    return {
+        "bpm": descriptor_value(results, "rhythm.bpm"),
+        "loudness": descriptor_value(results, "lowlevel.loudness_ebu128.integrated"),
+        "danceability": descriptor_value(results, "rhythm.danceability"),
+        "key": descriptor_value(results, "tonal.key_edma.key"),
+        "scale": descriptor_value(results, "tonal.key_edma.scale"),
+        "key_strength": descriptor_value(results, "tonal.key_edma.strength"),
+        "dynamic_complexity": descriptor_value(results, "lowlevel.dynamic_complexity"),
+    }
+
+
+def import_essentia_standard() -> Any:
+    """Import Essentia's standard API or raise a user-facing dependency error."""
+
+    try:
+        import essentia.standard as essentia_standard  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RuntimeError("Essentia MIR analysis requires the optional extra. Run: uv sync --extra mir") from exc
+    return essentia_standard
+
+
+@contextlib.contextmanager
+def suppress_native_output() -> Iterator[None]:
+    """Suppress noisy native-library writes to stdout and stderr."""
+
+    stdout_fd = os.dup(1)
+    stderr_fd = os.dup(2)
+    try:
+        with open(os.devnull, "w", encoding="utf-8") as devnull:
+            os.dup2(devnull.fileno(), 1)
+            os.dup2(devnull.fileno(), 2)
+            yield
+    finally:
+        os.dup2(stdout_fd, 1)
+        os.dup2(stderr_fd, 2)
+        os.close(stdout_fd)
+        os.close(stderr_fd)
+
+
+def descriptor_value(pool: Any, key: str) -> object | None:
+    """Return one Essentia descriptor value when present."""
+
+    try:
+        return pool[key]
+    except Exception:
+        return None
+
+
+def energy_from_mir_loudness(value: object) -> float | None:
+    """Map a MIR loudness value into Tonepath's normalized energy slot."""
+
+    loudness = number_or_none(value)
+    return loudness_to_unit(loudness) if loudness is not None else None
+
+
+def mir_enrichment_records(track_id: int, values: Mapping[str, object]) -> list[EnrichmentRecord]:
+    """Build source-attributed enrichment records for MIR descriptors."""
+
+    records: list[EnrichmentRecord] = []
+    for field in ("key", "scale", "key_strength", "danceability", "dynamic_complexity"):
+        value = values.get(field)
+        if value is None:
+            continue
+        records.append(
+            EnrichmentRecord(
+                track_id=track_id,
+                field=field,
+                value=stringify_descriptor(value),
+                tier="features",
+                source=ESSENTIA_MIR_FEATURE_SOURCE,
+                confidence="high",
+            )
+        )
+    return records
+
+
+def analyze_track_tags(
+    track: Track,
+    existing: TrackFeatures | None = None,
+    method: str = "essentia",
+    *,
+    force: bool = False,
+) -> tuple[TrackFeatures, list[EnrichmentRecord]]:
+    """Analyze one track with optional local music-tagging models."""
+
+    if track.id is None:
+        raise ValueError("Track must be persisted before analysis.")
+    if method != "essentia":
+        raise ValueError("Only essentia tagging analysis is implemented.")
+    if existing is not None and existing.feature_source == ESSENTIA_VOICE_FEATURE_SOURCE and existing.vocalness is not None and not force:
+        return existing, []
+
+    values = extract_tags_with_essentia(track.path)
+    vocalness = number_or_none(values.get("vocalness"))
+    features = TrackFeatures(
+        track_id=track.id,
+        bpm=existing.bpm if existing else None,
+        loudness=existing.loudness if existing else None,
+        energy=existing.energy if existing else None,
+        vocalness=vocalness if vocalness is not None else (existing.vocalness if existing else None),
+        arousal_estimate=existing.arousal_estimate if existing else None,
+        valence_estimate=existing.valence_estimate if existing else None,
+        feature_source=ESSENTIA_VOICE_FEATURE_SOURCE if vocalness is not None else (existing.feature_source if existing else FEATURE_SOURCE),
+        confidence="high" if vocalness is not None else (existing.confidence if existing else "low"),
+    )
+    return features, tag_enrichment_records(track.id, values)
+
+
+def extract_tags_with_essentia(path: Path) -> dict[str, object]:
+    """Extract local music tags with Essentia TensorFlow models when installed."""
+
+    ensure_essentia_tagging_available()
+    raise RuntimeError("Essentia tagging model files are not configured yet.")
+
+
+def ensure_essentia_tagging_available() -> None:
+    """Raise a clear error when Essentia TensorFlow tagging support is missing."""
+
+    essentia_standard = import_essentia_standard()
+    if hasattr(essentia_standard, "TensorflowPredict2D"):
+        return
+    raise RuntimeError(
+        "Essentia tagging requires TensorFlow model support, which is not available in this environment. "
+        "MIR extraction is available with `uv sync --extra mir`; tagging models need a later optional adapter."
+    )
+
+
+def tag_enrichment_records(track_id: int, values: Mapping[str, object]) -> list[EnrichmentRecord]:
+    """Build source-attributed enrichment records for music-tagging outputs."""
+
+    records: list[EnrichmentRecord] = []
+    tags = values.get("tags")
+    if not isinstance(tags, Sequence) or isinstance(tags, (str, bytes)):
+        return records
+    for item in tags:
+        if not isinstance(item, Sequence) or len(item) != 2:
+            continue
+        label, score = item
+        records.append(
+            EnrichmentRecord(
+                track_id=track_id,
+                field=f"tag:{label}",
+                value=stringify_descriptor(score),
+                tier="features",
+                source=ESSENTIA_TAGS_FEATURE_SOURCE,
+                confidence="high",
+            )
+        )
+    return records
+
+
+def number_or_none(value: object) -> float | None:
+    """Return a finite float value or None."""
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def stringify_descriptor(value: object) -> str:
+    """Return a compact stable string for one enrichment descriptor."""
+
+    number = number_or_none(value)
+    if number is not None:
+        return f"{number:.4g}"
+    return str(value)
 
 
 def analyze_vocalness_with_audio_separator(path: Path) -> float | None:

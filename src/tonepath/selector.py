@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from tonepath.analysis import loudness_to_unit
+from tonepath.analysis import (
+    AUDIO_SEPARATOR_FEATURE_SOURCE,
+    DEMUCS_FEATURE_SOURCE,
+    ESSENTIA_VOICE_FEATURE_SOURCE,
+    loudness_to_unit,
+)
 from tonepath.db import TonepathStore
 from tonepath.models import CandidateScore, SessionPlan, SessionPhase, Track, TrackFeatures
 
@@ -71,11 +76,12 @@ def score_track(store: TonepathStore, track: Track, phase: SessionPhase) -> Cand
 
     if phase.vocal_policy == "avoid":
         if features and features.vocalness is not None:
+            source_weight = vocalness_source_weight(features.feature_source)
             if features.vocalness <= 0.35:
-                score += 2.0
+                score += 2.0 * source_weight
                 reasons.append("vocalness feature supports no-vocals constraint")
             elif features.vocalness >= 0.65:
-                score -= 3.0
+                score -= 3.0 * source_weight
                 reasons.append("vocalness feature conflicts with no-vocals constraint")
             else:
                 reasons.append("vocalness feature is inconclusive for no-vocals constraint")
@@ -116,6 +122,16 @@ def feature_fit(features: TrackFeatures, phase: SessionPhase) -> float:
     if features.bpm is not None:
         score += bpm_fit(features.bpm, phase)
     return score
+
+
+def vocalness_source_weight(feature_source: str) -> float:
+    """Return how strongly selector should trust one vocalness source."""
+
+    if feature_source == ESSENTIA_VOICE_FEATURE_SOURCE:
+        return 1.4
+    if feature_source in {AUDIO_SEPARATOR_FEATURE_SOURCE, DEMUCS_FEATURE_SOURCE}:
+        return 0.8
+    return 1.0
 
 
 def bpm_fit(bpm: float, phase: SessionPhase) -> float:

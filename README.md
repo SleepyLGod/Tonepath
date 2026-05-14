@@ -22,7 +22,7 @@ Tonepath is currently a working terminal prototype. It is not a macOS app, web a
 | Feedback loop | Implemented | The session runtime records feedback and updates upcoming candidates for skip, no-vocals, too-loud, too-slow, and like. |
 | TUI | MVP | Textual screen with prompt intake, timeline, controlled playback, queue, why panel, privacy badge, footer shortcuts, and event log. It does not autoplay on launch. |
 | Enrichment | Local scaffold | Local metadata enrichment is available; online providers are opt-in boundaries and do not make requests yet. |
-| Audio analysis | Basic | `tonepath analyze --features basic` stores approximate loudness, energy, and conservative BPM. `tonepath analyze --features vocalness` adds a local spectral vocalness proxy without heavy ML dependencies. Optional model adapters are explicit and not default dependencies. |
+| Audio analysis | Basic + optional MIR | `tonepath analyze --features basic` stores approximate loudness, energy, and conservative BPM. `tonepath analyze --features mir --method essentia` adds optional Essentia MIR features. Vocalness remains source-attributed and explicit. |
 | Tests | Implemented | Unit tests cover planner, scanner, config, privacy, explanation, session feedback, enrichment, and TUI launch behavior. |
 
 ## Roadmap
@@ -129,7 +129,16 @@ uv run tonepath analyze --features vocalness
 uv run tonepath analyze --features vocalness --method spectral
 ```
 
-Optional local model adapter:
+Optional faster MIR adapter:
+
+```bash
+uv sync --extra mir
+uv run tonepath analyze --features mir --method essentia --limit 20
+```
+
+Essentia MIR stores BPM, loudness, and energy in `track_features`, and stores descriptors such as key, scale, danceability, and dynamic complexity as source-attributed enrichment records. This is the preferred local route for rhythm/tonal/energy features.
+
+Optional slow separation fallback:
 
 ```bash
 uv sync --extra models
@@ -137,7 +146,17 @@ uv run tonepath analyze --features vocalness --method audio-separator --only-mis
 uv run tonepath analyze --features vocalness --method demucs-cli
 ```
 
-`audio-separator` is the recommended optional model route. It is installed only when you run `uv sync --extra models`, and its first real run may download model files into Tonepath's local cache. Full-song separation can take several minutes per track on CPU or Apple Silicon acceleration, so run model analysis before listening; Tonepath never runs source separation during playback. `demucs-cli` remains available for users who already have a separate `demucs` command on PATH. If a requested model command is unavailable, Tonepath fails clearly instead of falling back to a fake result.
+`audio-separator` is a slow local source-separation fallback, not the primary route for music understanding. It is installed only when you run `uv sync --extra models`, and its first real run may download model files into Tonepath's local cache. Full-song separation can take several minutes per track on CPU or Apple Silicon acceleration, so run it before listening; Tonepath never runs source separation during playback. `demucs-cli` remains available for users who already have a separate `demucs` command on PATH.
+
+If you want both optional stacks in the same project environment, run `uv sync --extra mir --extra models`.
+
+Experimental tagging boundary:
+
+```bash
+uv run tonepath analyze --features tags --method essentia --limit 20
+```
+
+Tagging is intentionally not advertised as ready. The current Essentia wheel supports MIR extraction on this project, but TensorFlow music-tagging model support is not available in the default environment. When unavailable, Tonepath fails clearly instead of falling back to guessed tags.
 
 Model analysis is resumable and incremental:
 
@@ -223,7 +242,7 @@ Tonepath separates music understanding into explicit tiers:
 | Tier | Status | Behavior |
 | --- | --- | --- |
 | `local` | Implemented | Stores existing local metadata as source-attributed enrichment records. |
-| `features` | Basic | Stores local basic analysis rows. WAV, MP3, FLAC, and M4A can get approximate loudness, energy, conservative BPM, and spectral vocalness when decodable. Vocalness is a proxy, not source separation. |
+| `features` | Basic + optional MIR | Stores local analysis rows. WAV, MP3, FLAC, and M4A can get approximate loudness, energy, conservative BPM, and spectral vocalness when decodable. Optional Essentia MIR can add stronger BPM/loudness/key/danceability descriptors. |
 | `online` | Planned | Will require explicit opt-in, cache results, cite sources, and avoid sending local file paths. |
 
 Optional model-backed analysis remains local:
@@ -231,7 +250,8 @@ Optional model-backed analysis remains local:
 | Method | Status | Behavior |
 | --- | --- | --- |
 | `spectral` | Default | Lightweight local vocalness proxy. No model download and no network access. |
-| `audio-separator` | Recommended optional model | Uses the `models` extra to run local offline stem separation. Outputs are cached under Tonepath data as `model-audio-separator` with higher confidence, but they are still source-attributed features rather than absolute facts. |
+| `essentia` | Optional MIR | Uses the `mir` extra for offline rhythm, loudness, tonal, and danceability descriptors. |
+| `audio-separator` | Slow fallback | Uses the `models` extra to run local offline stem separation. Outputs are cached under Tonepath data as `model-audio-separator`, but this is not a fast music-tagging model. |
 | `demucs-cli` | Compatibility adapter | Uses a separately installed Demucs CLI to estimate vocalness from the vocal stem. Results are stored as `model-demucs-cli`; this path is for advanced users who already have Demucs installed. |
 
 Online providers are blocked by default:

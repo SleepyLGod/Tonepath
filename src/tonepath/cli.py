@@ -171,8 +171,8 @@ def current() -> None:
 
 @app.command()
 def analyze(
-    features: Annotated[str, typer.Option(help="Feature tier: basic or vocalness.")] = "basic",
-    method: Annotated[str, typer.Option(help="Vocalness method: spectral, audio-separator, or demucs-cli.")] = "spectral",
+    features: Annotated[str, typer.Option(help="Feature tier: basic, vocalness, mir, or tags.")] = "basic",
+    method: Annotated[str, typer.Option(help="Analysis method: spectral, audio-separator, demucs-cli, or essentia.")] = "spectral",
     only_missing: Annotated[bool, typer.Option("--only-missing", help="Analyze only tracks missing the requested feature.")] = False,
     changed_only: Annotated[bool, typer.Option("--changed-only", help="Analyze only files changed since the last scan.")] = False,
     force: Annotated[bool, typer.Option("--force", help="Re-analyze tracks even when existing results are present.")] = False,
@@ -180,12 +180,14 @@ def analyze(
 ) -> None:
     """Run local audio feature analysis for scanned tracks."""
 
-    if features not in {"basic", "vocalness"}:
-        raise typer.BadParameter("only basic and vocalness feature analysis are implemented")
-    if method not in {"spectral", "audio-separator", "demucs-cli"}:
+    if features not in {"basic", "vocalness", "mir", "tags"}:
+        raise typer.BadParameter("only basic, vocalness, mir, and tags feature analysis are implemented")
+    if features == "vocalness" and method not in {"spectral", "audio-separator", "demucs-cli"}:
         raise typer.BadParameter("only spectral, audio-separator, and demucs-cli vocalness methods are implemented")
+    if features in {"mir", "tags"} and method != "essentia":
+        raise typer.BadParameter("only essentia is supported for mir and tags analysis")
     if features == "basic" and method != "spectral":
-        raise typer.BadParameter("--method is only supported with --features vocalness")
+        raise typer.BadParameter("--method is only supported with --features vocalness, mir, or tags")
     store = TonepathStore()
     try:
         try:
@@ -222,10 +224,12 @@ def print_analysis_progress(event: AnalysisProgress) -> None:
     if event.result is None:
         console.print("result: skipped")
         return
+    energy = "unknown" if event.result.energy is None else f"{event.result.energy:.2f}"
+    bpm = "unknown" if event.result.bpm is None else f"{event.result.bpm:.1f}"
     vocalness = "unknown" if event.result.vocalness is None else f"{event.result.vocalness:.2f}"
     runtime = 0.0 if event.runtime_sec is None else event.runtime_sec
     console.print(
-        f"result: vocalness={vocalness} source={event.result.feature_source} "
+        f"result: energy={energy} bpm={bpm} vocalness={vocalness} source={event.result.feature_source} "
         f"confidence={event.result.confidence} runtime={runtime:.1f}s"
     )
 
