@@ -22,6 +22,10 @@ class ConfigTest(unittest.TestCase):
                 self.assertFalse(settings.privacy.send_to_llm)
                 self.assertTrue(settings.privacy.store_play_history)
 
+    def test_default_home_is_workspace_local_when_not_overridden(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(config.app_home(), config.repo_root().parent / ".tonepath")
+
     def test_add_music_dir_persists_expanded_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):

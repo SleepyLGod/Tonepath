@@ -198,6 +198,37 @@ class CliAnalyzeTest(unittest.TestCase):
                 self.assertNotEqual(result.exit_code, 0)
                 self.assertIn("TensorFlow model support", result.output)
 
+    def test_analyze_tags_essentia_tf_command_is_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                path = Path(tmp) / "song.mp3"
+                path.write_bytes(b"not decoded as audio")
+                store.upsert_track(
+                    Track(
+                        id=None,
+                        path=path,
+                        file_hash="hash",
+                        mtime=1.0,
+                        title="song",
+                        artist="artist",
+                        album=None,
+                        genre=None,
+                        duration=None,
+                        format="mp3",
+                    )
+                )
+                store.close()
+
+                with patch("tonepath.analysis.ensure_essentia_tf_runtime", return_value=None), patch(
+                    "tonepath.analysis.run_essentia_tf_tags",
+                    return_value={"vocalness": 0.2, "tags": [["instrumental", 0.9]]},
+                ):
+                    result = CliRunner().invoke(app, ["analyze", "--features", "tags", "--method", "essentia-tf"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertIn("vocalness=0.20", result.output)
+
     def test_analyze_limit_prints_progress(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):

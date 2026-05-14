@@ -18,6 +18,7 @@ from typing import Any
 
 from tonepath import config
 from tonepath.db import TonepathStore
+from tonepath.model_runtime import ensure_essentia_tf_runtime, run_essentia_tf_tags
 from tonepath.models import EnrichmentRecord, Track, TrackFeatures
 from tonepath.scanner import fingerprint, read_track
 
@@ -26,6 +27,7 @@ FEATURE_SOURCE = "basic-local-analysis"
 ESSENTIA_MIR_FEATURE_SOURCE = "model-essentia-mir"
 ESSENTIA_VOICE_FEATURE_SOURCE = "model-essentia-voice-instrumental"
 ESSENTIA_TAGS_FEATURE_SOURCE = "model-essentia-tags"
+ESSENTIA_TF_TAGS_FEATURE_SOURCE = "model-essentia-tf-tags"
 DEMUCS_FEATURE_SOURCE = "model-demucs-cli"
 AUDIO_SEPARATOR_FEATURE_SOURCE = "model-audio-separator"
 FFMPEG_TIMEOUT_SEC = 30.0
@@ -37,6 +39,7 @@ PCM_ANALYSIS_SECONDS = 90
 VOCALNESS_SECONDS = 45
 MEAN_VOLUME_PATTERN = re.compile(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB")
 VOCALNESS_METHODS = {"spectral", "demucs-cli", "audio-separator"}
+TAGGING_METHODS = {"essentia", "essentia-tf"}
 ANALYSIS_FEATURES = {"basic", "vocalness", "mir", "tags"}
 
 
@@ -69,8 +72,10 @@ def analyze_library(
         raise ValueError("Only basic, vocalness, mir, and tags feature analysis are implemented.")
     if features == "vocalness" and method not in VOCALNESS_METHODS:
         raise ValueError("Only spectral, audio-separator, and demucs-cli vocalness methods are implemented.")
-    if features in {"mir", "tags"} and method != "essentia":
-        raise ValueError("Only essentia is supported for mir and tags analysis.")
+    if features == "mir" and method != "essentia":
+        raise ValueError("Only essentia is supported for mir analysis.")
+    if features == "tags" and method not in TAGGING_METHODS:
+        raise ValueError("Only essentia and essentia-tf are supported for tags analysis.")
     if features == "basic" and method != "spectral":
         raise ValueError("The --method option is only supported with --features vocalness, mir, or tags.")
     if features == "vocalness" and method == "audio-separator" and shutil.which("audio-separator") is None:
@@ -81,6 +86,8 @@ def analyze_library(
         import_essentia_standard()
     if features == "tags" and method == "essentia":
         ensure_essentia_tagging_available()
+    if features == "tags" and method == "essentia-tf":
+        ensure_essentia_tf_runtime()
     if limit is not None and limit < 1:
         raise ValueError("Limit must be greater than zero.")
     if force and only_missing:
@@ -510,12 +517,12 @@ def analyze_track_tags(
 
     if track.id is None:
         raise ValueError("Track must be persisted before analysis.")
-    if method != "essentia":
-        raise ValueError("Only essentia tagging analysis is implemented.")
+    if method not in TAGGING_METHODS:
+        raise ValueError("Only essentia and essentia-tf tagging analysis is implemented.")
     if existing is not None and existing.feature_source == ESSENTIA_VOICE_FEATURE_SOURCE and existing.vocalness is not None and not force:
         return existing, []
 
-    values = extract_tags_with_essentia(track.path)
+    values = extract_tags_with_essentia_tf(track.path) if method == "essentia-tf" else extract_tags_with_essentia(track.path)
     vocalness = number_or_none(values.get("vocalness"))
     features = TrackFeatures(
         track_id=track.id,
@@ -528,7 +535,8 @@ def analyze_track_tags(
         feature_source=ESSENTIA_VOICE_FEATURE_SOURCE if vocalness is not None else (existing.feature_source if existing else FEATURE_SOURCE),
         confidence="high" if vocalness is not None else (existing.confidence if existing else "low"),
     )
-    return features, tag_enrichment_records(track.id, values)
+    source = ESSENTIA_TF_TAGS_FEATURE_SOURCE if method == "essentia-tf" else ESSENTIA_TAGS_FEATURE_SOURCE
+    return features, tag_enrichment_records(track.id, values, source=source)
 
 
 def extract_tags_with_essentia(path: Path) -> dict[str, object]:
@@ -536,6 +544,12 @@ def extract_tags_with_essentia(path: Path) -> dict[str, object]:
 
     ensure_essentia_tagging_available()
     raise RuntimeError("Essentia tagging model files are not configured yet.")
+
+
+def extract_tags_with_essentia_tf(path: Path) -> dict[str, object]:
+    """Extract local music tags through the isolated Essentia TensorFlow runtime."""
+
+    return run_essentia_tf_tags(path)
 
 
 def ensure_essentia_tagging_available() -> None:
@@ -550,7 +564,7 @@ def ensure_essentia_tagging_available() -> None:
     )
 
 
-def tag_enrichment_records(track_id: int, values: Mapping[str, object]) -> list[EnrichmentRecord]:
+def tag_enrichment_records(track_id: int, values: Mapping[str, object], source: str = ESSENTIA_TAGS_FEATURE_SOURCE) -> list[EnrichmentRecord]:
     """Build source-attributed enrichment records for music-tagging outputs."""
 
     records: list[EnrichmentRecord] = []
@@ -567,7 +581,7 @@ def tag_enrichment_records(track_id: int, values: Mapping[str, object]) -> list[
                 field=f"tag:{label}",
                 value=stringify_descriptor(score),
                 tier="features",
-                source=ESSENTIA_TAGS_FEATURE_SOURCE,
+                source=source,
                 confidence="high",
             )
         )

@@ -11,7 +11,7 @@ Tonepath is currently a working terminal prototype. It is not a macOS app, web a
 | Area | Status | Notes |
 | --- | --- | --- |
 | Project setup | Implemented | Project-local `uv` workflow, CLI entrypoint, Apache-2.0 license. |
-| Config | Implemented | Local TOML config at `~/.tonepath/config.toml`; `TONEPATH_HOME` can isolate config and data. |
+| Config | Implemented | Local TOML config under the active `TONEPATH_HOME`; the development default is the workspace-local `.tonepath/` directory. |
 | Library scanning | Implemented | Scans local audio files and reads metadata with Mutagen, falling back to filenames when tags are missing. |
 | Storage | Implemented | SQLite stores tracks, sessions, phases, feedback, profile summaries, future audio feature rows, and source-attributed enrichment fields. |
 | Path planning | Implemented | Deterministic prompt parsing and phase planning for state transitions such as irritated -> focus. |
@@ -23,6 +23,8 @@ Tonepath is currently a working terminal prototype. It is not a macOS app, web a
 | TUI | MVP | Textual screen with prompt intake, timeline, controlled playback, queue, why panel, privacy badge, footer shortcuts, and event log. It does not autoplay on launch. |
 | Enrichment | Local scaffold | Local metadata enrichment is available; online providers are opt-in boundaries and do not make requests yet. |
 | Audio analysis | Basic + optional MIR | `tonepath analyze --features basic` stores approximate loudness, energy, and conservative BPM. `tonepath analyze --features mir --method essentia` adds optional Essentia MIR features. Vocalness remains source-attributed and explicit. |
+| Model runtime | Scaffold | `tonepath models doctor` and `tonepath models setup essentia-tf` manage a workspace-local TensorFlow tagging runtime outside the main `.venv`. |
+| LLM | Opt-in scaffold | `tonepath llm doctor` and `tonepath parse --llm` support DeepSeek/Qwen OpenAI-compatible parsing without exposing local paths or audio facts. |
 | Tests | Implemented | Unit tests cover planner, scanner, config, privacy, explanation, session feedback, enrichment, and TUI launch behavior. |
 
 ## Roadmap
@@ -67,6 +69,7 @@ You can still use `--dry-run` without starting audible playback. Foreground play
 git clone https://github.com/SleepyLGod/Tonepath.git
 cd Tonepath
 uv sync
+cp .env.example .env
 uv run tonepath config init
 uv run tonepath config add-music-dir ~/Music
 uv run tonepath doctor
@@ -158,6 +161,25 @@ uv run tonepath analyze --features tags --method essentia --limit 20
 
 Tagging is intentionally not advertised as ready. The current Essentia wheel supports MIR extraction on this project, but TensorFlow music-tagging model support is not available in the default environment. When unavailable, Tonepath fails clearly instead of falling back to guessed tags.
 
+Workspace-local TensorFlow tagging runtime:
+
+```bash
+uv run tonepath models doctor
+uv run tonepath models setup essentia-tf
+uv run tonepath analyze --features tags --method essentia-tf --limit 20
+```
+
+The setup command creates a separate Python 3.11 runtime under `TONEPATH_HOME/runtimes/essentia-tf-py311/` and downloads Essentia model files under `TONEPATH_HOME/cache/models/essentia/`. This keeps the main Tonepath environment clean. Playback and TUI never run tagging models in real time; they only read stored SQLite evidence.
+
+Optional LLM prompt parsing:
+
+```bash
+uv run tonepath llm doctor
+uv run tonepath parse --llm "我现在很烦，想半小时后进入写代码状态，不要人声"
+```
+
+LLM parsing uses DeepSeek or Qwen API keys from environment variables or `.env`. It only parses user intent; it must not invent BPM, vocalness, genre, artist metadata, or other audio facts.
+
 Model analysis is resumable and incremental:
 
 ```bash
@@ -177,17 +199,17 @@ uv run tonepath eval selection "我现在很烦，想半小时后进入写代码
 
 ## Config
 
-Default config path:
+Development default config path:
 
 ```text
-~/.tonepath/config.toml
+/Users/von/Projects/music-agents/.tonepath/config.toml
 ```
 
 Default config:
 
 ```toml
 music_dirs = ["~/Music"]
-data_dir = "~/.tonepath"
+data_dir = "/Users/von/Projects/music-agents/.tonepath"
 player = "mpv"
 network_mode = "offline"
 
@@ -204,7 +226,7 @@ uv run tonepath config add-music-dir /path/to/music
 uv run tonepath doctor
 ```
 
-Set `TONEPATH_HOME` to use an isolated config and data directory for tests or alternate profiles:
+Set `TONEPATH_HOME` to use an isolated config and data directory for tests or alternate profiles. The repo-local `.env` may also define this value for development:
 
 ```bash
 TONEPATH_HOME=/tmp/tonepath-demo uv run tonepath config init
@@ -214,10 +236,10 @@ TONEPATH_HOME=/tmp/tonepath-demo uv run tonepath config init
 
 Tonepath is offline by default. v0 does not upload audio files, full library data, or playback history.
 
-Default local data path:
+Development local data path:
 
 ```text
-~/.tonepath/tonepath.db
+/Users/von/Projects/music-agents/.tonepath/tonepath.db
 ```
 
 Inspect local storage:
@@ -233,7 +255,7 @@ Delete local profile, session, feedback, and play data while keeping scanned tra
 uv run tonepath profile delete --all
 ```
 
-Local test music belongs outside git. The repository ignores `songs/`, `.venv/`, caches, and local database files.
+Local test music and secrets belong outside git. The repository ignores `songs/`, `.venv/`, `.env`, caches, and local database files. Commit `.env.example`, never `.env`.
 
 ## Enrichment Boundaries
 
@@ -251,6 +273,7 @@ Optional model-backed analysis remains local:
 | --- | --- | --- |
 | `spectral` | Default | Lightweight local vocalness proxy. No model download and no network access. |
 | `essentia` | Optional MIR | Uses the `mir` extra for offline rhythm, loudness, tonal, and danceability descriptors. |
+| `essentia-tf` | Workspace-local tagging runtime | Uses a separate Python 3.11 runtime for Essentia TensorFlow music tagging models. Results are stored as local source-attributed evidence. |
 | `audio-separator` | Slow fallback | Uses the `models` extra to run local offline stem separation. Outputs are cached under Tonepath data as `model-audio-separator`, but this is not a fast music-tagging model. |
 | `demucs-cli` | Compatibility adapter | Uses a separately installed Demucs CLI to estimate vocalness from the vocal stem. Results are stored as `model-demucs-cli`; this path is for advanced users who already have Demucs installed. |
 

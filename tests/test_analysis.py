@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from tonepath.analysis import (
     ESSENTIA_MIR_FEATURE_SOURCE,
+    ESSENTIA_TF_TAGS_FEATURE_SOURCE,
     ESSENTIA_TAGS_FEATURE_SOURCE,
     ESSENTIA_VOICE_FEATURE_SOURCE,
     analyze_library,
@@ -336,6 +337,31 @@ class AnalysisTest(unittest.TestCase):
             self.assertEqual(fields["tag:mood/theme---focus"], "0.82")
             self.assertEqual(fields["tag:instrument---piano"], "0.61")
             self.assertTrue(all(record.source == ESSENTIA_TAGS_FEATURE_SOURCE for record in enrichment))
+            store.close()
+
+    def test_essentia_tf_tag_analysis_maps_voice_and_tags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            path = Path(tmp) / "song.mp3"
+            path.write_bytes(b"fake")
+            track_id = store.upsert_track(track_for(path, "song.mp3"))
+
+            with patch("tonepath.analysis.ensure_essentia_tf_runtime", return_value=None), patch(
+                "tonepath.analysis.run_essentia_tf_tags",
+                return_value={
+                    "vocalness": 0.12,
+                    "tags": [["voice", 0.1], ["instrumental", 0.9], ["mood/theme---calm", 0.72]],
+                },
+            ):
+                analyzed, skipped = analyze_library(store, features="tags", method="essentia-tf")
+
+            features = store.get_features(track_id)
+            self.assertEqual(analyzed, 1)
+            self.assertEqual(skipped, 0)
+            self.assertEqual(features.feature_source, ESSENTIA_VOICE_FEATURE_SOURCE)
+            self.assertEqual(features.vocalness, 0.12)
+            enrichment = store.list_enrichment(track_id)
+            self.assertTrue(any(record.source == ESSENTIA_TF_TAGS_FEATURE_SOURCE for record in enrichment))
             store.close()
 
     def test_separator_does_not_overwrite_essentia_voice_without_force(self) -> None:

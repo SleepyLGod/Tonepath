@@ -21,6 +21,8 @@ from tonepath.doctor import run_doctor
 from tonepath.enrichment import EnrichmentProvider, enrich_library
 from tonepath.evaluation import evaluate_selection
 from tonepath.explanation import explain_candidate
+from tonepath.llm import llm_doctor, parse_prompt_with_llm
+from tonepath.model_runtime import model_runtime_report, setup_essentia_tf_runtime
 from tonepath.models import CandidateScore, Track
 from tonepath.planner import plan_session
 from tonepath.playback import MpvAdapter
@@ -39,6 +41,9 @@ profile_app = typer.Typer(help="Inspect, export, or delete local profile data.")
 privacy_app = typer.Typer(help="Inspect local privacy status.")
 explain_app = typer.Typer(help="Explain selections.")
 eval_app = typer.Typer(help="Evaluate local selection quality.")
+models_app = typer.Typer(help="Manage local model runtimes.")
+models_setup_app = typer.Typer(help="Set up local model runtimes.")
+llm_app = typer.Typer(help="Inspect optional LLM integrations.")
 
 app.add_typer(config_app, name="config")
 app.add_typer(feedback_app, name="feedback")
@@ -46,6 +51,9 @@ app.add_typer(profile_app, name="profile")
 app.add_typer(privacy_app, name="privacy")
 app.add_typer(explain_app, name="explain")
 app.add_typer(eval_app, name="eval")
+app.add_typer(models_app, name="models")
+models_app.add_typer(models_setup_app, name="setup")
+app.add_typer(llm_app, name="llm")
 
 console = Console()
 
@@ -172,7 +180,7 @@ def current() -> None:
 @app.command()
 def analyze(
     features: Annotated[str, typer.Option(help="Feature tier: basic, vocalness, mir, or tags.")] = "basic",
-    method: Annotated[str, typer.Option(help="Analysis method: spectral, audio-separator, demucs-cli, or essentia.")] = "spectral",
+    method: Annotated[str, typer.Option(help="Analysis method: spectral, audio-separator, demucs-cli, essentia, or essentia-tf.")] = "spectral",
     only_missing: Annotated[bool, typer.Option("--only-missing", help="Analyze only tracks missing the requested feature.")] = False,
     changed_only: Annotated[bool, typer.Option("--changed-only", help="Analyze only files changed since the last scan.")] = False,
     force: Annotated[bool, typer.Option("--force", help="Re-analyze tracks even when existing results are present.")] = False,
@@ -184,8 +192,10 @@ def analyze(
         raise typer.BadParameter("only basic, vocalness, mir, and tags feature analysis are implemented")
     if features == "vocalness" and method not in {"spectral", "audio-separator", "demucs-cli"}:
         raise typer.BadParameter("only spectral, audio-separator, and demucs-cli vocalness methods are implemented")
-    if features in {"mir", "tags"} and method != "essentia":
-        raise typer.BadParameter("only essentia is supported for mir and tags analysis")
+    if features == "mir" and method != "essentia":
+        raise typer.BadParameter("only essentia is supported for mir analysis")
+    if features == "tags" and method not in {"essentia", "essentia-tf"}:
+        raise typer.BadParameter("only essentia and essentia-tf are supported for tags analysis")
     if features == "basic" and method != "spectral":
         raise typer.BadParameter("--method is only supported with --features vocalness, mir, or tags")
     store = TonepathStore()
@@ -247,6 +257,59 @@ def doctor() -> None:
     """Check local Tonepath dependencies."""
 
     console.print(run_doctor())
+
+
+@models_setup_app.command("essentia-tf")
+def models_setup_essentia_tf() -> None:
+    """Set up the workspace-local Essentia TensorFlow runtime."""
+
+    try:
+        status = setup_essentia_tf_runtime()
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print(f"Essentia TensorFlow runtime ready: {status.runtime_dir}")
+
+
+@models_app.command("doctor")
+def models_doctor() -> None:
+    """Check local model runtime status."""
+
+    console.print(model_runtime_report())
+
+
+@llm_app.command("doctor")
+def llm_doctor_command(provider: Annotated[str | None, typer.Option(help="Provider: deepseek or qwen.")] = None) -> None:
+    """Check optional LLM configuration without printing secrets."""
+
+    try:
+        console.print(llm_doctor(provider))
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+@app.command("parse")
+def parse_command(
+    prompt: Annotated[str, typer.Argument(help="State transition prompt.")],
+    use_llm: Annotated[bool, typer.Option("--llm", help="Use an opt-in LLM parser.")] = False,
+    provider: Annotated[str | None, typer.Option(help="Provider: deepseek or qwen.")] = None,
+) -> None:
+    """Parse a prompt into a structured state-transition intent."""
+
+    if not use_llm:
+        plan = plan_session(prompt)
+        payload = {
+            "source_state": plan.request.source_state,
+            "target_state": plan.request.target_state,
+            "duration_min": plan.request.duration_sec // 60,
+            "constraints": ["avoid_vocals"] if plan.request.no_vocals else [],
+        }
+        console.print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    try:
+        payload = parse_prompt_with_llm(prompt, provider=provider)
+    except (RuntimeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 @app.command()

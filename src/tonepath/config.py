@@ -13,6 +13,55 @@ CONFIG_FILENAME = "config.toml"
 DB_FILENAME = "tonepath.db"
 
 
+def repo_root() -> Path:
+    """Return the local Tonepath repository root."""
+
+    return Path(__file__).resolve().parents[2]
+
+
+def workspace_default_home() -> Path:
+    """Return the workspace-local default Tonepath home."""
+
+    root = repo_root()
+    if root.name == "tonepath" and (root / "pyproject.toml").exists():
+        return root.parent / APP_DIR_NAME
+    return Path.home() / APP_DIR_NAME
+
+
+def local_env_path() -> Path:
+    """Return the repo-local dotenv path."""
+
+    return repo_root() / ".env"
+
+
+def load_local_env(path: Path | None = None) -> None:
+    """Load local dotenv values without overriding process environment."""
+
+    env_path = path or local_env_path()
+    if not env_path.exists():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+        os.environ.setdefault(key, unquote_env_value(value.strip()))
+
+
+def unquote_env_value(value: str) -> str:
+    """Return a dotenv value with one optional quote layer removed."""
+
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+load_local_env()
+
+
 @dataclass(frozen=True)
 class PrivacyConfig:
     """Privacy defaults from the local config file."""
@@ -48,7 +97,7 @@ def app_home() -> Path:
     override = os.environ.get("TONEPATH_HOME")
     if override:
         return Path(override).expanduser()
-    return Path.home() / APP_DIR_NAME
+    return workspace_default_home()
 
 
 def config_path() -> Path:
@@ -60,7 +109,7 @@ def config_path() -> Path:
 def default_config() -> TonepathConfig:
     """Return the default local-first Tonepath configuration."""
 
-    default_root = os.environ.get("TONEPATH_HOME", f"~/{APP_DIR_NAME}")
+    default_root = os.environ.get("TONEPATH_HOME", str(workspace_default_home()))
     return TonepathConfig(
         music_dirs=("~/Music",),
         data_dir=default_root,
