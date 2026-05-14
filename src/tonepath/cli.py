@@ -22,7 +22,7 @@ from tonepath.enrichment import EnrichmentProvider, enrich_library
 from tonepath.evaluation import evaluate_selection
 from tonepath.explanation import explain_candidate
 from tonepath.llm import llm_doctor, parse_prompt_with_llm
-from tonepath.model_runtime import model_runtime_report, setup_essentia_tf_runtime
+from tonepath.model_runtime import isolation_report, model_runtime_report, setup_essentia_tf_runtime
 from tonepath.models import CandidateScore, Track
 from tonepath.planner import plan_session
 from tonepath.playback import MpvAdapter
@@ -263,6 +263,7 @@ def doctor() -> None:
 def models_setup_essentia_tf() -> None:
     """Set up the workspace-local Essentia TensorFlow runtime."""
 
+    console.print(isolation_report())
     try:
         status = setup_essentia_tf_runtime()
     except RuntimeError as exc:

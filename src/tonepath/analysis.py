@@ -414,8 +414,8 @@ def analyze_track_mir(
         vocalness=existing.vocalness if existing else None,
         arousal_estimate=existing.arousal_estimate if existing else None,
         valence_estimate=existing.valence_estimate if existing else None,
-        feature_source=ESSENTIA_MIR_FEATURE_SOURCE,
-        confidence="high",
+        feature_source=existing.feature_source if existing and existing.feature_source == ESSENTIA_VOICE_FEATURE_SOURCE else ESSENTIA_MIR_FEATURE_SOURCE,
+        confidence=existing.confidence if existing and existing.feature_source == ESSENTIA_VOICE_FEATURE_SOURCE else "high",
     )
     enrichment = mir_enrichment_records(track.id, values)
     return features, enrichment

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -57,6 +58,78 @@ ESSENTIA_MODEL_FILES = (
 )
 
 
+def runtime_root() -> Path:
+    """Return the root directory for all isolated runtime assets."""
+
+    return config.ensure_data_dir() / "runtimes"
+
+
+def uv_python_install_dir() -> Path:
+    """Return the isolated uv-managed Python install directory."""
+
+    return runtime_root() / "python"
+
+
+def uv_cache_dir() -> Path:
+    """Return the isolated uv cache directory."""
+
+    return config.ensure_data_dir() / "cache" / "uv"
+
+
+def pip_cache_dir() -> Path:
+    """Return the isolated pip cache directory."""
+
+    return config.ensure_data_dir() / "cache" / "pip"
+
+
+def python_userbase_dir() -> Path:
+    """Return the isolated Python userbase directory."""
+
+    return runtime_root() / "python-user"
+
+
+def isolated_runtime_env() -> dict[str, str]:
+    """Return environment variables that keep setup inside Tonepath data dir."""
+
+    data_root = config.ensure_data_dir()
+    env = os.environ.copy()
+    env.update(
+        {
+            "TONEPATH_HOME": str(data_root),
+            "UV_PYTHON_INSTALL_DIR": str(uv_python_install_dir()),
+            "UV_CACHE_DIR": str(uv_cache_dir()),
+            "PIP_CACHE_DIR": str(pip_cache_dir()),
+            "PYTHONUSERBASE": str(python_userbase_dir()),
+            "PYTHONNOUSERSITE": "1",
+            "PIP_NO_INPUT": "1",
+            "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        }
+    )
+    return env
+
+
+def ensure_isolation_dirs() -> None:
+    """Create all local runtime/cache directories before setup."""
+
+    for path in (uv_python_install_dir(), uv_cache_dir(), pip_cache_dir(), python_userbase_dir(), runtime_dir(), essentia_model_dir()):
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def isolation_report() -> str:
+    """Return the active local runtime/cache directory plan."""
+
+    return "\n".join(
+        [
+            "Tonepath isolated runtime paths",
+            f"TONEPATH_HOME={config.ensure_data_dir()}",
+            f"UV_PYTHON_INSTALL_DIR={uv_python_install_dir()}",
+            f"UV_CACHE_DIR={uv_cache_dir()}",
+            f"PIP_CACHE_DIR={pip_cache_dir()}",
+            f"PYTHONUSERBASE={python_userbase_dir()}",
+        ]
+    )
+
+
 @dataclass(frozen=True)
 class RuntimeStatus:
     """Status for one local model runtime."""
@@ -99,20 +172,53 @@ def essentia_model_dir() -> Path:
 def setup_essentia_tf_runtime() -> RuntimeStatus:
     """Create the local Essentia TensorFlow runtime and download model files."""
 
-    python311 = shutil.which("python3.11")
-    if python311 is None:
-        raise RuntimeError("Essentia TensorFlow setup requires python3.11 on PATH.")
-
+    ensure_isolation_dirs()
+    python311 = ensure_isolated_python311()
     root = runtime_dir()
-    root.parent.mkdir(parents=True, exist_ok=True)
     if not runtime_python().exists():
-        subprocess.run([python311, "-m", "venv", str(root)], check=True)
-    subprocess.run([str(runtime_python()), "-m", "pip", "install", "--upgrade", "pip"], check=True)
-    subprocess.run([str(runtime_python()), "-m", "pip", "install", ESSENTIA_TF_PACKAGE], check=True)
+        subprocess.run([str(python311), "-m", "venv", str(root)], check=True, env=isolated_runtime_env())
+    subprocess.run([str(runtime_python()), "-m", "pip", "install", "--upgrade", "pip"], check=True, env=isolated_runtime_env())
+    subprocess.run([str(runtime_python()), "-m", "pip", "install", ESSENTIA_TF_PACKAGE], check=True, env=isolated_runtime_env())
 
     write_runner()
     download_essentia_models()
     return model_runtime_status()
+
+
+def ensure_isolated_python311() -> Path:
+    """Install or find uv-managed Python 3.11 inside the local runtime root."""
+
+    existing = find_isolated_python311()
+    if existing is not None:
+        return existing
+    uv = shutil.which("uv")
+    if uv is None:
+        raise RuntimeError("Essentia TensorFlow setup requires uv on PATH.")
+    subprocess.run([uv, "python", "install", "3.11"], check=True, env=isolated_runtime_env())
+    existing = find_isolated_python311()
+    if existing is None:
+        raise RuntimeError("uv installed Python 3.11, but no isolated python executable was found.")
+    return existing
+
+
+def find_isolated_python311() -> Path | None:
+    """Return an isolated Python 3.11 executable if it exists."""
+
+    root = uv_python_install_dir()
+    candidates = sorted(root.glob("*/bin/python3.11")) + sorted(root.glob("*/bin/python"))
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        completed = subprocess.run(
+            [str(candidate), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=isolated_runtime_env(),
+        )
+        if completed.returncode == 0 and completed.stdout.strip() == "3.11":
+            return candidate
+    return None
 
 
 def write_runner() -> Path:
@@ -166,6 +272,11 @@ def model_runtime_report() -> str:
     status = model_runtime_status()
     lines = [
         "Tonepath model runtime doctor",
+        f"Data directory: {config.ensure_data_dir()}",
+        f"UV Python install dir: {uv_python_install_dir()}",
+        f"UV cache dir: {uv_cache_dir()}",
+        f"PIP cache dir: {pip_cache_dir()}",
+        f"Python userbase: {python_userbase_dir()}",
         f"Runtime directory: {status.runtime_dir}",
         f"Runtime python: {status.python} ({'ok' if status.python.exists() else 'missing'})",
         f"Worker script: {status.runner} ({'ok' if status.runner.exists() else 'missing'})",

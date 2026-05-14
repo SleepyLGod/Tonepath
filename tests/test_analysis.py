@@ -296,6 +296,23 @@ class AnalysisTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "uv sync --extra mir"):
                     analyze_track_mir(track_for(path, "song.mp3", track_id=1))
 
+    def test_mir_analysis_preserves_voice_classifier_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "song.mp3"
+            path.write_bytes(b"fake")
+            existing = TrackFeatures(
+                track_id=1,
+                vocalness=0.2,
+                feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                confidence="high",
+            )
+            with patch("tonepath.analysis.extract_mir_with_essentia", return_value={"bpm": 120.0, "loudness": -12.0}):
+                features, _enrichment = analyze_track_mir(track_for(path, "song.mp3", track_id=1), existing)
+
+            self.assertEqual(features.feature_source, ESSENTIA_VOICE_FEATURE_SOURCE)
+            self.assertEqual(features.vocalness, 0.2)
+            self.assertEqual(features.bpm, 120.0)
+
     def test_tag_analysis_maps_voice_and_tags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = TonepathStore(Path(tmp) / "tonepath.db")

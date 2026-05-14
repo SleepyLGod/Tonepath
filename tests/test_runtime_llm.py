@@ -35,7 +35,7 @@ class RuntimeAndLlmTest(unittest.TestCase):
     def test_model_setup_uses_workspace_local_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": tmp}, clear=True), patch(
-                "tonepath.model_runtime.shutil.which", return_value="/usr/bin/python3.11"
+                "tonepath.model_runtime.ensure_isolated_python311", return_value=Path("/isolated/python3.11")
             ), patch("tonepath.model_runtime.subprocess.run") as run, patch(
                 "tonepath.model_runtime.download_essentia_models"
             ):
