@@ -563,9 +563,78 @@ class AnalysisTest(unittest.TestCase):
             analyzed, skipped = analyze_library(store, features="basic", changed_only=True)
 
             row = store.conn.execute("SELECT COUNT(*) AS count FROM track_features").fetchone()
+            self.assertEqual(analyzed, 2)
+            self.assertEqual(skipped, 0)
+            self.assertEqual(int(row["count"]), 2)
+            store.close()
+
+    def test_changed_only_processes_missing_mir_features(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            path = Path(tmp) / "song.mp3"
+            path.write_bytes(b"fake audio")
+            track_id = store.upsert_track(read_track(path))
+
+            with patch("tonepath.analysis.import_essentia_standard", return_value=object()), patch(
+                "tonepath.analysis.extract_mir_with_essentia",
+                return_value={"bpm": 105.0, "loudness": -12.0},
+            ):
+                analyzed, skipped = analyze_library(store, features="mir", method="essentia", changed_only=True)
+
+            features = store.get_features(track_id)
             self.assertEqual(analyzed, 1)
+            self.assertEqual(skipped, 0)
+            self.assertIsNotNone(features)
+            self.assertEqual(features.bpm, 105.0)
+            store.close()
+
+    def test_changed_only_processes_missing_essentia_tf_vocalness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            path = Path(tmp) / "song.mp3"
+            path.write_bytes(b"fake audio")
+            track_id = store.upsert_track(read_track(path))
+
+            with patch("tonepath.analysis.ensure_essentia_tf_runtime", return_value=None), patch(
+                "tonepath.analysis.run_essentia_tf_tags",
+                return_value={"vocalness": 0.12, "tags": [["instrumental", 0.91]]},
+            ):
+                analyzed, skipped = analyze_library(store, features="tags", method="essentia-tf", changed_only=True)
+
+            features = store.get_features(track_id)
+            self.assertEqual(analyzed, 1)
+            self.assertEqual(skipped, 0)
+            self.assertIsNotNone(features)
+            self.assertEqual(features.feature_source, ESSENTIA_VOICE_FEATURE_SOURCE)
+            self.assertEqual(features.vocalness, 0.12)
+            store.close()
+
+    def test_changed_only_skips_complete_unchanged_tags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            path = Path(tmp) / "song.mp3"
+            path.write_bytes(b"fake audio")
+            track_id = store.upsert_track(read_track(path))
+            store.upsert_features(
+                TrackFeatures(
+                    track_id=track_id,
+                    bpm=100.0,
+                    loudness=-14.0,
+                    energy=0.5,
+                    vocalness=0.1,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            with patch("tonepath.analysis.ensure_essentia_tf_runtime", return_value=None), patch(
+                "tonepath.analysis.run_essentia_tf_tags",
+            ) as run_tags:
+                analyzed, skipped = analyze_library(store, features="tags", method="essentia-tf", changed_only=True)
+
+            self.assertEqual(analyzed, 0)
             self.assertEqual(skipped, 1)
-            self.assertEqual(int(row["count"]), 1)
+            run_tags.assert_not_called()
             store.close()
 
     def test_model_failure_skips_track_and_continues(self) -> None:

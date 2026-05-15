@@ -184,6 +184,23 @@ class TonepathStore:
         row = self.conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchone()
         return track_from_row(row) if row else None
 
+    def prune_missing_tracks_under(self, root: Path, present_paths: set[Path]) -> int:
+        """Delete known tracks under root that were not found by the latest scan."""
+
+        resolved_root = root.expanduser().resolve()
+        present = {path.expanduser().resolve() for path in present_paths}
+        deleted = 0
+        for track in self.list_tracks():
+            resolved_path = track.path.expanduser().resolve()
+            if not resolved_path.is_relative_to(resolved_root):
+                continue
+            if resolved_path in present:
+                continue
+            self.conn.execute("DELETE FROM tracks WHERE id = ?", (track.id,))
+            deleted += 1
+        self.conn.commit()
+        return deleted
+
     def get_features(self, track_id: int) -> TrackFeatures | None:
         """Return locally analyzed features for one track."""
 

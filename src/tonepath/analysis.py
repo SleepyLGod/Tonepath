@@ -175,33 +175,39 @@ def track_needs_analysis(
 ) -> bool:
     """Return whether one track should be analyzed in this pass."""
 
-    if changed_only and not track_file_changed(track):
-        return False
+    if changed_only and track_file_changed(track):
+        return True
+    missing = requested_feature_missing(existing, features, method)
     if changed_only:
-        return True
-    if features == "basic":
-        if only_missing:
-            return existing is None or existing.energy is None or existing.loudness is None
-        return True
-    if features == "mir":
-        if only_missing:
-            return existing is None or existing.energy is None or existing.loudness is None or existing.bpm is None
-        return True
-    if features == "tags":
-        if existing is not None and existing.feature_source == ESSENTIA_VOICE_FEATURE_SOURCE and existing.vocalness is not None:
+        return missing
+    if only_missing:
+        return missing
+    if features == "tags" and existing is not None and existing.feature_source == ESSENTIA_VOICE_FEATURE_SOURCE and existing.vocalness is not None:
+        return False
+    if features == "vocalness" and method in {"audio-separator", "demucs-cli"} and existing is not None:
+        if existing.feature_source == ESSENTIA_VOICE_FEATURE_SOURCE:
             return False
-        if only_missing:
-            return existing is None or existing.vocalness is None or existing.feature_source != ESSENTIA_VOICE_FEATURE_SOURCE
-        return True
+        if existing.feature_source == feature_source_for_method(method) and existing.vocalness is not None:
+            return False
+    return True
+
+
+def requested_feature_missing(existing: TrackFeatures | None, features: str, method: str) -> bool:
+    """Return whether the requested analysis target is missing."""
+
+    if features == "basic":
+        return existing is None or existing.energy is None or existing.loudness is None
+    if features == "mir":
+        return existing is None or existing.energy is None or existing.loudness is None or existing.bpm is None
+    if features == "tags":
+        return existing is None or existing.vocalness is None or existing.feature_source != ESSENTIA_VOICE_FEATURE_SOURCE
 
     source = feature_source_for_method(method)
     if method in {"audio-separator", "demucs-cli"}:
         if existing is not None and existing.feature_source == ESSENTIA_VOICE_FEATURE_SOURCE:
             return False
         return existing is None or existing.vocalness is None or existing.feature_source != source
-    if only_missing:
-        return existing is None or existing.vocalness is None
-    return True
+    return existing is None or existing.vocalness is None
 
 
 def track_file_changed(track: Track) -> bool:

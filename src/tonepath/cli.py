@@ -87,6 +87,7 @@ def scan(path: Annotated[Path | None, typer.Argument(help="Optional local music 
     total = 0
     scanned_dirs = 0
     skipped = 0
+    pruned = 0
     try:
         for music_dir in paths:
             try:
@@ -97,12 +98,15 @@ def scan(path: Annotated[Path | None, typer.Argument(help="Optional local music 
                 continue
             for track in tracks:
                 store.upsert_track(track)
+            pruned += store.prune_missing_tracks_under(music_dir, {track.path for track in tracks})
             total += len(tracks)
             scanned_dirs += 1
     finally:
         store.close()
 
     console.print(f"Scanned {total} track(s) from {scanned_dirs} director(y/ies).")
+    if pruned:
+        console.print(f"Pruned {pruned} missing track(s).")
     if skipped and scanned_dirs == 0:
         raise typer.Exit(code=1)
 
