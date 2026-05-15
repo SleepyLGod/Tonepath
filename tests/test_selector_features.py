@@ -98,6 +98,42 @@ class SelectorFeaturesTest(unittest.TestCase):
             self.assertGreater(calm.score, frantic.score)
             store.close()
 
+    def test_focus_penalizes_low_vocalness_but_overstimulating_track(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            steady_id = store.upsert_track(track_for(tmp, "steady-instrumental.wav"))
+            frantic_id = store.upsert_track(track_for(tmp, "frantic-instrumental.wav"))
+            store.upsert_features(
+                TrackFeatures(
+                    steady_id,
+                    bpm=96.0,
+                    loudness=-16.0,
+                    energy=0.46,
+                    vocalness=0.18,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+            store.upsert_features(
+                TrackFeatures(
+                    frantic_id,
+                    bpm=168.0,
+                    loudness=-8.0,
+                    energy=0.82,
+                    vocalness=0.12,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            phase = SessionPhase("focus", 0, 600, 0.5, 0.6, 0.5, "avoid")
+            steady = score_track(store, store.get_track(steady_id), phase)
+            frantic = score_track(store, store.get_track(frantic_id), phase)
+
+            self.assertGreater(steady.score, frantic.score)
+            self.assertIn("phase stimulation penalty adjusted the score", frantic.reasons)
+            store.close()
+
     def test_low_vocalness_scores_higher_for_no_vocals_phase(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = TonepathStore(Path(tmp) / "tonepath.db")
@@ -144,6 +180,67 @@ class SelectorFeaturesTest(unittest.TestCase):
             self.assertIn("vocalness feature supports no-vocals constraint", instrumental.reasons)
             self.assertIn("vocalness feature conflicts with no-vocals constraint", vocal.reasons)
             self.assertIn("no-vocals requested but vocalness is unknown", unknown.reasons)
+            store.close()
+
+    def test_near_low_vocalness_gets_weak_no_vocals_support(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            near_low_id = store.upsert_track(track_for(tmp, "near-low.wav"))
+            inconclusive_id = store.upsert_track(track_for(tmp, "inconclusive.wav"))
+            store.upsert_features(
+                TrackFeatures(
+                    near_low_id,
+                    vocalness=0.38,
+                    loudness=-18.0,
+                    energy=0.42,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+            store.upsert_features(
+                TrackFeatures(
+                    inconclusive_id,
+                    vocalness=0.5,
+                    loudness=-18.0,
+                    energy=0.42,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            phase = SessionPhase("focus", 0, 600, 0.5, 0.6, 0.5, "avoid")
+            near_low = score_track(store, store.get_track(near_low_id), phase)
+            inconclusive = score_track(store, store.get_track(inconclusive_id), phase)
+
+            self.assertGreater(near_low.score, inconclusive.score)
+            self.assertIn("vocalness feature weakly supports no-vocals constraint", near_low.reasons)
+            store.close()
+
+    def test_vocalness_does_not_dominate_when_vocals_are_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            low_vocal_id = store.upsert_track(track_for(tmp, "low-vocal.wav"))
+            high_vocal_id = store.upsert_track(track_for(tmp, "high-vocal.wav"))
+            for track_id, vocalness in ((low_vocal_id, 0.15), (high_vocal_id, 0.9)):
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id,
+                        bpm=105.0,
+                        loudness=-16.0,
+                        energy=0.5,
+                        vocalness=vocalness,
+                        feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                        confidence="high",
+                    )
+                )
+
+            phase = SessionPhase("focus", 0, 600, 0.5, 0.6, 0.5, "allow")
+            low_vocal = score_track(store, store.get_track(low_vocal_id), phase)
+            high_vocal = score_track(store, store.get_track(high_vocal_id), phase)
+
+            self.assertAlmostEqual(low_vocal.score, high_vocal.score)
+            self.assertNotIn("vocalness feature supports no-vocals constraint", low_vocal.reasons)
+            self.assertNotIn("vocalness feature conflicts with no-vocals constraint", high_vocal.reasons)
             store.close()
 
     def test_essentia_voice_source_is_weighted_above_separator_fallback(self) -> None:

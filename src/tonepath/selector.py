@@ -64,6 +64,8 @@ def score_track(store: TonepathStore, track: Track, phase: SessionPhase) -> Cand
     if features:
         confidence = features.confidence
         score += feature_fit(features, phase)
+        stimulation_penalty = phase_stimulation_penalty(features, phase)
+        score -= stimulation_penalty
         reasons.append(f"audio features available from {features.feature_source}")
         if features.energy is not None:
             reasons.append("energy feature contributes to phase fit")
@@ -71,6 +73,8 @@ def score_track(store: TonepathStore, track: Track, phase: SessionPhase) -> Cand
             reasons.append("loudness feature contributes to phase fit")
         if features.bpm is not None:
             reasons.append("BPM feature contributes to phase fit")
+        if stimulation_penalty:
+            reasons.append("phase stimulation penalty adjusted the score")
     else:
         reasons.append("audio features unavailable; selection uses metadata and feedback")
 
@@ -80,6 +84,9 @@ def score_track(store: TonepathStore, track: Track, phase: SessionPhase) -> Cand
             if features.vocalness <= 0.35:
                 score += 2.0 * source_weight
                 reasons.append("vocalness feature supports no-vocals constraint")
+            elif features.vocalness <= 0.4:
+                score += 1.0 * source_weight
+                reasons.append("vocalness feature weakly supports no-vocals constraint")
             elif features.vocalness >= 0.65:
                 score -= 3.0 * source_weight
                 reasons.append("vocalness feature conflicts with no-vocals constraint")
@@ -132,6 +139,33 @@ def vocalness_source_weight(feature_source: str) -> float:
     if feature_source in {AUDIO_SEPARATOR_FEATURE_SOURCE, DEMUCS_FEATURE_SOURCE}:
         return 0.8
     return 1.0
+
+
+def phase_stimulation_penalty(features: TrackFeatures, phase: SessionPhase) -> float:
+    """Return penalties for tracks that are too stimulating for a phase."""
+
+    penalty = 0.0
+    if features.bpm is not None:
+        if phase.label == "focus" and features.bpm > 110.0:
+            penalty += min((features.bpm - 110.0) / 35.0, 1.0) * 2.2
+        elif phase.label in {"decompress", "soften", "settle", "calm"} and features.bpm > 130.0:
+            penalty += min((features.bpm - 130.0) / 40.0, 1.0) * 0.9
+        elif phase.label == "stabilize" and features.bpm > 130.0:
+            penalty += min((features.bpm - 130.0) / 35.0, 1.0) * 2.5
+
+    if features.energy is not None:
+        if phase.label == "focus" and features.energy > 0.62:
+            penalty += min((features.energy - 0.62) / 0.28, 1.0) * 0.9
+        elif phase.target_energy <= 0.4 and features.energy > phase.target_energy + 0.2:
+            penalty += min((features.energy - phase.target_energy - 0.2) / 0.3, 1.0) * 0.7
+
+    if features.loudness is not None:
+        loudness_unit = loudness_to_unit(features.loudness)
+        if phase.label == "focus" and loudness_unit > 0.62:
+            penalty += min((loudness_unit - 0.62) / 0.25, 1.0) * 0.7
+        elif phase.target_energy <= 0.4 and loudness_unit > phase.target_energy + 0.25:
+            penalty += min((loudness_unit - phase.target_energy - 0.25) / 0.3, 1.0) * 0.55
+    return penalty
 
 
 def bpm_fit(bpm: float, phase: SessionPhase) -> float:
