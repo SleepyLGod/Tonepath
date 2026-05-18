@@ -68,6 +68,20 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("irritated", app.timeline_text())
                     await pilot.press("q")
 
+    async def test_tui_intake_guides_prepare_when_features_are_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    renderable = app.query_one("#now-playing").render()
+                    self.assertIn("tonepath prepare", renderable.plain)
+                    self.assertEqual(app.missing_feature_count(), 1)
+                    await pilot.press("q")
+
     async def test_tui_launches_session_screen_with_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):

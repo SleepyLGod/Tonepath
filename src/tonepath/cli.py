@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
@@ -22,7 +23,7 @@ from tonepath.enrichment import EnrichmentProvider, enrich_library
 from tonepath.evaluation import evaluate_selection
 from tonepath.explanation import explain_candidate
 from tonepath.llm import llm_doctor, parse_prompt_with_llm
-from tonepath.model_runtime import isolation_report, model_runtime_report, setup_essentia_tf_runtime
+from tonepath.model_runtime import isolation_report, model_runtime_report, model_runtime_status, setup_essentia_tf_runtime
 from tonepath.models import CandidateScore, Track
 from tonepath.planner import plan_session
 from tonepath.playback import MpvAdapter
@@ -58,6 +59,27 @@ app.add_typer(llm_app, name="llm")
 console = Console()
 
 
+@dataclass(frozen=True)
+class ScanSummary:
+    """Summary of one scan pass."""
+
+    total: int
+    scanned_dirs: int
+    skipped: int
+    pruned: int
+
+
+@dataclass(frozen=True)
+class LibraryStatus:
+    """Current local library readiness counts."""
+
+    tracks: int
+    features: int
+    missing_features: int
+    vocalness: int
+    mir: int
+
+
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context) -> None:
     """Open the TUI when no subcommand is provided."""
@@ -84,31 +106,64 @@ def scan(path: Annotated[Path | None, typer.Argument(help="Optional local music 
 
     paths = resolve_scan_paths(path)
     store = TonepathStore()
-    total = 0
-    scanned_dirs = 0
-    skipped = 0
-    pruned = 0
     try:
-        for music_dir in paths:
-            try:
-                tracks = scan_directory(music_dir)
-            except (FileNotFoundError, NotADirectoryError) as exc:
-                skipped += 1
-                console.print(f"Skipping {music_dir}: {exc}")
-                continue
-            for track in tracks:
-                store.upsert_track(track)
-            pruned += store.prune_missing_tracks_under(music_dir, {track.path for track in tracks})
-            total += len(tracks)
-            scanned_dirs += 1
+        summary = scan_paths(store, paths)
     finally:
         store.close()
 
-    console.print(f"Scanned {total} track(s) from {scanned_dirs} director(y/ies).")
-    if pruned:
-        console.print(f"Pruned {pruned} missing track(s).")
-    if skipped and scanned_dirs == 0:
+    print_scan_summary(summary)
+    if summary.skipped and summary.scanned_dirs == 0:
         raise typer.Exit(code=1)
+
+
+@app.command()
+def prepare(
+    limit: Annotated[int | None, typer.Option("--limit", help="Maximum number of eligible tracks per analysis pass.")] = None,
+    fast: Annotated[bool, typer.Option("--fast", help="Skip TensorFlow tagging and only prepare scan plus MIR features.")] = False,
+) -> None:
+    """Prepare local music for normal Tonepath use."""
+
+    paths = resolve_scan_paths(None)
+    store = TonepathStore()
+    try:
+        scan_summary = scan_paths(store, paths)
+        console.print("Prepare: scan")
+        print_scan_summary(scan_summary)
+
+        mir_analyzed, mir_skipped = analyze_library(store, features="mir", method="essentia", changed_only=True, limit=limit)
+        console.print(f"Prepare: MIR analyzed {mir_analyzed} track(s); skipped {mir_skipped} track(s).")
+
+        runtime_ready = model_runtime_status().ready
+        if fast:
+            console.print("Prepare: skipped TensorFlow tags (--fast).")
+        elif runtime_ready:
+            tag_analyzed, tag_skipped = analyze_library(
+                store,
+                features="tags",
+                method="essentia-tf",
+                changed_only=True,
+                limit=limit,
+            )
+            console.print(f"Prepare: tags analyzed {tag_analyzed} track(s); skipped {tag_skipped} track(s).")
+        else:
+            console.print("Prepare: tags skipped. Run `uv run tonepath models setup essentia-tf` for vocalness tagging.")
+
+        print_status_summary(library_status(store), runtime_ready=runtime_ready)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        store.close()
+
+
+@app.command("status")
+def status_command() -> None:
+    """Print local library and model readiness without running analysis."""
+
+    store = TonepathStore()
+    try:
+        print_status_summary(library_status(store), runtime_ready=model_runtime_status().ready)
+    finally:
+        store.close()
 
 
 @app.command()
@@ -489,6 +544,78 @@ def resolve_scan_paths(path: Path | None) -> tuple[Path, ...]:
     if path is not None:
         return (path.expanduser(),)
     return tonepath_config.load_config().expanded_music_dirs()
+
+
+def scan_paths(store: TonepathStore, paths: tuple[Path, ...]) -> ScanSummary:
+    """Scan local paths into an existing store and prune missing files."""
+
+    total = 0
+    scanned_dirs = 0
+    skipped = 0
+    pruned = 0
+    for music_dir in paths:
+        try:
+            tracks = scan_directory(music_dir)
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            skipped += 1
+            console.print(f"Skipping {music_dir}: {exc}")
+            continue
+        for track in tracks:
+            store.upsert_track(track)
+        pruned += store.prune_missing_tracks_under(music_dir, {track.path for track in tracks})
+        total += len(tracks)
+        scanned_dirs += 1
+    return ScanSummary(total=total, scanned_dirs=scanned_dirs, skipped=skipped, pruned=pruned)
+
+
+def print_scan_summary(summary: ScanSummary) -> None:
+    """Print a scan summary."""
+
+    console.print(f"Scanned {summary.total} track(s) from {summary.scanned_dirs} director(y/ies).")
+    if summary.pruned:
+        console.print(f"Pruned {summary.pruned} missing track(s).")
+
+
+def library_status(store: TonepathStore) -> LibraryStatus:
+    """Return local library readiness counts."""
+
+    row = store.conn.execute(
+        """
+        SELECT
+          COUNT(t.id) AS tracks,
+          COUNT(f.track_id) AS features,
+          SUM(CASE WHEN f.track_id IS NULL THEN 1 ELSE 0 END) AS missing_features,
+          SUM(CASE WHEN f.vocalness IS NOT NULL THEN 1 ELSE 0 END) AS vocalness,
+          SUM(CASE WHEN f.energy IS NOT NULL AND f.loudness IS NOT NULL AND f.bpm IS NOT NULL THEN 1 ELSE 0 END) AS mir
+        FROM tracks t
+        LEFT JOIN track_features f ON f.track_id = t.id
+        """
+    ).fetchone()
+    if row is None:
+        return LibraryStatus(0, 0, 0, 0, 0)
+    return LibraryStatus(
+        tracks=int(row["tracks"] or 0),
+        features=int(row["features"] or 0),
+        missing_features=int(row["missing_features"] or 0),
+        vocalness=int(row["vocalness"] or 0),
+        mir=int(row["mir"] or 0),
+    )
+
+
+def print_status_summary(status: LibraryStatus, runtime_ready: bool) -> None:
+    """Print local library and runtime readiness without secrets."""
+
+    settings = tonepath_config.load_config()
+    table = Table("Item", "Value", box=box.SIMPLE)
+    table.add_row("Tracks", str(status.tracks))
+    table.add_row("Features", str(status.features))
+    table.add_row("Missing features", str(status.missing_features))
+    table.add_row("Vocalness coverage", f"{status.vocalness}/{status.tracks}")
+    table.add_row("MIR coverage", f"{status.mir}/{status.tracks}")
+    table.add_row("Essentia-TF runtime", "ready" if runtime_ready else "missing")
+    table.add_row("Data directory", str(tonepath_config.ensure_data_dir()))
+    table.add_row("Network mode", settings.network_mode)
+    console.print(table)
 
 
 def render_plan(candidates: list[CandidateScore]) -> None:

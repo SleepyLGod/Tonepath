@@ -184,6 +184,8 @@ class TonepathApp(App[None]):
             return
 
         self.playback = PlaybackController(self.store)
+        if self.missing_feature_count():
+            self.log_event("Some tracks are missing analysis. Run `uv run tonepath prepare`.")
         if self.initial_prompt is None:
             self.render_intake()
             self.log_event("Type a listening goal, then press Enter.")
@@ -516,6 +518,12 @@ class TonepathApp(App[None]):
     def render_intake(self) -> None:
         """Render the no-session intake state."""
 
+        missing = self.missing_feature_count()
+        guidance = (
+            f"{missing} track(s) need analysis. Run `uv run tonepath prepare`."
+            if missing
+            else "Use the prompt bar above."
+        )
         self.query_one("#status-bar", Static).update(
             f"● Ready   Local · {self.library_count()} tracks · offline · Enter to plan"
         )
@@ -523,7 +531,7 @@ class TonepathApp(App[None]):
         self.query_one("#now-playing", Static).update(
             Text.assemble(
                 ("● No session yet\n", f"bold {AMBER}"),
-                ("Use the prompt bar above.\n", TEXT),
+                (f"{guidance}\n", TEXT),
                 ("Example:\n", MUTED),
                 (PROMPT_PLACEHOLDER, AMBER_DIM),
             )
@@ -551,6 +559,21 @@ class TonepathApp(App[None]):
         if self.store is None:
             return 0
         return len(self.store.list_tracks())
+
+    def missing_feature_count(self) -> int:
+        """Return the number of tracks without analyzed features."""
+
+        if self.store is None:
+            return 0
+        row = self.store.conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM tracks t
+            LEFT JOIN track_features f ON f.track_id = t.id
+            WHERE f.track_id IS NULL
+            """
+        ).fetchone()
+        return int(row["count"]) if row is not None else 0
 
     def privacy_text(self) -> str:
         """Return the local privacy badge text."""
@@ -581,7 +604,7 @@ class TonepathApp(App[None]):
         self.query_one("#status-bar", Static).update("● No tracks   Local · 0 tracks · offline · setup required")
         self.query_one("#prompt-input", Input).value = ""
         self.query_one("#now-playing", Static).update(
-            "No scanned tracks.\n\nRun:\nuv run tonepath config add-music-dir /path/to/music\nuv run tonepath scan"
+            "No scanned tracks.\n\nRun:\nuv run tonepath config add-music-dir /path/to/music\nuv run tonepath prepare"
         )
         self.query_one("#why-panel", Static).update("Why panel appears after a local session starts.")
         self.query_one("#privacy-badge", Static).update(self.privacy_renderable())

@@ -17,12 +17,12 @@ Tonepath is currently a working terminal prototype. It is not a macOS app, web a
 | Path planning | Implemented | Deterministic prompt parsing and phase planning for state transitions such as irritated -> focus. |
 | Track selection | Implemented | Deterministic scoring with confidence labels; metadata-only selections are intentionally low confidence. |
 | Playback | Implemented | Local `mpv` adapter plus `--dry-run` command preview. |
-| CLI commands | Implemented | `doctor`, `config`, `scan`, `start`, `feedback`, `profile`, `privacy`, `explain`, `eval`, and `enrich`. |
+| CLI commands | Implemented | `prepare`, `status`, `doctor`, `config`, `scan`, `start`, `feedback`, `profile`, `privacy`, `explain`, `eval`, and `enrich`. |
 | Explanations | Implemented | Explanations only cite stored metadata, features, phases, and feedback; unknown BPM/vocalness stays unknown. |
 | Feedback loop | Implemented | The session runtime records feedback and updates upcoming candidates for skip, no-vocals, too-loud, too-slow, and like. |
 | TUI | MVP | Textual screen with prompt intake, timeline, controlled playback, queue, why panel, privacy badge, footer shortcuts, and event log. It does not autoplay on launch. |
 | Enrichment | Local scaffold | Local metadata enrichment is available; online providers are opt-in boundaries and do not make requests yet. |
-| Audio analysis | Basic + optional MIR | `tonepath analyze --features basic` stores approximate loudness, energy, and conservative BPM. `tonepath analyze --features mir --method essentia` adds optional Essentia MIR features. Vocalness remains source-attributed and explicit. |
+| Audio analysis | Basic + optional MIR | `tonepath prepare` runs the normal scan and analysis flow. Advanced users can still call `tonepath analyze` directly. |
 | Model runtime | Scaffold | `tonepath models doctor` and `tonepath models setup essentia-tf` manage a workspace-local TensorFlow tagging runtime outside the main `.venv`. |
 | LLM | Opt-in scaffold | `tonepath llm doctor` and `tonepath parse --llm` support DeepSeek/Qwen OpenAI-compatible parsing without exposing local paths or audio facts. |
 | Tests | Implemented | Unit tests cover planner, scanner, config, privacy, explanation, session feedback, enrichment, and TUI launch behavior. |
@@ -73,14 +73,16 @@ cp .env.example .env
 uv run tonepath config init
 uv run tonepath config add-music-dir ~/Music
 uv run tonepath doctor
-uv run tonepath scan
-uv run tonepath analyze --features basic
+uv run tonepath prepare
+uv run tonepath status
 uv run tonepath
 uv run tonepath tui "我现在很烦，想半小时后进入写代码状态，不要人声"
 uv run tonepath start "我现在很烦，想半小时后进入写代码状态，不要人声"
 ```
 
 The TUI opens as a local workbench. Run `uv run tonepath` or `uv run tonepath tui`, type a listening goal, and press Enter to create a session. Passing a prompt to `tonepath tui "..."` creates the session immediately, but still does not autoplay. Playback events are recorded locally in SQLite for future preference learning.
+
+`tonepath prepare` is the normal user-facing setup command. It scans configured music directories, prunes missing tracks, analyzes missing or changed MIR features, and uses the workspace-local Essentia-TF runtime for vocalness/tagging when that runtime is ready. If the tagging runtime is missing, `prepare` prints the setup command and still leaves the local library usable.
 
 Use these keys:
 
@@ -117,6 +119,16 @@ Scan one explicit directory instead of configured directories:
 ```bash
 uv run tonepath scan /path/to/music
 ```
+
+Run a short preparation pass for testing:
+
+```bash
+uv run tonepath prepare --limit 5
+uv run tonepath prepare --fast
+uv run tonepath status
+```
+
+## Advanced Analysis
 
 Store source-attributed local metadata enrichment:
 
