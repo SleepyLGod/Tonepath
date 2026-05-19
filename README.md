@@ -82,7 +82,9 @@ uv run tonepath start "我现在很烦，想半小时后进入写代码状态，
 
 The TUI opens as a local workbench. Run `uv run tonepath` or `uv run tonepath tui`, type a listening goal, and press Enter to create a session. Passing a prompt to `tonepath tui "..."` creates the session immediately, but still does not autoplay. Playback events are recorded locally in SQLite for future preference learning.
 
-`tonepath prepare` is the normal user-facing setup command. It scans configured music directories, prunes missing tracks, analyzes missing or changed MIR features, and uses the workspace-local Essentia-TF runtime for vocalness/tagging when that runtime is ready. If the tagging runtime is missing, `prepare` prints the setup command and still leaves the local library usable.
+`tonepath prepare` is the normal user-facing setup command. It scans configured music directories, prunes missing tracks, analyzes missing or changed MIR features, and follows the configured model policy. The default `balanced` policy uses the workspace-local Essentia-TF runtime for vocalness/tagging when that runtime is ready. If the tagging runtime is missing, `prepare` prints the setup command and still leaves the local library usable.
+
+`tonepath status` is the readiness dashboard. It shows library coverage, model policy, runtime readiness, local data path, network mode, and a concrete next action such as `Run tonepath prepare`, `Run tonepath models setup essentia-tf`, or `Ready for TUI`.
 
 Use these keys:
 
@@ -125,6 +127,8 @@ Run a short preparation pass for testing:
 ```bash
 uv run tonepath prepare --limit 5
 uv run tonepath prepare --fast
+uv run tonepath prepare --full
+uv run tonepath prepare --full --setup-models
 uv run tonepath status
 ```
 
@@ -228,6 +232,13 @@ network_mode = "offline"
 [privacy]
 send_to_llm = false
 store_play_history = true
+
+[models]
+mode = "balanced"
+allow_setup = false
+allow_online = false
+preferred_tagger = "essentia-tf"
+separator_fallback = "off"
 ```
 
 Useful commands:
@@ -288,6 +299,16 @@ Optional model-backed analysis remains local:
 | `essentia-tf` | Workspace-local tagging runtime | Uses a separate Python 3.11 runtime for Essentia TensorFlow music tagging models. Results are stored as local source-attributed evidence. |
 | `audio-separator` | Slow fallback | Uses the `models` extra to run local offline stem separation. Outputs are cached under Tonepath data as `model-audio-separator`, but this is not a fast music-tagging model. |
 | `demucs-cli` | Compatibility adapter | Uses a separately installed Demucs CLI to estimate vocalness from the vocal stem. Results are stored as `model-demucs-cli`; this path is for advanced users who already have Demucs installed. |
+
+Model preparation policy lives in config:
+
+| Setting | Default | Behavior |
+| --- | --- | --- |
+| `models.mode` | `balanced` | `fast` runs scan/MIR only; `balanced` runs tagging when ready; `full` asks for model-backed tagging. |
+| `models.allow_setup` | `false` | When true, `prepare` may create the workspace-local model runtime. The CLI flag `--setup-models` enables this per run. |
+| `models.allow_online` | `false` | Reserved for future opt-in online identity/LLM workflows. Audio facts stay local. |
+| `models.preferred_tagger` | `essentia-tf` | Preferred local tagging runtime for voice/instrumental and music tags. |
+| `models.separator_fallback` | `off` | Keeps slow source separation out of the normal user flow unless an advanced user opts in. |
 
 Online providers are blocked by default:
 

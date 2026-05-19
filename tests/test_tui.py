@@ -82,6 +82,29 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(app.missing_feature_count(), 1)
                     await pilot.press("q")
 
+    async def test_tui_intake_guides_model_setup_when_runtime_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                track_id = self.add_track(store, tmp, "a.mp3")
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id=track_id,
+                        bpm=100.0,
+                        loudness=-14.0,
+                        energy=0.5,
+                        feature_source="test",
+                        confidence="medium",
+                    )
+                )
+                store.close()
+
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    renderable = app.query_one("#now-playing").render()
+                    self.assertIn("models setup essentia-tf", renderable.plain)
+                    await pilot.press("q")
+
     async def test_tui_launches_session_screen_with_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):

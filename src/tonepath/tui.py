@@ -8,6 +8,7 @@ from rich.text import Text
 
 from tonepath import config
 from tonepath.db import TonepathStore
+from tonepath.model_runtime import model_runtime_status
 from tonepath.models import FeedbackType
 from tonepath.playback_controller import PlaybackController
 from tonepath.session import SessionRunner
@@ -153,6 +154,7 @@ class TonepathApp(App[None]):
         self.playback: PlaybackController | None = None
         self.playback_status = "Ready"
         self.playback_timer: Any | None = None
+        self.model_runtime_ready = False
 
     def compose(self) -> ComposeResult:
         """Compose the terminal product surface with Textual built-ins."""
@@ -184,8 +186,11 @@ class TonepathApp(App[None]):
             return
 
         self.playback = PlaybackController(self.store)
+        self.model_runtime_ready = model_runtime_status().ready
         if self.missing_feature_count():
             self.log_event("Some tracks are missing analysis. Run `uv run tonepath prepare`.")
+        elif not self.model_runtime_ready:
+            self.log_event("Better vocalness is available after `uv run tonepath models setup essentia-tf`.")
         if self.initial_prompt is None:
             self.render_intake()
             self.log_event("Type a listening goal, then press Enter.")
@@ -519,11 +524,12 @@ class TonepathApp(App[None]):
         """Render the no-session intake state."""
 
         missing = self.missing_feature_count()
-        guidance = (
-            f"{missing} track(s) need analysis. Run `uv run tonepath prepare`."
-            if missing
-            else "Use the prompt bar above."
-        )
+        if missing:
+            guidance = f"Library needs preparation: {missing} track(s) need analysis. Run `uv run tonepath prepare`."
+        elif not self.model_runtime_ready:
+            guidance = "Ready for playback. Better vocalness is available after `uv run tonepath models setup essentia-tf`."
+        else:
+            guidance = "Ready for playback. Use the prompt bar above."
         self.query_one("#status-bar", Static).update(
             f"● Ready   Local · {self.library_count()} tracks · offline · Enter to plan"
         )

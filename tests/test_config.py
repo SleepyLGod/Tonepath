@@ -21,6 +21,11 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual(settings.network_mode, "offline")
                 self.assertFalse(settings.privacy.send_to_llm)
                 self.assertTrue(settings.privacy.store_play_history)
+                self.assertEqual(settings.models.mode, "balanced")
+                self.assertFalse(settings.models.allow_setup)
+                self.assertFalse(settings.models.allow_online)
+                self.assertEqual(settings.models.preferred_tagger, "essentia-tf")
+                self.assertEqual(settings.models.separator_fallback, "off")
 
     def test_default_home_is_workspace_local_when_not_overridden(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
@@ -47,6 +52,7 @@ class ConfigTest(unittest.TestCase):
                     player="mpv",
                     network_mode="offline",
                     privacy=config.PrivacyConfig(),
+                    models=config.ModelConfig(),
                 )
                 config.write_config(settings)
                 report = run_doctor()

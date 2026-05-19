@@ -71,6 +71,17 @@ class PrivacyConfig:
 
 
 @dataclass(frozen=True)
+class ModelConfig:
+    """Model preparation policy from the local config file."""
+
+    mode: str = "balanced"
+    allow_setup: bool = False
+    allow_online: bool = False
+    preferred_tagger: str = "essentia-tf"
+    separator_fallback: str = "off"
+
+
+@dataclass(frozen=True)
 class TonepathConfig:
     """User-editable local Tonepath configuration."""
 
@@ -79,6 +90,7 @@ class TonepathConfig:
     player: str
     network_mode: str
     privacy: PrivacyConfig
+    models: ModelConfig
 
     def expanded_music_dirs(self) -> tuple[Path, ...]:
         """Return configured music directories with `~` expanded."""
@@ -116,6 +128,7 @@ def default_config() -> TonepathConfig:
         player="mpv",
         network_mode="offline",
         privacy=PrivacyConfig(),
+        models=ModelConfig(),
     )
 
 
@@ -129,6 +142,7 @@ def load_config() -> TonepathConfig:
 
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     privacy_data = data.get("privacy", {})
+    models_data = data.get("models", {})
     data_dir_override = os.environ.get("TONEPATH_HOME")
     return TonepathConfig(
         music_dirs=tuple(str(item) for item in data.get("music_dirs", defaults.music_dirs)),
@@ -138,6 +152,13 @@ def load_config() -> TonepathConfig:
         privacy=PrivacyConfig(
             send_to_llm=bool(privacy_data.get("send_to_llm", defaults.privacy.send_to_llm)),
             store_play_history=bool(privacy_data.get("store_play_history", defaults.privacy.store_play_history)),
+        ),
+        models=ModelConfig(
+            mode=str(models_data.get("mode", defaults.models.mode)),
+            allow_setup=bool(models_data.get("allow_setup", defaults.models.allow_setup)),
+            allow_online=bool(models_data.get("allow_online", defaults.models.allow_online)),
+            preferred_tagger=str(models_data.get("preferred_tagger", defaults.models.preferred_tagger)),
+            separator_fallback=str(models_data.get("separator_fallback", defaults.models.separator_fallback)),
         ),
     )
 
@@ -173,6 +194,7 @@ def add_music_dir(path: Path) -> TonepathConfig:
         player=current.player,
         network_mode=current.network_mode,
         privacy=current.privacy,
+        models=current.models,
     )
     write_config(updated)
     return updated
@@ -192,6 +214,13 @@ def render_config(config: TonepathConfig) -> str:
             "[privacy]",
             f"send_to_llm = {toml_bool(config.privacy.send_to_llm)}",
             f"store_play_history = {toml_bool(config.privacy.store_play_history)}",
+            "",
+            "[models]",
+            f"mode = {quote_string(config.models.mode)}",
+            f"allow_setup = {toml_bool(config.models.allow_setup)}",
+            f"allow_online = {toml_bool(config.models.allow_online)}",
+            f"preferred_tagger = {quote_string(config.models.preferred_tagger)}",
+            f"separator_fallback = {quote_string(config.models.separator_fallback)}",
             "",
         ]
     )

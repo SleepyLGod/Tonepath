@@ -78,6 +78,7 @@ class LibraryStatus:
     missing_features: int
     vocalness: int
     mir: int
+    tags: int
 
 
 @app.callback(invoke_without_command=True)
@@ -120,9 +121,19 @@ def scan(path: Annotated[Path | None, typer.Argument(help="Optional local music 
 def prepare(
     limit: Annotated[int | None, typer.Option("--limit", help="Maximum number of eligible tracks per analysis pass.")] = None,
     fast: Annotated[bool, typer.Option("--fast", help="Skip TensorFlow tagging and only prepare scan plus MIR features.")] = False,
+    full: Annotated[
+        bool,
+        typer.Option("--full", help="Require model-backed tagging; print setup guidance if the runtime is missing."),
+    ] = False,
+    setup_models: Annotated[
+        bool,
+        typer.Option("--setup-models", help="Set up missing workspace-local model runtimes before model analysis."),
+    ] = False,
 ) -> None:
     """Prepare local music for normal Tonepath use."""
 
+    settings = tonepath_config.load_config()
+    mode = prepare_mode(settings, fast=fast, full=full)
     paths = resolve_scan_paths(None)
     store = TonepathStore()
     try:
@@ -133,8 +144,14 @@ def prepare(
         mir_analyzed, mir_skipped = analyze_library(store, features="mir", method="essentia", changed_only=True, limit=limit)
         console.print(f"Prepare: MIR analyzed {mir_analyzed} track(s); skipped {mir_skipped} track(s).")
 
-        runtime_ready = model_runtime_status().ready
-        if fast:
+        runtime_status = model_runtime_status()
+        runtime_ready = runtime_status.ready
+        if mode != "fast" and not runtime_ready and (setup_models or settings.models.allow_setup):
+            console.print("Prepare: setting up workspace-local Essentia-TF runtime.")
+            runtime_status = setup_essentia_tf_runtime()
+            runtime_ready = runtime_status.ready
+
+        if mode == "fast":
             console.print("Prepare: skipped TensorFlow tags (--fast).")
         elif runtime_ready:
             tag_analyzed, tag_skipped = analyze_library(
@@ -145,6 +162,11 @@ def prepare(
                 limit=limit,
             )
             console.print(f"Prepare: tags analyzed {tag_analyzed} track(s); skipped {tag_skipped} track(s).")
+        elif mode == "full":
+            console.print(
+                "Prepare: full tagging requires Essentia-TF. "
+                "Run `uv run tonepath models setup essentia-tf` or `uv run tonepath prepare --full --setup-models`."
+            )
         else:
             console.print("Prepare: tags skipped. Run `uv run tonepath models setup essentia-tf` for vocalness tagging.")
 
@@ -586,36 +608,83 @@ def library_status(store: TonepathStore) -> LibraryStatus:
           COUNT(f.track_id) AS features,
           SUM(CASE WHEN f.track_id IS NULL THEN 1 ELSE 0 END) AS missing_features,
           SUM(CASE WHEN f.vocalness IS NOT NULL THEN 1 ELSE 0 END) AS vocalness,
-          SUM(CASE WHEN f.energy IS NOT NULL AND f.loudness IS NOT NULL AND f.bpm IS NOT NULL THEN 1 ELSE 0 END) AS mir
+          SUM(CASE WHEN f.energy IS NOT NULL AND f.loudness IS NOT NULL AND f.bpm IS NOT NULL THEN 1 ELSE 0 END) AS mir,
+          (
+            SELECT COUNT(DISTINCT track_id)
+            FROM track_enrichment
+            WHERE field LIKE 'tag:%'
+          ) AS tags
         FROM tracks t
         LEFT JOIN track_features f ON f.track_id = t.id
         """
     ).fetchone()
     if row is None:
-        return LibraryStatus(0, 0, 0, 0, 0)
+        return LibraryStatus(0, 0, 0, 0, 0, 0)
     return LibraryStatus(
         tracks=int(row["tracks"] or 0),
         features=int(row["features"] or 0),
         missing_features=int(row["missing_features"] or 0),
         vocalness=int(row["vocalness"] or 0),
         mir=int(row["mir"] or 0),
+        tags=int(row["tags"] or 0),
     )
 
 
 def print_status_summary(status: LibraryStatus, runtime_ready: bool) -> None:
-    """Print local library and runtime readiness without secrets."""
+    """Print local library, model policy, and runtime readiness without secrets."""
 
     settings = tonepath_config.load_config()
     table = Table("Item", "Value", box=box.SIMPLE)
+    table.add_row("Music directories", "\n".join(settings.music_dirs))
     table.add_row("Tracks", str(status.tracks))
     table.add_row("Features", str(status.features))
     table.add_row("Missing features", str(status.missing_features))
     table.add_row("Vocalness coverage", f"{status.vocalness}/{status.tracks}")
     table.add_row("MIR coverage", f"{status.mir}/{status.tracks}")
+    table.add_row("Tag coverage", f"{status.tags}/{status.tracks}")
+    table.add_row("Model mode", settings.models.mode)
+    table.add_row("Model setup allowed", "yes" if settings.models.allow_setup else "no")
+    table.add_row("Online models", "yes" if settings.models.allow_online else "no")
+    table.add_row("Preferred tagger", settings.models.preferred_tagger)
+    table.add_row("Separator fallback", settings.models.separator_fallback)
     table.add_row("Essentia-TF runtime", "ready" if runtime_ready else "missing")
     table.add_row("Data directory", str(tonepath_config.ensure_data_dir()))
     table.add_row("Network mode", settings.network_mode)
+    table.add_row("Next action", status_next_action(status, runtime_ready, settings))
     console.print(table)
+
+
+def prepare_mode(settings: tonepath_config.TonepathConfig, fast: bool, full: bool) -> str:
+    """Return the requested prepare mode after validating CLI/config policy."""
+
+    if fast and full:
+        raise typer.BadParameter("--fast and --full cannot be used together")
+    if fast:
+        return "fast"
+    if full:
+        return "full"
+    mode = settings.models.mode
+    if mode not in {"fast", "balanced", "full"}:
+        raise typer.BadParameter("models.mode must be one of: fast, balanced, full")
+    return mode
+
+
+def status_next_action(status: LibraryStatus, runtime_ready: bool, settings: tonepath_config.TonepathConfig) -> str:
+    """Return one concise next action for normal users."""
+
+    if status.tracks == 0:
+        return "Add a music directory, then run `uv run tonepath prepare`."
+    if status.missing_features or status.mir < status.tracks:
+        return "Run `uv run tonepath prepare`."
+    if settings.models.mode == "fast":
+        return "Ready for TUI. Run `uv run tonepath`."
+    if status.vocalness < status.tracks or status.tags < status.tracks:
+        if runtime_ready:
+            return "Run `uv run tonepath prepare` for model-backed tags."
+        if settings.models.mode == "full":
+            return "Run `uv run tonepath models setup essentia-tf`, then `uv run tonepath prepare --full`."
+        return "Ready for TUI; run `uv run tonepath models setup essentia-tf` for better vocalness."
+    return "Ready for TUI. Run `uv run tonepath`."
 
 
 def render_plan(candidates: list[CandidateScore]) -> None:
