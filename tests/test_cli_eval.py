@@ -83,6 +83,71 @@ class CliEvalTest(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("--limit must be greater than zero", result.output)
 
+    def test_eval_suite_json_outputs_prompts_candidates_and_red_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                track_id = store.upsert_track(track_for(Path(tmp) / "loud-vocal.mp3", title="loud vocal", genre="pop"))
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id=track_id,
+                        energy=0.91,
+                        loudness=-5.0,
+                        bpm=168.0,
+                        vocalness=0.82,
+                        feature_source="model-essentia-voice-instrumental",
+                        confidence="high",
+                    )
+                )
+                store.close()
+
+                result = CliRunner().invoke(app, ["eval", "suite", "--json", "--limit", "1"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output)
+                self.assertGreaterEqual(len(payload), 4)
+                first = payload[0]
+                self.assertIn("prompt", first)
+                self.assertIn("red_flag_count", first)
+                self.assertEqual(first["candidates"][0]["features"]["source"], "model-essentia-voice-instrumental")
+                self.assertIn("high vocalness in no-vocals top 3", first["candidates"][0]["red_flags"])
+
+    def test_eval_suite_does_not_write_profile_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                store.upsert_track(track_for(Path(tmp) / "song.mp3", title="song", genre=None))
+                before = store.profile_summary()
+                store.close()
+
+                result = CliRunner().invoke(app, ["eval", "suite", "--limit", "1"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                store = TonepathStore()
+                after = store.profile_summary()
+                store.close()
+                self.assertEqual(before, after)
+
+    def test_eval_suite_marks_unknown_features_as_low_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                store.upsert_track(track_for(Path(tmp) / "unknown.mp3", title="unknown", genre=None))
+                store.close()
+
+                result = CliRunner().invoke(app, ["eval", "suite", "--json", "--limit", "1"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output)
+                self.assertIsNone(payload[0]["candidates"][0]["features"]["source"])
+                self.assertIn("low evidence in top 3", payload[0]["candidates"][0]["red_flags"])
+
+    def test_eval_suite_rejects_non_positive_limit(self) -> None:
+        result = CliRunner().invoke(app, ["eval", "suite", "--limit", "0"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("--limit must be greater than zero", result.output)
+
 
 def track_for(path: Path, title: str, genre: str | None) -> Track:
     """Create one persisted-test track payload."""

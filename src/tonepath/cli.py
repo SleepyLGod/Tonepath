@@ -20,7 +20,7 @@ from tonepath.analysis import AnalysisProgress, analyze_library
 from tonepath.db import TonepathStore
 from tonepath.doctor import run_doctor
 from tonepath.enrichment import EnrichmentProvider, enrich_library
-from tonepath.evaluation import evaluate_selection
+from tonepath.evaluation import evaluate_selection, evaluate_suite
 from tonepath.explanation import explain_candidate
 from tonepath.llm import llm_doctor, parse_prompt_with_llm
 from tonepath.model_runtime import isolation_report, model_runtime_report, model_runtime_status, setup_essentia_tf_runtime
@@ -434,6 +434,27 @@ def eval_selection(
     render_eval_table(payload)
 
 
+@eval_app.command("suite")
+def eval_suite(
+    limit: Annotated[int, typer.Option("--limit", help="Maximum number of candidates per prompt.")] = 5,
+    json_output: Annotated[bool, typer.Option("--json", help="Print stable JSON for comparison.")] = False,
+) -> None:
+    """Run a read-only product-quality selection suite."""
+
+    if limit <= 0:
+        raise typer.BadParameter("--limit must be greater than zero")
+    store = TonepathStore()
+    try:
+        payload = evaluate_suite(store, limit)
+    finally:
+        store.close()
+
+    if json_output:
+        console.print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    render_eval_suite(payload)
+
+
 @config_app.command("init")
 def config_init(overwrite: Annotated[bool, typer.Option("--overwrite", help="Overwrite an existing config.")] = False) -> None:
     """Create a default local config file."""
@@ -726,6 +747,45 @@ def render_eval_table(rows: list[dict[str, object]]) -> None:
             str(row["confidence"]),
             eval_feature_summary(features),
             "\n".join(summarize_eval_reasons(str(reason) for reason in reasons)),
+        )
+    console.print(table)
+
+
+def render_eval_suite(suites: list[dict[str, object]]) -> None:
+    """Render product-quality suite output for manual review."""
+
+    if not suites:
+        console.print("No evaluation prompts configured.")
+        return
+    for suite in suites:
+        prompt = str(suite["prompt"])
+        red_flag_count = int(suite["red_flag_count"])
+        console.print(f"\nPrompt: {prompt}")
+        console.print(f"Target: {suite['source_state']} -> {suite['target_state']} · red flags: {red_flag_count}")
+        candidates = suite["candidates"]
+        if not isinstance(candidates, list):
+            raise TypeError("Evaluation suite candidates must be a list.")
+        render_eval_suite_candidates(candidates)
+
+
+def render_eval_suite_candidates(rows: list[dict[str, object]]) -> None:
+    """Render candidates with red flags for one suite prompt."""
+
+    table = Table("Rank", "Phase", "Track", "Score", "Conf", "Features", "Red flags", box=box.SIMPLE, expand=True)
+    for index, row in enumerate(rows, start=1):
+        track = row["track"]
+        features = row["features"]
+        red_flags = row["red_flags"]
+        if not isinstance(track, dict) or not isinstance(features, dict) or not isinstance(red_flags, list):
+            raise TypeError("Evaluation suite row has an invalid shape.")
+        table.add_row(
+            str(index),
+            str(row["phase"]),
+            eval_track_label(track),
+            str(row["score"]),
+            str(row["confidence"]),
+            eval_feature_summary(features),
+            "\n".join(str(flag) for flag in red_flags) if red_flags else "ok",
         )
     console.print(table)
 

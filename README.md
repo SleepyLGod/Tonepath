@@ -211,7 +211,11 @@ Evaluate selection quality without playback or profile writes:
 ```bash
 uv run tonepath eval selection "我现在很烦，想半小时后进入写代码状态，不要人声" --limit 8
 uv run tonepath eval selection "我现在很烦，想半小时后进入写代码状态，不要人声" --json
+uv run tonepath eval suite --limit 5
+uv run tonepath eval suite --json
 ```
+
+`eval suite` runs a small built-in set of product prompts and flags likely quality problems such as high vocalness in no-vocals results, high stimulation in focus/decompress phases, or low-evidence top candidates. It is read-only: it does not create sessions, playback rows, feedback, or profile rules.
 
 ## Config
 
