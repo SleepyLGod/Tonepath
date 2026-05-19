@@ -109,6 +109,7 @@ class CliEvalTest(unittest.TestCase):
                 first = payload[0]
                 self.assertIn("prompt", first)
                 self.assertIn("red_flag_count", first)
+                self.assertIn("yellow_flag_count", first)
                 self.assertEqual(first["candidates"][0]["features"]["source"], "model-essentia-voice-instrumental")
                 self.assertIn("high vocalness in no-vocals top 3", first["candidates"][0]["red_flags"])
 
@@ -147,6 +148,136 @@ class CliEvalTest(unittest.TestCase):
 
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("--limit must be greater than zero", result.output)
+
+    def test_eval_audit_json_outputs_evidence_pack(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                track_id = store.upsert_track(track_for(Path(tmp) / "quiet.mp3", title="quiet", genre="ambient"))
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id=track_id,
+                        energy=0.24,
+                        loudness=-18.2,
+                        bpm=84.0,
+                        vocalness=0.18,
+                        feature_source="model-essentia-voice-instrumental",
+                        confidence="high",
+                    )
+                )
+                before = store.profile_summary()
+                store.close()
+
+                result = CliRunner().invoke(
+                    app,
+                    ["eval", "audit", "我现在很烦，想半小时后进入写代码状态，不要人声", "--json", "--limit", "1"],
+                )
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output)
+                self.assertIn("run_id", payload)
+                self.assertTrue(Path(payload["evidence_path"]).exists())
+                self.assertEqual(payload["candidates"][0]["track"]["title"], "quiet")
+                self.assertEqual(payload["candidates"][0]["yellow_flags"], [])
+                store = TonepathStore()
+                after = store.profile_summary()
+                store.close()
+                self.assertEqual(before, after)
+
+    def test_eval_audit_codex_missing_reports_clear_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                store.upsert_track(track_for(Path(tmp) / "song.mp3", title="song", genre=None))
+                store.close()
+
+                with patch("tonepath.evaluation.shutil.which", return_value=None):
+                    result = CliRunner().invoke(app, ["eval", "audit", "focus 30m", "--codex"])
+
+                self.assertNotEqual(result.exit_code, 0)
+                self.assertIn("Codex CLI is not available", result.output)
+
+    def test_eval_audit_codex_uses_read_only_sandbox_and_search_only_when_web(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            commands: list[list[str]] = []
+
+            def fake_run(command: list[str], input: str, text: bool, check: bool) -> None:
+                commands.append(command)
+                output_path = Path(command[command.index("-o") + 1])
+                output_path.write_text(
+                    json.dumps(
+                        {
+                            "summary": "ok",
+                            "decisions": [
+                                {
+                                    "track_id": 1,
+                                    "decision": "keep",
+                                    "fit_score": 0.9,
+                                    "risk_flags": [],
+                                    "reason": "local evidence fits",
+                                    "evidence_used": [{"type": "local", "field": "bpm", "value": 84}],
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                store.upsert_track(track_for(Path(tmp) / "song.mp3", title="song", genre=None))
+                store.close()
+
+                with patch("tonepath.evaluation.shutil.which", return_value="/usr/bin/codex"), patch(
+                    "tonepath.evaluation.subprocess.run", side_effect=fake_run
+                ):
+                    result = CliRunner().invoke(app, ["eval", "audit", "focus 30m", "--codex", "--web", "--json"])
+                    no_web_result = CliRunner().invoke(app, ["eval", "audit", "focus 30m", "--codex", "--json"])
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertEqual(no_web_result.exit_code, 0, no_web_result.output)
+            self.assertIn("--search", commands[0])
+            self.assertNotIn("--search", commands[1])
+            self.assertIn("read-only", commands[0])
+            payload = json.loads(result.output)
+            self.assertEqual(payload["codex"]["decisions"][0]["decision"], "keep")
+
+    def test_eval_audit_codex_rejects_web_evidence_without_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+
+            def fake_run(command: list[str], input: str, text: bool, check: bool) -> None:
+                output_path = Path(command[command.index("-o") + 1])
+                output_path.write_text(
+                    json.dumps(
+                        {
+                            "summary": "bad",
+                            "decisions": [
+                                {
+                                    "track_id": 1,
+                                    "decision": "demote",
+                                    "fit_score": 0.2,
+                                    "risk_flags": ["uncited web claim"],
+                                    "reason": "web evidence lacks url",
+                                    "evidence_used": [{"type": "web", "note": "uncited"}],
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                store.upsert_track(track_for(Path(tmp) / "song.mp3", title="song", genre=None))
+                store.close()
+
+                with patch("tonepath.evaluation.shutil.which", return_value="/usr/bin/codex"), patch(
+                    "tonepath.evaluation.subprocess.run", side_effect=fake_run
+                ):
+                    result = CliRunner().invoke(app, ["eval", "audit", "focus 30m", "--codex"])
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("Web evidence entries must include a URL", result.output)
 
 
 def track_for(path: Path, title: str, genre: str | None) -> Track:

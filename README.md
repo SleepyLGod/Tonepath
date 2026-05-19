@@ -213,9 +213,13 @@ uv run tonepath eval selection "我现在很烦，想半小时后进入写代码
 uv run tonepath eval selection "我现在很烦，想半小时后进入写代码状态，不要人声" --json
 uv run tonepath eval suite --limit 5
 uv run tonepath eval suite --json
+uv run tonepath eval audit "我现在很烦，想半小时后进入写代码状态，不要人声" --json
+uv run tonepath eval audit "我现在很烦，想半小时后进入写代码状态，不要人声" --codex --web --limit 12
 ```
 
 `eval suite` runs a small built-in set of product prompts and flags likely quality problems such as high vocalness in no-vocals results, high stimulation in focus/decompress phases, or low-evidence top candidates. It is read-only: it does not create sessions, playback rows, feedback, or profile rules.
+
+`eval audit` writes a local evidence pack under `TONEPATH_HOME/cache/audit/`. With `--codex`, Tonepath invokes Codex in read-only mode against the repo-local `codex/skills/tonepath-dj/SKILL.md`. With `--web`, Codex may use web search for cited context. Codex audit is opt-in and does not play audio or mutate the database.
 
 ## Config
 

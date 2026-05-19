@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -66,6 +67,53 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                     await pilot.press("enter")
                     self.assertIsNotNone(app.runner)
                     self.assertIn("irritated", app.timeline_text())
+                    await pilot.press("q")
+
+    async def test_tui_codex_keys_do_not_run_background_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                with patch.object(MpvAdapter, "start", return_value=FakeProcess()) as start:
+                    async with app.run_test() as pilot:
+                        await pilot.press("a")
+                        await pilot.press("r")
+                        await pilot.press("q")
+                self.assertEqual(start.call_count, 0)
+
+    async def test_tui_rerank_reads_latest_codex_result_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                home = Path(tmp) / "home"
+                result_dir = home / "cache" / "audit" / "run-1"
+                result_dir.mkdir(parents=True)
+                (result_dir / "codex-result.json").write_text(
+                    json.dumps(
+                        {
+                            "summary": "Codex reviewed the path.",
+                            "decisions": [
+                                {"decision": "keep"},
+                                {"decision": "demote"},
+                                {"decision": "reject"},
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                store = TonepathStore()
+                self.add_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                async with app.run_test() as pilot:
+                    await pilot.press("r")
+                    self.assertEqual(
+                        app.latest_codex_summary(),
+                        "Codex reviewed the path. keep 1 · demote 1 · reject 1",
+                    )
                     await pilot.press("q")
 
     async def test_tui_intake_guides_prepare_when_features_are_missing(self) -> None:

@@ -20,7 +20,7 @@ from tonepath.analysis import AnalysisProgress, analyze_library
 from tonepath.db import TonepathStore
 from tonepath.doctor import run_doctor
 from tonepath.enrichment import EnrichmentProvider, enrich_library
-from tonepath.evaluation import evaluate_selection, evaluate_suite
+from tonepath.evaluation import evaluate_audit, evaluate_selection, evaluate_suite, run_codex_audit
 from tonepath.explanation import explain_candidate
 from tonepath.llm import llm_doctor, parse_prompt_with_llm
 from tonepath.model_runtime import isolation_report, model_runtime_report, model_runtime_status, setup_essentia_tf_runtime
@@ -429,7 +429,7 @@ def eval_selection(
         store.close()
 
     if json_output:
-        console.print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print_json_payload(payload)
         return
     render_eval_table(payload)
 
@@ -450,9 +450,44 @@ def eval_suite(
         store.close()
 
     if json_output:
-        console.print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print_json_payload(payload)
         return
     render_eval_suite(payload)
+
+
+@eval_app.command("audit")
+def eval_audit(
+    prompt: Annotated[str, typer.Argument(help="State transition prompt to audit.")],
+    limit: Annotated[int, typer.Option("--limit", help="Maximum number of candidates to audit.")] = 12,
+    json_output: Annotated[bool, typer.Option("--json", help="Print stable JSON for comparison.")] = False,
+    use_codex: Annotated[bool, typer.Option("--codex", help="Run optional Codex audit against the evidence pack.")] = False,
+    web: Annotated[bool, typer.Option("--web", help="Allow Codex to use web search for audit evidence.")] = False,
+) -> None:
+    """Build a local audit pack and optionally ask Codex to review it."""
+
+    if limit <= 0:
+        raise typer.BadParameter("--limit must be greater than zero")
+    store = TonepathStore()
+    try:
+        evidence = evaluate_audit(store, prompt, limit)
+    finally:
+        store.close()
+
+    if use_codex:
+        try:
+            payload = run_codex_audit(evidence, web=web)
+        except (RuntimeError, OSError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        if json_output:
+            print_json_payload(payload)
+            return
+        render_codex_audit(payload)
+        return
+
+    if json_output:
+        print_json_payload(evidence)
+        return
+    render_audit_pack(evidence)
 
 
 @config_app.command("init")
@@ -579,6 +614,12 @@ def record_feedback(feedback_type: str) -> None:
     store = TonepathStore()
     store.record_feedback(feedback_type, session_id=store.current_session_id())
     console.print(f"Recorded feedback: {feedback_type}")
+
+
+def print_json_payload(payload: object) -> None:
+    """Print machine-readable JSON without Rich line wrapping."""
+
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def resolve_scan_paths(path: Path | None) -> tuple[Path, ...]:
@@ -760,8 +801,12 @@ def render_eval_suite(suites: list[dict[str, object]]) -> None:
     for suite in suites:
         prompt = str(suite["prompt"])
         red_flag_count = int(suite["red_flag_count"])
+        yellow_flag_count = int(suite.get("yellow_flag_count", 0))
         console.print(f"\nPrompt: {prompt}")
-        console.print(f"Target: {suite['source_state']} -> {suite['target_state']} · red flags: {red_flag_count}")
+        console.print(
+            f"Target: {suite['source_state']} -> {suite['target_state']} · "
+            f"red flags: {red_flag_count} · warnings: {yellow_flag_count}"
+        )
         candidates = suite["candidates"]
         if not isinstance(candidates, list):
             raise TypeError("Evaluation suite candidates must be a list.")
@@ -771,13 +816,13 @@ def render_eval_suite(suites: list[dict[str, object]]) -> None:
 def render_eval_suite_candidates(rows: list[dict[str, object]]) -> None:
     """Render candidates with red flags for one suite prompt."""
 
-    table = Table("Rank", "Phase", "Track", "Score", "Conf", "Features", "Red flags", box=box.SIMPLE, expand=True)
+    table = Table("Rank", "Phase", "Track", "Score", "Conf", "Features", "Flags", box=box.SIMPLE, expand=True)
     for index, row in enumerate(rows, start=1):
         track = row["track"]
         features = row["features"]
-        red_flags = row["red_flags"]
-        if not isinstance(track, dict) or not isinstance(features, dict) or not isinstance(red_flags, list):
+        if not isinstance(track, dict) or not isinstance(features, dict):
             raise TypeError("Evaluation suite row has an invalid shape.")
+        flags = audit_flags(row)
         table.add_row(
             str(index),
             str(row["phase"]),
@@ -785,9 +830,74 @@ def render_eval_suite_candidates(rows: list[dict[str, object]]) -> None:
             str(row["score"]),
             str(row["confidence"]),
             eval_feature_summary(features),
-            "\n".join(str(flag) for flag in red_flags) if red_flags else "ok",
+            "\n".join(flags) if flags else "ok",
         )
     console.print(table)
+
+
+def render_audit_pack(evidence: dict[str, object]) -> None:
+    """Render local audit evidence for review before optional Codex use."""
+
+    console.print(f"Audit evidence: {evidence['prompt']}")
+    console.print(f"Evidence path: {evidence['evidence_path']}")
+    candidates = evidence["candidates"]
+    if not isinstance(candidates, list):
+        raise TypeError("Audit evidence candidates must be a list.")
+    table = Table("Rank", "Phase", "Track", "Score", "Features", "Flags", box=box.SIMPLE, expand=True)
+    for index, row in enumerate(candidates, start=1):
+        track = row["track"]
+        features = row["features"]
+        if not isinstance(track, dict) or not isinstance(features, dict):
+            raise TypeError("Audit evidence row has an invalid shape.")
+        flags = audit_flags(row)
+        table.add_row(
+            str(index),
+            str(row["phase"]),
+            eval_track_label(track),
+            str(row["score"]),
+            eval_feature_summary(features),
+            "\n".join(flags) if flags else "ok",
+        )
+    console.print(table)
+
+
+def render_codex_audit(payload: dict[str, object]) -> None:
+    """Render Codex audit decisions."""
+
+    codex = payload["codex"]
+    if not isinstance(codex, dict):
+        raise TypeError("Codex audit payload must include a codex object.")
+    decisions = codex.get("decisions")
+    if not isinstance(decisions, list):
+        raise TypeError("Codex audit decisions must be a list.")
+    console.print(f"Codex audit result: {payload['codex_result_path']}")
+    table = Table("Track", "Decision", "Fit", "Evidence", "Reason", box=box.SIMPLE, expand=True)
+    for item in decisions:
+        if not isinstance(item, dict):
+            raise TypeError("Codex audit decision must be an object.")
+        evidence_used = item.get("evidence_used", [])
+        evidence_count = len(evidence_used) if isinstance(evidence_used, list) else 0
+        table.add_row(
+            str(item.get("track_id")),
+            str(item.get("decision")),
+            str(item.get("fit_score", "--")),
+            str(evidence_count),
+            str(item.get("reason", "")),
+        )
+    console.print(table)
+
+
+def audit_flags(row: dict[str, object]) -> list[str]:
+    """Return combined red and yellow audit flags for display."""
+
+    flags: list[str] = []
+    red_flags = row.get("red_flags", [])
+    yellow_flags = row.get("yellow_flags", [])
+    if isinstance(red_flags, list):
+        flags.extend(f"RED: {flag}" for flag in red_flags)
+    if isinstance(yellow_flags, list):
+        flags.extend(f"WARN: {flag}" for flag in yellow_flags)
+    return flags
 
 
 def eval_track_label(track: dict[str, object]) -> str:

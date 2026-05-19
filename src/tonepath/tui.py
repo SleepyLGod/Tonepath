@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from rich.text import Text
@@ -140,6 +141,8 @@ class TonepathApp(App[None]):
         Binding("s", "skip", "Skip"),
         Binding("l", "like", "Like"),
         Binding("v", "no_vocals", "No vocals"),
+        Binding("a", "codex_audit", "Audit"),
+        Binding("r", "codex_rerank", "Rerank"),
         Binding("+", "too_loud", "Quieter", show=False),
         Binding("-", "too_slow", "More energy", show=False),
         Binding("w", "why", "Why"),
@@ -297,6 +300,27 @@ class TonepathApp(App[None]):
             self.log_event("Enter a listening goal first.")
             return
         self.log_event(self.runner.current_explanation())
+
+    def action_codex_audit(self) -> None:
+        """Show the explicit Codex audit command for the active session."""
+
+        if self.runner is None:
+            self.log_event("Enter a listening goal first.")
+            return
+        prompt = self.runner.active_plan().request.prompt
+        self.log_event(f"Codex audit: uv run tonepath eval audit {prompt!r} --codex --web --limit 12")
+
+    def action_codex_rerank(self) -> None:
+        """Show how to get a Codex rerank recommendation."""
+
+        if self.runner is None:
+            self.log_event("Enter a listening goal first.")
+            return
+        summary = self.latest_codex_summary()
+        if summary is None:
+            self.log_event("Run Codex audit first; use demote/reject decisions as rerank guidance.")
+            return
+        self.log_event(summary)
 
     def apply_feedback(self, feedback_type: FeedbackType) -> None:
         """Apply one feedback action to the active session."""
@@ -601,6 +625,33 @@ class TonepathApp(App[None]):
                 text.append("\n")
             text.append(line, style=f"bold {TEAL}" if index == 0 else TEAL)
         return text
+
+    def latest_codex_summary(self) -> str | None:
+        """Return a compact summary from the newest local Codex audit result."""
+
+        audit_root = config.ensure_data_dir() / "cache" / "audit"
+        if not audit_root.exists():
+            return None
+        results = sorted(audit_root.glob("*/codex-result.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+        if not results:
+            return None
+        try:
+            payload = json.loads(results[0].read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return "Latest Codex audit result is unreadable."
+        decisions = payload.get("decisions")
+        if not isinstance(decisions, list):
+            return "Latest Codex audit result has no decisions."
+        counts = {"keep": 0, "demote": 0, "reject": 0}
+        for item in decisions:
+            if isinstance(item, dict) and item.get("decision") in counts:
+                counts[str(item["decision"])] += 1
+        summary = payload.get("summary")
+        headline = summary if isinstance(summary, str) and summary else "Codex rerank guidance available."
+        return (
+            f"{headline} "
+            f"keep {counts['keep']} · demote {counts['demote']} · reject {counts['reject']}"
+        )
 
     def show_empty_library(self) -> None:
         """Render setup guidance when no local tracks are available."""
