@@ -201,7 +201,7 @@ class CliEvalTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             commands: list[list[str]] = []
 
-            def fake_run(command: list[str], input: str, text: bool, check: bool) -> None:
+            def fake_run(command: list[str], input: str, text: bool, check: bool, **kwargs: object) -> None:
                 commands.append(command)
                 output_path = Path(command[command.index("-o") + 1])
                 output_path.write_text(
@@ -245,7 +245,7 @@ class CliEvalTest(unittest.TestCase):
     def test_eval_audit_codex_rejects_web_evidence_without_url(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
 
-            def fake_run(command: list[str], input: str, text: bool, check: bool) -> None:
+            def fake_run(command: list[str], input: str, text: bool, check: bool, **kwargs: object) -> None:
                 output_path = Path(command[command.index("-o") + 1])
                 output_path.write_text(
                     json.dumps(

@@ -86,9 +86,16 @@ def run_codex_audit(evidence: dict[str, object], web: bool) -> dict[str, object]
         ]
     )
     try:
-        subprocess.run(command, input=codex_prompt(evidence_path, web=web), text=True, check=True)
+        subprocess.run(
+            command,
+            input=codex_prompt(evidence_path, web=web),
+            text=True,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
     except (OSError, subprocess.CalledProcessError) as exc:
-        raise RuntimeError("Codex audit failed.") from exc
+        raise RuntimeError(codex_failure_message(exc)) from exc
     result = load_codex_audit_result(result_path)
     return {
         "evidence": evidence,
@@ -317,6 +324,17 @@ def load_codex_audit_result(path: Path) -> dict[str, object]:
     for item in decisions:
         validate_codex_decision(item)
     return payload
+
+
+def codex_failure_message(exc: OSError | subprocess.CalledProcessError) -> str:
+    """Return a compact Codex failure message without dumping noisy logs."""
+
+    if isinstance(exc, subprocess.CalledProcessError):
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+        if lines:
+            return f"Codex audit failed: {lines[-1]}"
+    return "Codex audit failed."
 
 
 def validate_codex_decision(item: object) -> None:

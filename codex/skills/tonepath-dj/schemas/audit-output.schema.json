@@ -39,22 +39,24 @@
             "type": "array",
             "items": {
               "type": "object",
-              "additionalProperties": true,
-              "required": ["type"],
+              "additionalProperties": false,
+              "required": ["type", "field", "value", "url", "note"],
               "properties": {
                 "type": {
                   "type": "string",
                   "enum": ["local", "web"]
                 },
                 "field": {
-                  "type": "string"
+                  "type": ["string", "null"]
                 },
-                "value": {},
+                "value": {
+                  "type": ["string", "number", "boolean", "null"]
+                },
                 "url": {
-                  "type": "string"
+                  "type": ["string", "null"]
                 },
                 "note": {
-                  "type": "string"
+                  "type": ["string", "null"]
                 }
               }
             }
