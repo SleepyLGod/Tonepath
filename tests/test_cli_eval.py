@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 
 from tonepath.cli import app
 from tonepath.db import TonepathStore
-from tonepath.evaluation import annotate_red_flags, codex_audit_schema_path, codex_skill_path
+from tonepath.evaluation import annotate_red_flags, codex_audit_schema_path, codex_skill_path, evaluate_rerank
 from tonepath.models import Track, TrackFeatures
 
 
@@ -319,6 +319,94 @@ class CliEvalTest(unittest.TestCase):
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Web evidence entries must include a URL", result.output)
 
+    def test_eval_rerank_latest_uses_matching_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                write_audit_cache(Path(tmp) / "home", "run-1", "other prompt", [candidate(1, "wrong")], [])
+                write_audit_cache(
+                    Path(tmp) / "home",
+                    "run-2",
+                    "focus 30m",
+                    [candidate(1, "quiet"), candidate(2, "loud")],
+                    [decision(1, "keep"), decision(2, "reject", risk_flags=["too vocal"])],
+                )
+
+                result = CliRunner().invoke(app, ["eval", "rerank", "focus 30m", "--latest", "--json"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output)
+                self.assertTrue(payload["found"])
+                self.assertEqual(payload["run_id"], "run-2")
+                self.assertEqual(payload["counts"]["keep"], 1)
+                self.assertEqual(payload["counts"]["reject"], 1)
+                self.assertEqual([row["track"]["title"] for row in payload["suggested_queue"]], ["quiet"])
+
+    def test_eval_rerank_latest_ignores_stale_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                write_audit_cache(
+                    Path(tmp) / "home",
+                    "run-1",
+                    "evening relaxation",
+                    [candidate(1, "quiet")],
+                    [decision(1, "keep")],
+                )
+
+                result = CliRunner().invoke(app, ["eval", "rerank", "focus 30m", "--latest"])
+
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertIn("No matching Codex audit result", result.output)
+
+    def test_eval_rerank_rules_keep_demote_reject_and_missing_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                write_audit_cache(
+                    Path(tmp) / "home",
+                    "run-1",
+                    "focus 30m",
+                    [
+                        candidate(1, "keep me"),
+                        candidate(2, "missing"),
+                        candidate(3, "demote me"),
+                        candidate(4, "reject me"),
+                    ],
+                    [decision(1, "keep"), decision(3, "demote"), decision(4, "reject")],
+                )
+
+                payload = evaluate_rerank("focus 30m")
+
+                self.assertTrue(payload["found"])
+                self.assertEqual([row["decision"] for row in payload["details"]], ["keep", "not_audited", "demote", "reject"])
+                self.assertEqual(
+                    [row["track"]["title"] for row in payload["suggested_queue"]],
+                    ["keep me", "missing", "demote me"],
+                )
+                rejected = payload["details"][3]
+                self.assertEqual(rejected["suggested_action"], "remove from suggested queue")
+                self.assertNotIn(rejected, payload["suggested_queue"])
+
+    def test_eval_rerank_does_not_write_profile_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                write_audit_cache(
+                    Path(tmp) / "home",
+                    "run-1",
+                    "focus 30m",
+                    [candidate(1, "quiet")],
+                    [decision(1, "keep")],
+                )
+                store = TonepathStore()
+                before = store.profile_summary()
+                store.close()
+
+                result = CliRunner().invoke(app, ["eval", "rerank", "focus 30m", "--latest"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                store = TonepathStore()
+                after = store.profile_summary()
+                store.close()
+                self.assertEqual(before, after)
+
 
 def track_for(path: Path, title: str, genre: str | None) -> Track:
     """Create one persisted-test track payload."""
@@ -336,6 +424,55 @@ def track_for(path: Path, title: str, genre: str | None) -> Track:
         duration=180.0,
         format="mp3",
     )
+
+
+def write_audit_cache(
+    home: Path,
+    run_id: str,
+    prompt: str,
+    candidates: list[dict[str, object]],
+    decisions: list[dict[str, object]],
+) -> None:
+    """Write one local Codex audit cache fixture."""
+
+    result_dir = home / "cache" / "audit" / run_id
+    result_dir.mkdir(parents=True)
+    (result_dir / "evidence.json").write_text(
+        json.dumps({"run_id": run_id, "prompt": prompt, "candidates": candidates}),
+        encoding="utf-8",
+    )
+    (result_dir / "codex-result.json").write_text(
+        json.dumps({"summary": f"summary {run_id}", "decisions": decisions}),
+        encoding="utf-8",
+    )
+
+
+def candidate(track_id: int, title: str) -> dict[str, object]:
+    """Return a minimal audit candidate fixture."""
+
+    return {
+        "phase": "focus",
+        "track": {"id": track_id, "title": title, "artist": "artist"},
+        "score": 1.0,
+        "confidence": "high",
+        "features": {},
+        "reasons": [],
+        "red_flags": [],
+        "yellow_flags": [],
+    }
+
+
+def decision(track_id: int, value: str, risk_flags: list[str] | None = None) -> dict[str, object]:
+    """Return a valid Codex audit decision fixture."""
+
+    return {
+        "track_id": track_id,
+        "decision": value,
+        "fit_score": 0.8,
+        "risk_flags": risk_flags or [],
+        "reason": f"{value} reason",
+        "evidence_used": [{"type": "local", "field": "bpm", "value": 90}],
+    }
 
 
 if __name__ == "__main__":

@@ -130,6 +130,121 @@ def evaluate_suite(store: TonepathStore, limit: int, prompts: tuple[str, ...] = 
     return payload
 
 
+def evaluate_rerank(prompt: str) -> dict[str, object]:
+    """Return an advisory rerank preview from the newest matching Codex audit."""
+
+    latest = latest_codex_audit_for_prompt(prompt)
+    if latest is None:
+        return {
+            "found": False,
+            "prompt": prompt,
+            "message": "No matching Codex audit result found for this prompt.",
+        }
+    evidence, codex, result_path = latest
+    candidates = evidence.get("candidates")
+    if not isinstance(candidates, list):
+        raise RuntimeError("Audit evidence must contain a candidates list.")
+    decisions = codex.get("decisions")
+    if not isinstance(decisions, list):
+        raise RuntimeError("Codex audit result must contain a decisions list.")
+    decision_by_track = {int(item["track_id"]): item for item in decisions if isinstance(item, dict)}
+    details = [rerank_detail(index, candidate, decision_by_track) for index, candidate in enumerate(candidates, start=1)]
+    suggested_queue = suggested_rerank_queue(details)
+    counts = {
+        "keep": sum(1 for row in details if row["decision"] == "keep"),
+        "demote": sum(1 for row in details if row["decision"] == "demote"),
+        "reject": sum(1 for row in details if row["decision"] == "reject"),
+        "not_audited": sum(1 for row in details if row["decision"] == "not_audited"),
+    }
+    return {
+        "found": True,
+        "prompt": prompt,
+        "run_id": evidence.get("run_id", result_path.parent.name),
+        "summary": codex.get("summary", "Codex rerank guidance available."),
+        "counts": counts,
+        "evidence_path": str(result_path.parent / "evidence.json"),
+        "codex_result_path": str(result_path),
+        "details": details,
+        "suggested_queue": suggested_queue,
+    }
+
+
+def latest_codex_audit_for_prompt(prompt: str) -> tuple[dict[str, object], dict[str, object], Path] | None:
+    """Load the newest Codex audit whose evidence prompt matches the requested prompt."""
+
+    audit_root = config.ensure_data_dir() / "cache" / "audit"
+    if not audit_root.exists():
+        return None
+    results = sorted(audit_root.glob("*/codex-result.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for result_path in results:
+        evidence_path = result_path.parent / "evidence.json"
+        try:
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(evidence, dict) or evidence.get("prompt") != prompt:
+            continue
+        return evidence, load_codex_audit_result(result_path), result_path
+    return None
+
+
+def rerank_detail(index: int, candidate: object, decisions: dict[int, dict[str, object]]) -> dict[str, object]:
+    """Return one advisory rerank row for a candidate and optional Codex decision."""
+
+    if not isinstance(candidate, dict):
+        raise RuntimeError("Audit candidate must be an object.")
+    track = candidate.get("track")
+    if not isinstance(track, dict):
+        raise RuntimeError("Audit candidate must contain a track object.")
+    track_id = track.get("id")
+    decision = decisions.get(int(track_id)) if isinstance(track_id, int) else None
+    if decision is None:
+        decision_name = "not_audited"
+        fit_score = None
+        risk_flags: list[object] = []
+        reason = "No Codex decision for this candidate."
+    else:
+        decision_name = str(decision["decision"])
+        fit_score = decision.get("fit_score")
+        raw_flags = decision.get("risk_flags", [])
+        risk_flags = raw_flags if isinstance(raw_flags, list) else []
+        reason = str(decision.get("reason", ""))
+    return {
+        "original_rank": index,
+        "phase": candidate.get("phase"),
+        "track": track,
+        "score": candidate.get("score"),
+        "decision": decision_name,
+        "fit_score": fit_score,
+        "risk_flags": risk_flags,
+        "reason": reason,
+        "suggested_action": suggested_action(decision_name),
+    }
+
+
+def suggested_rerank_queue(details: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Return keep/not-audited/demote rows while excluding rejected rows."""
+
+    priority = {"keep": 0, "not_audited": 1, "demote": 2}
+    queue = [row for row in details if row["decision"] != "reject"]
+    ordered = sorted(queue, key=lambda row: (priority.get(str(row["decision"]), 1), int(row["original_rank"])))
+    for rank, row in enumerate(ordered, start=1):
+        row["suggested_rank"] = rank
+    return ordered
+
+
+def suggested_action(decision: str) -> str:
+    """Return the human action implied by one audit decision."""
+
+    if decision == "keep":
+        return "keep"
+    if decision == "demote":
+        return "move later"
+    if decision == "reject":
+        return "remove from suggested queue"
+    return "keep original position"
+
+
 def eval_candidates(store: TonepathStore, plan: SessionPlan, limit: int) -> list[CandidateScore]:
     """Return a small balanced candidate set for evaluation output."""
 

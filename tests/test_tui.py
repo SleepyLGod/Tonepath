@@ -84,14 +84,23 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                         await pilot.press("q")
                 self.assertEqual(start.call_count, 0)
 
-    async def test_tui_rerank_reads_latest_codex_result_summary(self) -> None:
+    async def test_tui_rerank_reads_latest_codex_result_preview(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
                 home = Path(tmp) / "home"
                 result_dir = home / "cache" / "audit" / "run-1"
                 result_dir.mkdir(parents=True)
                 (result_dir / "evidence.json").write_text(
-                    json.dumps({"prompt": "from irritated to focus in 30 minutes"}),
+                    json.dumps(
+                        {
+                            "run_id": "run-1",
+                            "prompt": "from irritated to focus in 30 minutes",
+                            "candidates": [
+                                {"phase": "focus", "track": {"id": 1, "title": "Calm Track", "artist": "artist"}, "score": 1.0},
+                                {"phase": "focus", "track": {"id": 2, "title": "Busy Track", "artist": "artist"}, "score": 0.8},
+                            ],
+                        }
+                    ),
                     encoding="utf-8",
                 )
                 (result_dir / "codex-result.json").write_text(
@@ -99,9 +108,22 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                         {
                             "summary": "Codex reviewed the path.",
                             "decisions": [
-                                {"decision": "keep"},
-                                {"decision": "demote"},
-                                {"decision": "reject"},
+                                {
+                                    "track_id": 1,
+                                    "decision": "keep",
+                                    "fit_score": 0.9,
+                                    "risk_flags": [],
+                                    "reason": "local evidence fits",
+                                    "evidence_used": [{"type": "local", "field": "bpm", "value": 90}],
+                                },
+                                {
+                                    "track_id": 2,
+                                    "decision": "demote",
+                                    "fit_score": 0.4,
+                                    "risk_flags": ["too stimulating"],
+                                    "reason": "web and local evidence suggest demotion",
+                                    "evidence_used": [{"type": "local", "field": "energy", "value": 0.8}],
+                                },
                             ],
                         }
                     ),
@@ -116,8 +138,12 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                     await pilot.press("r")
                     self.assertEqual(
                         app.latest_codex_summary(),
-                        "Codex reviewed the path. keep 1 · demote 1 · reject 1",
+                        "Rerank preview: keep 1 · demote 1 · reject 0 · not audited 0",
                     )
+                    preview = app.latest_codex_preview()
+                    self.assertIsNotNone(preview)
+                    self.assertIn("keep: Calm Track - artist · keep", preview)
+                    self.assertIn("demote: Busy Track - artist · move later", preview)
                     await pilot.press("q")
 
     async def test_tui_rerank_ignores_codex_result_for_other_prompt(self) -> None:

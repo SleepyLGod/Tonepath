@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from rich.text import Text
 
 from tonepath import config
 from tonepath.db import TonepathStore
+from tonepath.evaluation import evaluate_rerank
 from tonepath.model_runtime import model_runtime_status
 from tonepath.models import FeedbackType
 from tonepath.playback_controller import PlaybackController
@@ -316,11 +316,12 @@ class TonepathApp(App[None]):
         if self.runner is None:
             self.log_event("Enter a listening goal first.")
             return
-        summary = self.latest_codex_summary()
-        if summary is None:
+        preview = self.latest_codex_preview()
+        if preview is None:
             self.log_event("Run Codex audit first; use demote/reject decisions as rerank guidance.")
             return
-        self.log_event(summary)
+        for line in preview:
+            self.log_event(line)
 
     def apply_feedback(self, feedback_type: FeedbackType) -> None:
         """Apply one feedback action to the active session."""
@@ -626,47 +627,44 @@ class TonepathApp(App[None]):
             text.append(line, style=f"bold {TEAL}" if index == 0 else TEAL)
         return text
 
-    def latest_codex_summary(self) -> str | None:
-        """Return a compact summary from the newest Codex audit for this session."""
+    def latest_codex_preview(self) -> list[str] | None:
+        """Return a compact rerank preview from the newest Codex audit for this session."""
 
         if self.runner is None:
             return None
         current_prompt = self.runner.active_plan().request.prompt
-        audit_root = config.ensure_data_dir() / "cache" / "audit"
-        if not audit_root.exists():
-            return None
-        results = sorted(audit_root.glob("*/codex-result.json"), key=lambda path: path.stat().st_mtime, reverse=True)
-        for result_path in results:
-            if not self.codex_result_matches_prompt(result_path, current_prompt):
-                continue
-            try:
-                payload = json.loads(result_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                return "Latest Codex audit result is unreadable."
-            decisions = payload.get("decisions")
-            if not isinstance(decisions, list):
-                return "Latest Codex audit result has no decisions."
-            counts = {"keep": 0, "demote": 0, "reject": 0}
-            for item in decisions:
-                if isinstance(item, dict) and item.get("decision") in counts:
-                    counts[str(item["decision"])] += 1
-            summary = payload.get("summary")
-            headline = summary if isinstance(summary, str) and summary else "Codex rerank guidance available."
-            return (
-                f"{headline} "
-                f"keep {counts['keep']} · demote {counts['demote']} · reject {counts['reject']}"
-            )
-        return None
-
-    def codex_result_matches_prompt(self, result_path: Path, prompt: str) -> bool:
-        """Return whether an audit result belongs to the active prompt."""
-
-        evidence_path = result_path.parent / "evidence.json"
         try:
-            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return False
-        return evidence.get("prompt") == prompt
+            payload = evaluate_rerank(current_prompt)
+        except RuntimeError:
+            return None
+        if not payload.get("found"):
+            return None
+        counts = payload.get("counts")
+        details = payload.get("details")
+        if not isinstance(counts, dict) or not isinstance(details, list):
+            return ["Latest Codex audit result is unreadable."]
+        lines = [
+            (
+                f"Rerank preview: keep {counts.get('keep', 0)} · demote {counts.get('demote', 0)} · "
+                f"reject {counts.get('reject', 0)} · not audited {counts.get('not_audited', 0)}"
+            )
+        ]
+        for row in details[:3]:
+            if not isinstance(row, dict):
+                continue
+            track = row.get("track")
+            if not isinstance(track, dict):
+                continue
+            title = track.get("title") or "unknown"
+            artist = track.get("artist") or "unknown"
+            lines.append(f"{row.get('decision', 'not_audited')}: {title} - {artist} · {row.get('suggested_action')}")
+        return lines
+
+    def latest_codex_summary(self) -> str | None:
+        """Return the first line of the newest matching Codex rerank preview."""
+
+        preview = self.latest_codex_preview()
+        return None if preview is None else preview[0]
 
     def show_empty_library(self) -> None:
         """Render setup guidance when no local tracks are available."""

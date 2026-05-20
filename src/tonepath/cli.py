@@ -20,7 +20,7 @@ from tonepath.analysis import AnalysisProgress, analyze_library
 from tonepath.db import TonepathStore
 from tonepath.doctor import run_doctor
 from tonepath.enrichment import EnrichmentProvider, enrich_library
-from tonepath.evaluation import evaluate_audit, evaluate_selection, evaluate_suite, run_codex_audit
+from tonepath.evaluation import evaluate_audit, evaluate_rerank, evaluate_selection, evaluate_suite, run_codex_audit
 from tonepath.explanation import explain_candidate
 from tonepath.llm import llm_doctor, parse_prompt_with_llm
 from tonepath.model_runtime import isolation_report, model_runtime_report, model_runtime_status, setup_essentia_tf_runtime
@@ -490,6 +490,29 @@ def eval_audit(
     render_audit_pack(evidence)
 
 
+@eval_app.command("rerank")
+def eval_rerank(
+    prompt: Annotated[str, typer.Argument(help="State transition prompt to rerank from the latest matching audit.")],
+    latest: Annotated[bool, typer.Option("--latest", help="Use the newest matching Codex audit result.")] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Print stable JSON for comparison.")] = False,
+) -> None:
+    """Preview advisory queue changes from a prior Codex audit."""
+
+    if not latest:
+        raise typer.BadParameter("Pass --latest to use the newest matching Codex audit result.")
+    try:
+        payload = evaluate_rerank(prompt)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if json_output:
+        print_json_payload(payload)
+        return
+    if not payload.get("found"):
+        console.print(str(payload["message"]))
+        raise typer.Exit(code=1)
+    render_eval_rerank(payload)
+
+
 @config_app.command("init")
 def config_init(overwrite: Annotated[bool, typer.Option("--overwrite", help="Overwrite an existing config.")] = False) -> None:
     """Create a default local config file."""
@@ -883,6 +906,41 @@ def render_codex_audit(payload: dict[str, object]) -> None:
             str(item.get("fit_score", "--")),
             str(evidence_count),
             str(item.get("reason", "")),
+        )
+    console.print(table)
+
+
+def render_eval_rerank(payload: dict[str, object]) -> None:
+    """Render advisory rerank guidance from a matching Codex audit result."""
+
+    counts = payload.get("counts")
+    if not isinstance(counts, dict):
+        raise TypeError("Rerank payload must include counts.")
+    console.print(f"Rerank preview: {payload['prompt']}")
+    console.print(
+        f"keep {counts.get('keep', 0)} · demote {counts.get('demote', 0)} · "
+        f"reject {counts.get('reject', 0)} · not audited {counts.get('not_audited', 0)}"
+    )
+    console.print(f"Codex result: {payload['codex_result_path']}")
+    details = payload.get("details")
+    if not isinstance(details, list):
+        raise TypeError("Rerank payload must include details.")
+    table = Table("Suggested", "Original", "Decision", "Track", "Action", "Risk / Reason", box=box.SIMPLE, expand=True)
+    for row in details:
+        if not isinstance(row, dict):
+            raise TypeError("Rerank detail must be an object.")
+        track = row.get("track")
+        if not isinstance(track, dict):
+            raise TypeError("Rerank detail must include track.")
+        risk_flags = row.get("risk_flags", [])
+        risks = ", ".join(str(flag) for flag in risk_flags) if isinstance(risk_flags, list) and risk_flags else str(row["reason"])
+        table.add_row(
+            str(row.get("suggested_rank", "--")),
+            str(row["original_rank"]),
+            str(row["decision"]).replace("_", " "),
+            eval_track_label(track),
+            str(row["suggested_action"]),
+            risks,
         )
     console.print(table)
 
