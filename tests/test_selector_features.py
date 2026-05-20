@@ -132,6 +132,79 @@ class SelectorFeaturesTest(unittest.TestCase):
 
             self.assertGreater(steady.score, frantic.score)
             self.assertIn("phase stimulation penalty adjusted the score", frantic.reasons)
+            self.assertIn("low vocalness but overstimulating for this phase", frantic.reasons)
+            store.close()
+
+    def test_stabilize_penalizes_rush_e_style_no_vocals_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            steady_id = store.upsert_track(track_for(tmp, "steady-ost.wav"))
+            rush_id = store.upsert_track(track_for(tmp, "rush-e.wav"))
+            store.upsert_features(
+                TrackFeatures(
+                    steady_id,
+                    bpm=96.0,
+                    loudness=-11.36,
+                    energy=0.621,
+                    vocalness=0.185,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+            store.upsert_features(
+                TrackFeatures(
+                    rush_id,
+                    bpm=143.5,
+                    loudness=-13.32,
+                    energy=0.556,
+                    vocalness=0.141,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            phase = SessionPhase("stabilize", 0, 600, 0.45, 0.55, 0.45, "avoid")
+            steady = score_track(store, store.get_track(steady_id), phase)
+            rush = score_track(store, store.get_track(rush_id), phase)
+
+            self.assertGreater(steady.score, rush.score)
+            self.assertIn("low vocalness but overstimulating for this phase", rush.reasons)
+            store.close()
+
+    def test_inconclusive_vocalness_does_not_outrank_low_vocalness_in_strict_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            low_vocal_id = store.upsert_track(track_for(tmp, "low-vocal.wav"))
+            inconclusive_id = store.upsert_track(track_for(tmp, "inconclusive.wav"))
+            store.upsert_features(
+                TrackFeatures(
+                    low_vocal_id,
+                    bpm=92.0,
+                    loudness=-16.0,
+                    energy=0.45,
+                    vocalness=0.22,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+            store.upsert_features(
+                TrackFeatures(
+                    inconclusive_id,
+                    bpm=92.0,
+                    loudness=-16.0,
+                    energy=0.45,
+                    vocalness=0.52,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            phase = SessionPhase("focus", 0, 600, 0.5, 0.6, 0.5, "avoid")
+            low_vocal = score_track(store, store.get_track(low_vocal_id), phase)
+            inconclusive = score_track(store, store.get_track(inconclusive_id), phase)
+
+            self.assertGreater(low_vocal.score, inconclusive.score)
+            self.assertIn("vocalness feature is inconclusive for no-vocals constraint", inconclusive.reasons)
             store.close()
 
     def test_low_vocalness_scores_higher_for_no_vocals_phase(self) -> None:
