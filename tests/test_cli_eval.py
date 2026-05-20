@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 
 from tonepath.cli import app
 from tonepath.db import TonepathStore
-from tonepath.evaluation import annotate_red_flags, codex_audit_schema_path, codex_skill_path, evaluate_rerank
+from tonepath.evaluation import annotate_red_flags, codex_audit_schema_path, codex_prompt, codex_skill_path, evaluate_rerank
 from tonepath.models import Track, TrackFeatures
 
 
@@ -236,6 +236,37 @@ class CliEvalTest(unittest.TestCase):
         self.assertTrue(schema_path.exists())
         self.assertIn("src/tonepath/resources", str(skill_path))
         self.assertIn("src/tonepath/resources", str(schema_path))
+
+    def test_codex_skill_documents_evidence_semantics_thresholds_and_examples(self) -> None:
+        skill = codex_skill_path().read_text(encoding="utf-8")
+
+        for expected in [
+            "Evidence Field Semantics",
+            "`score`",
+            "`confidence`",
+            "`features.energy`",
+            "`features.loudness`",
+            "`features.bpm`",
+            "`features.vocalness`",
+            "Threshold Guide",
+            "`vocalness <= 0.35`",
+            "`0.35..0.65`",
+            "`>= 0.65`",
+            "`BPM >= 140`",
+            "`energy >= 0.68`",
+            "`loudness >= -9.0`",
+            "Keep example",
+            "Demote example",
+            "Reject example",
+        ]:
+            self.assertIn(expected, skill)
+
+    def test_codex_prompt_points_to_skill_contract(self) -> None:
+        prompt = codex_prompt("/tmp/evidence.json", web=True)
+
+        self.assertIn("field semantics", prompt)
+        self.assertIn("threshold guide", prompt)
+        self.assertIn("examples", prompt)
 
     def test_eval_audit_codex_uses_read_only_sandbox_and_search_only_when_web(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

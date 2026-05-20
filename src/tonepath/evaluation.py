@@ -420,6 +420,7 @@ def codex_prompt(evidence_path: str, web: bool) -> str:
             "Audit a Tonepath local listening path using the packaged Tonepath Codex skill.",
             f"Skill path: {codex_skill_path()}",
             f"Evidence pack path: {evidence_path}",
+            "Read the skill's field semantics, threshold guide, and examples before deciding.",
             web_instruction,
             "</task>",
             "<output_contract>",
