@@ -7,6 +7,7 @@ import math
 import shutil
 import subprocess
 import uuid
+from importlib import resources
 from pathlib import Path
 
 from tonepath import config
@@ -184,8 +185,8 @@ def features_to_eval_row(features: TrackFeatures | None) -> dict[str, object]:
 def annotate_red_flags(rows: list[dict[str, object]], no_vocals: bool) -> None:
     """Attach product-quality red flags to evaluation rows in place."""
 
-    for index, row in enumerate(rows):
-        row["red_flags"] = candidate_red_flags(row, rank=index + 1, no_vocals=no_vocals)
+    for row in rows:
+        row["red_flags"] = candidate_red_flags(row, no_vocals=no_vocals)
 
 
 def annotate_yellow_flags(rows: list[dict[str, object]], no_vocals: bool) -> None:
@@ -195,11 +196,9 @@ def annotate_yellow_flags(rows: list[dict[str, object]], no_vocals: bool) -> Non
         row["yellow_flags"] = candidate_yellow_flags(row, no_vocals=no_vocals)
 
 
-def candidate_red_flags(row: dict[str, object], rank: int, no_vocals: bool) -> list[str]:
+def candidate_red_flags(row: dict[str, object], no_vocals: bool) -> list[str]:
     """Return product-quality red flags for one candidate."""
 
-    if rank > 3:
-        return []
     features = row.get("features")
     if not isinstance(features, dict):
         return ["missing feature payload"]
@@ -212,16 +211,16 @@ def candidate_red_flags(row: dict[str, object], rank: int, no_vocals: bool) -> l
     phase = str(row.get("phase") or "")
 
     if no_vocals and vocalness is not None and vocalness >= 0.65:
-        flags.append("high vocalness in no-vocals top 3")
+        flags.append("high vocalness in no-vocals candidate")
     if confidence == "low" or features.get("source") is None:
-        flags.append("low evidence in top 3")
+        flags.append("low evidence candidate")
     if phase in {"decompress", "focus"}:
         if energy is not None and energy >= 0.75:
-            flags.append("high energy in calm/focus top 3")
+            flags.append("high energy in calm/focus candidate")
         if loudness is not None and loudness >= -8.0:
-            flags.append("high loudness in calm/focus top 3")
+            flags.append("high loudness in calm/focus candidate")
         if bpm is not None and bpm >= 150.0:
-            flags.append("high BPM in calm/focus top 3")
+            flags.append("high BPM in calm/focus candidate")
     return flags
 
 
@@ -271,15 +270,29 @@ def audit_cache_dir(run_id: str) -> Path:
 
 
 def codex_skill_path() -> Path:
-    """Return the repo-local Tonepath Codex skill path."""
+    """Return the packaged Tonepath Codex skill path."""
 
-    return config.repo_root() / "codex" / "skills" / "tonepath-dj" / "SKILL.md"
+    return package_resource_path("resources", "codex", "skills", "tonepath-dj", "SKILL.md")
 
 
 def codex_audit_schema_path() -> Path:
-    """Return the repo-local Codex audit output schema."""
+    """Return the packaged Codex audit output schema."""
 
-    return config.repo_root() / "codex" / "skills" / "tonepath-dj" / "schemas" / "audit-output.schema.json"
+    return package_resource_path(
+        "resources",
+        "codex",
+        "skills",
+        "tonepath-dj",
+        "schemas",
+        "audit-output.schema.json",
+    )
+
+
+def package_resource_path(*parts: str) -> Path:
+    """Return a filesystem path for a packaged Tonepath resource."""
+
+    resource = resources.files("tonepath").joinpath(*parts)
+    return Path(str(resource))
 
 
 def codex_prompt(evidence_path: str, web: bool) -> str:
@@ -289,7 +302,7 @@ def codex_prompt(evidence_path: str, web: bool) -> str:
     return "\n".join(
         [
             "<task>",
-            "Audit a Tonepath local listening path using the repo-local Codex skill.",
+            "Audit a Tonepath local listening path using the packaged Tonepath Codex skill.",
             f"Skill path: {codex_skill_path()}",
             f"Evidence pack path: {evidence_path}",
             web_instruction,

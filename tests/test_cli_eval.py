@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 
 from tonepath.cli import app
 from tonepath.db import TonepathStore
+from tonepath.evaluation import annotate_red_flags, codex_audit_schema_path, codex_skill_path
 from tonepath.models import Track, TrackFeatures
 
 
@@ -111,7 +112,7 @@ class CliEvalTest(unittest.TestCase):
                 self.assertIn("red_flag_count", first)
                 self.assertIn("yellow_flag_count", first)
                 self.assertEqual(first["candidates"][0]["features"]["source"], "model-essentia-voice-instrumental")
-                self.assertIn("high vocalness in no-vocals top 3", first["candidates"][0]["red_flags"])
+                self.assertIn("high vocalness in no-vocals candidate", first["candidates"][0]["red_flags"])
 
     def test_eval_suite_does_not_write_profile_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -141,7 +142,37 @@ class CliEvalTest(unittest.TestCase):
                 self.assertEqual(result.exit_code, 0, result.output)
                 payload = json.loads(result.output)
                 self.assertIsNone(payload[0]["candidates"][0]["features"]["source"])
-                self.assertIn("low evidence in top 3", payload[0]["candidates"][0]["red_flags"])
+                self.assertIn("low evidence candidate", payload[0]["candidates"][0]["red_flags"])
+
+    def test_red_flags_apply_to_later_candidates(self) -> None:
+        rows = [
+            {
+                "phase": "decompress",
+                "confidence": "high",
+                "features": {"source": "test", "energy": 0.2, "loudness": -18.0, "bpm": 80.0, "vocalness": 0.1},
+            },
+            {
+                "phase": "stabilize",
+                "confidence": "high",
+                "features": {"source": "test", "energy": 0.4, "loudness": -14.0, "bpm": 90.0, "vocalness": 0.2},
+            },
+            {
+                "phase": "focus",
+                "confidence": "high",
+                "features": {"source": "test", "energy": 0.5, "loudness": -12.0, "bpm": 100.0, "vocalness": 0.2},
+            },
+            {
+                "phase": "focus",
+                "confidence": "high",
+                "features": {"source": "test", "energy": 0.91, "loudness": -5.0, "bpm": 168.0, "vocalness": 0.82},
+            },
+        ]
+
+        annotate_red_flags(rows, no_vocals=True)
+
+        self.assertIn("high vocalness in no-vocals candidate", rows[3]["red_flags"])
+        self.assertIn("high energy in calm/focus candidate", rows[3]["red_flags"])
+        self.assertNotIn("top 3", " ".join(rows[3]["red_flags"]))
 
     def test_eval_suite_rejects_non_positive_limit(self) -> None:
         result = CliRunner().invoke(app, ["eval", "suite", "--limit", "0"])
@@ -196,6 +227,15 @@ class CliEvalTest(unittest.TestCase):
 
                 self.assertNotEqual(result.exit_code, 0)
                 self.assertIn("Codex CLI is not available", result.output)
+
+    def test_codex_resources_resolve_from_package(self) -> None:
+        skill_path = codex_skill_path()
+        schema_path = codex_audit_schema_path()
+
+        self.assertTrue(skill_path.exists())
+        self.assertTrue(schema_path.exists())
+        self.assertIn("src/tonepath/resources", str(skill_path))
+        self.assertIn("src/tonepath/resources", str(schema_path))
 
     def test_eval_audit_codex_uses_read_only_sandbox_and_search_only_when_web(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

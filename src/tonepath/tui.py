@@ -627,31 +627,46 @@ class TonepathApp(App[None]):
         return text
 
     def latest_codex_summary(self) -> str | None:
-        """Return a compact summary from the newest local Codex audit result."""
+        """Return a compact summary from the newest Codex audit for this session."""
 
+        if self.runner is None:
+            return None
+        current_prompt = self.runner.active_plan().request.prompt
         audit_root = config.ensure_data_dir() / "cache" / "audit"
         if not audit_root.exists():
             return None
         results = sorted(audit_root.glob("*/codex-result.json"), key=lambda path: path.stat().st_mtime, reverse=True)
-        if not results:
-            return None
+        for result_path in results:
+            if not self.codex_result_matches_prompt(result_path, current_prompt):
+                continue
+            try:
+                payload = json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return "Latest Codex audit result is unreadable."
+            decisions = payload.get("decisions")
+            if not isinstance(decisions, list):
+                return "Latest Codex audit result has no decisions."
+            counts = {"keep": 0, "demote": 0, "reject": 0}
+            for item in decisions:
+                if isinstance(item, dict) and item.get("decision") in counts:
+                    counts[str(item["decision"])] += 1
+            summary = payload.get("summary")
+            headline = summary if isinstance(summary, str) and summary else "Codex rerank guidance available."
+            return (
+                f"{headline} "
+                f"keep {counts['keep']} · demote {counts['demote']} · reject {counts['reject']}"
+            )
+        return None
+
+    def codex_result_matches_prompt(self, result_path: Path, prompt: str) -> bool:
+        """Return whether an audit result belongs to the active prompt."""
+
+        evidence_path = result_path.parent / "evidence.json"
         try:
-            payload = json.loads(results[0].read_text(encoding="utf-8"))
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return "Latest Codex audit result is unreadable."
-        decisions = payload.get("decisions")
-        if not isinstance(decisions, list):
-            return "Latest Codex audit result has no decisions."
-        counts = {"keep": 0, "demote": 0, "reject": 0}
-        for item in decisions:
-            if isinstance(item, dict) and item.get("decision") in counts:
-                counts[str(item["decision"])] += 1
-        summary = payload.get("summary")
-        headline = summary if isinstance(summary, str) and summary else "Codex rerank guidance available."
-        return (
-            f"{headline} "
-            f"keep {counts['keep']} · demote {counts['demote']} · reject {counts['reject']}"
-        )
+            return False
+        return evidence.get("prompt") == prompt
 
     def show_empty_library(self) -> None:
         """Render setup guidance when no local tracks are available."""

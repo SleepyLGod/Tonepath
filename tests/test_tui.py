@@ -90,6 +90,10 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                 home = Path(tmp) / "home"
                 result_dir = home / "cache" / "audit" / "run-1"
                 result_dir.mkdir(parents=True)
+                (result_dir / "evidence.json").write_text(
+                    json.dumps({"prompt": "from irritated to focus in 30 minutes"}),
+                    encoding="utf-8",
+                )
                 (result_dir / "codex-result.json").write_text(
                     json.dumps(
                         {
@@ -114,6 +118,35 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                         app.latest_codex_summary(),
                         "Codex reviewed the path. keep 1 · demote 1 · reject 1",
                     )
+                    await pilot.press("q")
+
+    async def test_tui_rerank_ignores_codex_result_for_other_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                home = Path(tmp) / "home"
+                result_dir = home / "cache" / "audit" / "run-1"
+                result_dir.mkdir(parents=True)
+                (result_dir / "evidence.json").write_text(
+                    json.dumps({"prompt": "evening relaxation"}),
+                    encoding="utf-8",
+                )
+                (result_dir / "codex-result.json").write_text(
+                    json.dumps(
+                        {
+                            "summary": "Wrong prompt.",
+                            "decisions": [{"decision": "keep"}],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                store = TonepathStore()
+                self.add_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                async with app.run_test() as pilot:
+                    await pilot.press("r")
+                    self.assertIsNone(app.latest_codex_summary())
                     await pilot.press("q")
 
     async def test_tui_intake_guides_prepare_when_features_are_missing(self) -> None:
