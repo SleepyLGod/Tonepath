@@ -9,7 +9,16 @@ from typer.testing import CliRunner
 
 from tonepath.cli import app
 from tonepath.db import TonepathStore
-from tonepath.evaluation import annotate_red_flags, codex_audit_schema_path, codex_prompt, codex_skill_path, evaluate_rerank
+from tonepath.evaluation import (
+    annotate_red_flags,
+    codex_audit_schema_path,
+    codex_prompt,
+    codex_skill_path,
+    evaluate_audit,
+    evaluate_intent,
+    evaluate_rerank,
+    evaluate_suite,
+)
 from tonepath.models import Track, TrackFeatures
 
 
@@ -83,6 +92,35 @@ class CliEvalTest(unittest.TestCase):
 
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("--limit must be greater than zero", result.output)
+
+    def test_parse_outputs_low_stimulation_constraint(self) -> None:
+        result = CliRunner().invoke(app, ["parse", "我要写论文，四十五分钟，低刺激，最好不要人声"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["constraints"], ["avoid_vocals", "low_stimulation"])
+
+    def test_eval_audit_includes_low_stimulation_constraint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                store.upsert_track(track_for(Path(tmp) / "quiet.mp3", title="quiet", genre="ambient"))
+
+                payload = evaluate_audit(store, "我要写论文，四十五分钟，低刺激，最好不要人声", limit=1)
+
+                self.assertEqual(payload["constraints"], ["avoid_vocals", "low_stimulation"])
+                store.close()
+
+    def test_eval_suite_includes_low_stimulation_constraint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                store.upsert_track(track_for(Path(tmp) / "quiet.mp3", title="quiet", genre="ambient"))
+
+                payload = evaluate_suite(store, limit=1, prompts=("我要写论文，四十五分钟，低刺激，最好不要人声",))
+
+                self.assertEqual(payload[0]["constraints"], ["avoid_vocals", "low_stimulation"])
+                store.close()
 
     def test_eval_suite_json_outputs_prompts_candidates_and_red_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -179,6 +217,32 @@ class CliEvalTest(unittest.TestCase):
 
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("--limit must be greater than zero", result.output)
+
+    def test_evaluate_intent_passes_packaged_corpus(self) -> None:
+        payload = evaluate_intent()
+
+        self.assertGreaterEqual(payload["total"], 50)
+        self.assertEqual(payload["failed"], 0)
+        self.assertEqual(payload["passed"], payload["total"])
+        self.assertEqual(payload["failures"], [])
+
+    def test_eval_intent_json_outputs_stable_summary(self) -> None:
+        result = CliRunner().invoke(app, ["eval", "intent", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertGreaterEqual(payload["total"], 50)
+        self.assertEqual(payload["failed"], 0)
+        self.assertIn("cases", payload)
+        self.assertIn("actual", payload["cases"][0])
+        self.assertIn("expected", payload["cases"][0])
+
+    def test_eval_intent_text_outputs_summary(self) -> None:
+        result = CliRunner().invoke(app, ["eval", "intent"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Intent fixtures:", result.output)
+        self.assertIn("failed 0", result.output)
 
     def test_eval_audit_json_outputs_evidence_pack(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

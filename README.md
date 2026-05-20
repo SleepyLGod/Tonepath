@@ -14,7 +14,7 @@ Tonepath is currently a working terminal prototype. It is not a macOS app, web a
 | Config | Implemented | Local TOML config under the active `TONEPATH_HOME`; the development default is the workspace-local `.tonepath/` directory. |
 | Library scanning | Implemented | Scans local audio files and reads metadata with Mutagen, falling back to filenames when tags are missing. |
 | Storage | Implemented | SQLite stores tracks, sessions, phases, feedback, profile summaries, future audio feature rows, and source-attributed enrichment fields. |
-| Path planning | Implemented | Deterministic prompt parsing and phase planning for state transitions such as irritated -> focus. |
+| Path planning | Implemented | Deterministic bilingual prompt parsing and phase planning for state transitions such as irritated -> focus. |
 | Track selection | Implemented | Deterministic scoring with confidence labels; metadata-only selections are intentionally low confidence. |
 | Playback | Implemented | Local `mpv` adapter plus `--dry-run` command preview. |
 | CLI commands | Implemented | `prepare`, `status`, `doctor`, `config`, `scan`, `start`, `feedback`, `profile`, `privacy`, `explain`, `eval`, and `enrich`. |
@@ -209,6 +209,8 @@ By default, model methods skip existing results from the same method. Use `--for
 Evaluate selection quality without playback or profile writes:
 
 ```bash
+uv run tonepath eval intent
+uv run tonepath eval intent --json
 uv run tonepath eval selection "我现在很烦，想半小时后进入写代码状态，不要人声" --limit 8
 uv run tonepath eval selection "我现在很烦，想半小时后进入写代码状态，不要人声" --json
 uv run tonepath eval suite --limit 5
@@ -217,6 +219,8 @@ uv run tonepath eval audit "我现在很烦，想半小时后进入写代码状�
 uv run tonepath eval audit "我现在很烦，想半小时后进入写代码状态，不要人声" --codex --web --limit 12
 uv run tonepath eval rerank "我现在很烦，想半小时后进入写代码状态，不要人声" --latest
 ```
+
+`eval intent` checks the packaged Chinese/English prompt-intent fixture corpus. Tonepath uses a deterministic bilingual parser as its local baseline; public corpora such as MASSIVE, GoEmotions, Chinese emotion lexicons, MusicCaps, and MTG-Jamendo are useful references for vocabulary and test design, but Tonepath does not download or vendor those datasets at runtime.
 
 `eval suite` runs a small built-in set of product prompts and flags likely quality problems such as high vocalness in no-vocals results, high stimulation in focus/decompress phases, or low-evidence top candidates. It is read-only: it does not create sessions, playback rows, feedback, or profile rules.
 

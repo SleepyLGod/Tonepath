@@ -20,12 +20,12 @@ from tonepath.analysis import AnalysisProgress, analyze_library
 from tonepath.db import TonepathStore
 from tonepath.doctor import run_doctor
 from tonepath.enrichment import EnrichmentProvider, enrich_library
-from tonepath.evaluation import evaluate_audit, evaluate_rerank, evaluate_selection, evaluate_suite, run_codex_audit
+from tonepath.evaluation import evaluate_audit, evaluate_intent, evaluate_rerank, evaluate_selection, evaluate_suite, run_codex_audit
 from tonepath.explanation import explain_candidate
 from tonepath.llm import llm_doctor, parse_prompt_with_llm
 from tonepath.model_runtime import isolation_report, model_runtime_report, model_runtime_status, setup_essentia_tf_runtime
 from tonepath.models import CandidateScore, Track
-from tonepath.planner import plan_session
+from tonepath.planner import plan_session, request_constraints
 from tonepath.playback import MpvAdapter
 from tonepath.playback_controller import PlaybackController
 from tonepath.privacy import delete_profile, privacy_status
@@ -383,7 +383,7 @@ def parse_command(
             "source_state": plan.request.source_state,
             "target_state": plan.request.target_state,
             "duration_min": plan.request.duration_sec // 60,
-            "constraints": ["avoid_vocals"] if plan.request.no_vocals else [],
+            "constraints": request_constraints(plan.request),
         }
         console.print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
@@ -453,6 +453,19 @@ def eval_suite(
         print_json_payload(payload)
         return
     render_eval_suite(payload)
+
+
+@eval_app.command("intent")
+def eval_intent(
+    json_output: Annotated[bool, typer.Option("--json", help="Print stable JSON for comparison.")] = False,
+) -> None:
+    """Run the packaged bilingual prompt-intent parser corpus."""
+
+    payload = evaluate_intent()
+    if json_output:
+        print_json_payload(payload)
+        return
+    render_eval_intent(payload)
 
 
 @eval_app.command("audit")
@@ -854,6 +867,28 @@ def render_eval_suite_candidates(rows: list[dict[str, object]]) -> None:
             str(row["confidence"]),
             eval_feature_summary(features),
             "\n".join(flags) if flags else "ok",
+        )
+    console.print(table)
+
+
+def render_eval_intent(payload: dict[str, object]) -> None:
+    """Render bilingual intent parser evaluation output."""
+
+    console.print(
+        f"Intent fixtures: total {payload['total']} · passed {payload['passed']} · failed {payload['failed']}"
+    )
+    failures = payload.get("failures", [])
+    if not isinstance(failures, list) or not failures:
+        return
+    table = Table("Lang", "Prompt", "Expected", "Actual", box=box.SIMPLE, expand=True)
+    for failure in failures:
+        if not isinstance(failure, dict):
+            raise TypeError("Intent failure rows must be objects.")
+        table.add_row(
+            str(failure.get("lang", "unknown")),
+            str(failure["prompt"]),
+            json.dumps(failure["expected"], ensure_ascii=False),
+            json.dumps(failure["actual"], ensure_ascii=False),
         )
     console.print(table)
 

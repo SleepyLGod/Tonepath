@@ -1,0 +1,50 @@
+{"lang":"zh","prompt":"我现在很焦虑，想二十五分钟后冷静下来，不要人声","source_state":"irritated","target_state":"calm","duration_min":25,"no_vocals":true,"quiet":false}
+{"lang":"en","prompt":"I feel anxious and want to calm down in 25 minutes, no vocals","source_state":"irritated","target_state":"calm","duration_min":25,"no_vocals":true,"quiet":false}
+{"lang":"zh","prompt":"我要写论文，四十五分钟，低刺激，最好不要人声","source_state":"unspecified","target_state":"focus","duration_min":45,"no_vocals":true,"quiet":true}
+{"lang":"en","prompt":"I need to write a paper for 45 minutes, low stimulation, preferably no vocals","source_state":"unspecified","target_state":"focus","duration_min":45,"no_vocals":true,"quiet":true}
+{"lang":"zh","prompt":"我刚睡醒，需要十分钟慢慢提神","source_state":"tired","target_state":"energized","duration_min":10,"no_vocals":false,"quiet":false}
+{"lang":"en","prompt":"I just woke up and need a gentle 10 minute lift","source_state":"tired","target_state":"energized","duration_min":10,"no_vocals":false,"quiet":false}
+{"lang":"zh","prompt":"晚上准备睡觉，二十分钟，很安静","source_state":"unspecified","target_state":"calm","duration_min":20,"no_vocals":false,"quiet":true}
+{"lang":"en","prompt":"I am going to sleep, 20 minutes, very quiet","source_state":"unspecified","target_state":"calm","duration_min":20,"no_vocals":false,"quiet":true}
+{"lang":"zh","prompt":"我想整理房间，来点有节奏但不要太吵的","source_state":"unspecified","target_state":"steady","duration_min":30,"no_vocals":false,"quiet":true}
+{"lang":"en","prompt":"I want to clean my room, rhythmic but not too loud","source_state":"unspecified","target_state":"steady","duration_min":30,"no_vocals":false,"quiet":true}
+{"lang":"zh","prompt":"现在很烦，半小时后想进入写代码状态，不要人声","source_state":"irritated","target_state":"focus","duration_min":30,"no_vocals":true,"quiet":false}
+{"lang":"en","prompt":"I am irritated and want to code for half an hour, instrumental only","source_state":"irritated","target_state":"focus","duration_min":30,"no_vocals":true,"quiet":false}
+{"lang":"zh","prompt":"深度工作一小时，低刺激，纯音乐","source_state":"unspecified","target_state":"focus","duration_min":60,"no_vocals":true,"quiet":true}
+{"lang":"en","prompt":"Deep work for one hour, low stimulation, instrumental","source_state":"unspecified","target_state":"focus","duration_min":60,"no_vocals":true,"quiet":true}
+{"lang":"zh","prompt":"我很累，想用二十分钟提神","source_state":"tired","target_state":"energized","duration_min":20,"no_vocals":false,"quiet":false}
+{"lang":"en","prompt":"I am tired and need to energize over 20 minutes","source_state":"tired","target_state":"energized","duration_min":20,"no_vocals":false,"quiet":false}
+{"lang":"zh","prompt":"有点困，十五分钟醒脑","source_state":"tired","target_state":"energized","duration_min":15,"no_vocals":false,"quiet":false}
+{"lang":"en","prompt":"I feel sleepy and need a 15 min wake up path","source_state":"tired","target_state":"energized","duration_min":15,"no_vocals":false,"quiet":false}
+{"lang":"zh","prompt":"心情很低落，想三十分钟后平静一点","source_state":"low","target_state":"calm","duration_min":30,"no_vocals":false,"quiet":false}
+{"lang":"en","prompt":"I feel low and want to be calmer in 30 minutes","source_state":"low","target_state":"calm","duration_min":30,"no_vocals":false,"quiet":false}
+{"lang":"zh","prompt":"晚上放松下来，三十分钟，低刺激","source_state":"unspecified","target_state":"calm","duration_min":30,"no_vocals":false,"quiet":true}
+{"lang":"en","prompt":"Evening relaxation for 30 minutes, low stimulation","source_state":"unspecified","target_state":"calm","duration_min":30,"no_vocals":false,"quiet":true}
+{"lang":"zh","prompt":"准备睡前听二十五分钟安静的音乐","source_state":"unspecified","target_state":"calm","duration_min":25,"no_vocals":false,"quiet":true}
+{"lang":"en","prompt":"Before sleep, give me 25 minutes of quiet music","source_state":"unspecified","target_state":"calm","duration_min":25,"no_vocals":false,"quiet":true}
+{"lang":"zh","prompt":"学习四十五分钟，不要歌词，别太吵","source_state":"unspecified","target_state":"focus","duration_min":45,"no_vocals":true,"quiet":true}
+{"lang":"en","prompt":"Study for 45 min, no lyrics, not too loud","source_state":"unspecified","target_state":"focus","duration_min":45,"no_vocals":true,"quiet":true}
+{"lang":"zh","prompt":"写代码三十分钟，最好无人声","source_state":"unspecified","target_state":"focus","duration_min":30,"no_vocals":true,"quiet":false}
+{"lang":"en","prompt":"Code for 30 minutes, preferably no vocals","source_state":"unspecified","target_state":"focus","duration_min":30,"no_vocals":true,"quiet":false}
+{"lang":"zh","prompt":"我脑子很乱，想慢慢稳定下来","source_state":"irritated","target_state":"steady","duration_min":30,"no_vocals":false,"quiet":false}
+{"lang":"en","prompt":"My mind feels scattered and I want to get steady","source_state":"irritated","target_state":"steady","duration_min":30,"no_vocals":false,"quiet":false}
+{"lang":"zh","prompt":"我想做家务，来点有节奏的，不要太吵","source_state":"unspecified","target_state":"steady","duration_min":30,"no_vocals":false,"quiet":true}
+{"lang":"en","prompt":"I want to do chores with something rhythmic but not too loud","source_state":"unspecified","target_state":"steady","duration_min":30,"no_vocals":false,"quiet":true}
+{"lang":"zh","prompt":"整理资料二十分钟，需要稳定节奏","source_state":"unspecified","target_state":"steady","duration_min":20,"no_vocals":false,"quiet":false}
+{"lang":"en","prompt":"Organize files for 20 minutes with a steady rhythm","source_state":"unspecified","target_state":"steady","duration_min":20,"no_vocals":false,"quiet":false}
+{"lang":"zh","prompt":"午后启动工作，十五分钟让我清醒","source_state":"unspecified","target_state":"energized","duration_min":15,"no_vocals":false,"quiet":false}
+{"lang":"en","prompt":"Start work after lunch and make me alert in 15 minutes","source_state":"unspecified","target_state":"energized","duration_min":15,"no_vocals":false,"quiet":false}
+{"lang":"zh","prompt":"通勤路上十分钟提神，不要人声","source_state":"unspecified","target_state":"energized","duration_min":10,"no_vocals":true,"quiet":false}
+{"lang":"en","prompt":"A 10 minute energizing commute path, no vocals","source_state":"unspecified","target_state":"energized","duration_min":10,"no_vocals":true,"quiet":false}
+{"lang":"zh","prompt":"现在很孤独，想放松二十分钟","source_state":"low","target_state":"calm","duration_min":20,"no_vocals":false,"quiet":false}
+{"lang":"en","prompt":"I feel lonely and want 20 minutes of relaxation","source_state":"low","target_state":"calm","duration_min":20,"no_vocals":false,"quiet":false}
+{"lang":"zh","prompt":"工作前半小时进入专注，不要人声","source_state":"unspecified","target_state":"focus","duration_min":30,"no_vocals":true,"quiet":false}
+{"lang":"en","prompt":"Before work, get me focused for half an hour with no vocals","source_state":"unspecified","target_state":"focus","duration_min":30,"no_vocals":true,"quiet":false}
+{"lang":"zh","prompt":"想要安静地阅读四十分钟","source_state":"unspecified","target_state":"focus","duration_min":40,"no_vocals":false,"quiet":true}
+{"lang":"en","prompt":"I want to read quietly for 40 minutes","source_state":"unspecified","target_state":"focus","duration_min":40,"no_vocals":false,"quiet":true}
+{"lang":"zh","prompt":"想冥想十分钟，很平静","source_state":"unspecified","target_state":"calm","duration_min":10,"no_vocals":false,"quiet":false}
+{"lang":"en","prompt":"I want to meditate for 10 minutes and feel calm","source_state":"unspecified","target_state":"calm","duration_min":10,"no_vocals":false,"quiet":false}
+{"lang":"zh","prompt":"需要一点动力开始任务，二十分钟","source_state":"unspecified","target_state":"energized","duration_min":20,"no_vocals":false,"quiet":false}
+{"lang":"en","prompt":"I need motivation to start a task for 20 minutes","source_state":"unspecified","target_state":"energized","duration_min":20,"no_vocals":false,"quiet":false}
+{"lang":"zh","prompt":"今晚收尾工作，三十分钟稳定一点","source_state":"unspecified","target_state":"steady","duration_min":30,"no_vocals":false,"quiet":false}
+{"lang":"en","prompt":"Wrap up work tonight with a steady 30 minute path","source_state":"unspecified","target_state":"steady","duration_min":30,"no_vocals":false,"quiet":false}

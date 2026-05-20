@@ -13,7 +13,7 @@ from pathlib import Path
 from tonepath import config
 from tonepath.db import TonepathStore
 from tonepath.models import CandidateScore, SessionPlan, TrackFeatures
-from tonepath.planner import plan_session
+from tonepath.planner import parse_request, plan_session, request_constraints
 from tonepath.selector import select_path
 
 
@@ -46,7 +46,7 @@ def evaluate_audit(store: TonepathStore, prompt: str, limit: int) -> dict[str, o
         "source_state": plan.request.source_state,
         "target_state": plan.request.target_state,
         "duration_min": plan.request.duration_sec // 60,
-        "constraints": ["avoid_vocals"] if plan.request.no_vocals else [],
+        "constraints": request_constraints(plan.request),
         "candidates": rows,
     }
     audit_dir = audit_cache_dir(run_id)
@@ -121,13 +121,69 @@ def evaluate_suite(store: TonepathStore, limit: int, prompts: tuple[str, ...] = 
                 "source_state": plan.request.source_state,
                 "target_state": plan.request.target_state,
                 "duration_min": plan.request.duration_sec // 60,
-                "constraints": ["avoid_vocals"] if plan.request.no_vocals else [],
+                "constraints": request_constraints(plan.request),
                 "red_flag_count": sum(len(row["red_flags"]) for row in rows),
                 "yellow_flag_count": sum(len(row["yellow_flags"]) for row in rows),
                 "candidates": rows,
             }
         )
     return payload
+
+
+def evaluate_intent() -> dict[str, object]:
+    """Evaluate deterministic prompt parsing against the packaged intent corpus."""
+
+    cases = [intent_case_result(case) for case in load_intent_cases()]
+    failures = [case for case in cases if not case["passed"]]
+    return {
+        "total": len(cases),
+        "passed": len(cases) - len(failures),
+        "failed": len(failures),
+        "failures": failures,
+        "cases": cases,
+    }
+
+
+def load_intent_cases() -> list[dict[str, object]]:
+    """Load packaged bilingual intent fixtures."""
+
+    path = package_resource_path("resources", "intent_prompts.jsonl")
+    cases: list[dict[str, object]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            payload = json.loads(line)
+            if not isinstance(payload, dict):
+                raise RuntimeError("Intent fixture rows must be JSON objects.")
+            cases.append(payload)
+    return cases
+
+
+def intent_case_result(case: dict[str, object]) -> dict[str, object]:
+    """Return expected and actual parser output for one intent fixture."""
+
+    prompt = str(case["prompt"])
+    request = parse_request(prompt)
+    expected = {
+        "source_state": case["source_state"],
+        "target_state": case["target_state"],
+        "duration_min": case["duration_min"],
+        "no_vocals": case["no_vocals"],
+        "quiet": case["quiet"],
+    }
+    actual = {
+        "source_state": request.source_state,
+        "target_state": request.target_state,
+        "duration_min": request.duration_sec // 60,
+        "no_vocals": request.no_vocals,
+        "quiet": request.quiet,
+    }
+    return {
+        "lang": case.get("lang", "unknown"),
+        "prompt": prompt,
+        "expected": expected,
+        "actual": actual,
+        "passed": actual == expected,
+    }
 
 
 def evaluate_rerank(prompt: str) -> dict[str, object]:

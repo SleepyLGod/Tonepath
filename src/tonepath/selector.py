@@ -156,7 +156,7 @@ def no_vocals_stimulation_offset(features: TrackFeatures, phase: SessionPhase, b
     risk_count = stimulation_risk_count(features, phase)
     if risk_count == 0:
         return 0.0
-    return min(0.85 * risk_count, bonus * 0.85)
+    return min(2.0 * risk_count, bonus * 0.95)
 
 
 def stimulation_risk_count(features: TrackFeatures, phase: SessionPhase) -> int:
@@ -185,9 +185,13 @@ def phase_stimulation_penalty(features: TrackFeatures, phase: SessionPhase) -> f
 
     penalty = 0.0
     if features.bpm is not None:
-        if phase.label == "focus" and features.bpm > 110.0:
+        if phase.label in {"decompress", "soften", "settle", "calm"} and phase.target_energy <= 0.25 and features.bpm > 125.0:
+            penalty += min((features.bpm - 125.0) / 30.0, 1.0) * 4.2
+        elif phase.label == "focus" and features.bpm > 110.0:
             penalty += min((features.bpm - 110.0) / 35.0, 1.0) * 2.8
-        elif phase.label in {"decompress", "soften", "settle", "calm"} and features.bpm > 130.0:
+        elif phase.label in {"settle", "calm"} and features.bpm > 125.0:
+            penalty += min((features.bpm - 125.0) / 30.0, 1.0) * 4.5
+        elif phase.label in {"decompress", "soften"} and features.bpm > 130.0:
             penalty += min((features.bpm - 130.0) / 40.0, 1.0) * 1.6
         elif phase.label == "stabilize" and features.bpm > 130.0:
             penalty += min((features.bpm - 130.0) / 35.0, 1.0) * 3.0

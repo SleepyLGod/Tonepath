@@ -171,6 +171,127 @@ class SelectorFeaturesTest(unittest.TestCase):
             self.assertIn("low vocalness but overstimulating for this phase", rush.reasons)
             store.close()
 
+    def test_calm_penalizes_rush_e_style_no_vocals_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            calm_id = store.upsert_track(track_for(tmp, "calm-instrumental.wav"))
+            stable_inconclusive_id = store.upsert_track(track_for(tmp, "stable-inconclusive.wav"))
+            rush_id = store.upsert_track(track_for(tmp, "rush-e.wav"))
+            store.upsert_features(
+                TrackFeatures(
+                    calm_id,
+                    bpm=92.0,
+                    loudness=-16.5,
+                    energy=0.38,
+                    vocalness=0.18,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+            store.upsert_features(
+                TrackFeatures(
+                    stable_inconclusive_id,
+                    bpm=108.0,
+                    loudness=-13.0,
+                    energy=0.52,
+                    vocalness=0.52,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+            store.upsert_features(
+                TrackFeatures(
+                    rush_id,
+                    bpm=143.5,
+                    loudness=-13.32,
+                    energy=0.556,
+                    vocalness=0.141,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            phase = SessionPhase("calm", 0, 600, 0.14, 0.6, 0.14, "avoid")
+            calm = score_track(store, store.get_track(calm_id), phase)
+            stable_inconclusive = score_track(store, store.get_track(stable_inconclusive_id), phase)
+            rush = score_track(store, store.get_track(rush_id), phase)
+
+            self.assertGreater(calm.score, rush.score)
+            self.assertGreater(stable_inconclusive.score, rush.score)
+            self.assertIn("phase stimulation penalty adjusted the score", rush.reasons)
+            self.assertIn("low vocalness but overstimulating for this phase", rush.reasons)
+            store.close()
+
+    def test_energized_phase_does_not_penalize_reasonable_high_bpm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            upbeat_id = store.upsert_track(track_for(tmp, "upbeat.wav"))
+            slow_id = store.upsert_track(track_for(tmp, "slow.wav"))
+            store.upsert_features(
+                TrackFeatures(
+                    upbeat_id,
+                    bpm=143.0,
+                    loudness=-10.0,
+                    energy=0.72,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+            store.upsert_features(
+                TrackFeatures(
+                    slow_id,
+                    bpm=78.0,
+                    loudness=-16.0,
+                    energy=0.35,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            phase = SessionPhase("energize", 0, 600, 0.7, 0.65, 0.75)
+            upbeat = score_track(store, store.get_track(upbeat_id), phase)
+            slow = score_track(store, store.get_track(slow_id), phase)
+
+            self.assertGreater(upbeat.score, slow.score)
+            self.assertNotIn("phase stimulation penalty adjusted the score", upbeat.reasons)
+            store.close()
+
+    def test_quiet_soften_penalizes_rush_e_style_track_without_no_vocals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            gentle_id = store.upsert_track(track_for(tmp, "gentle.wav"))
+            rush_id = store.upsert_track(track_for(tmp, "rush-e.wav"))
+            store.upsert_features(
+                TrackFeatures(
+                    gentle_id,
+                    bpm=92.0,
+                    loudness=-16.5,
+                    energy=0.38,
+                    vocalness=0.35,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+            store.upsert_features(
+                TrackFeatures(
+                    rush_id,
+                    bpm=143.6,
+                    loudness=-21.63,
+                    energy=0.279,
+                    vocalness=0.115,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            phase = SessionPhase("soften", 0, 600, 0.22, 0.45, 0.22)
+            gentle = score_track(store, store.get_track(gentle_id), phase)
+            rush = score_track(store, store.get_track(rush_id), phase)
+
+            self.assertGreater(gentle.score, rush.score)
+            self.assertIn("phase stimulation penalty adjusted the score", rush.reasons)
+            store.close()
+
     def test_inconclusive_vocalness_does_not_outrank_low_vocalness_in_strict_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = TonepathStore(Path(tmp) / "tonepath.db")
