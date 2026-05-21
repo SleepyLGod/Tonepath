@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,6 +21,13 @@ from tonepath.evaluation import (
     evaluate_suite,
 )
 from tonepath.models import Track, TrackFeatures
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def plain_output(output: str) -> str:
+    return ANSI_RE.sub("", output)
 
 
 class CliEvalTest(unittest.TestCase):
@@ -91,7 +99,7 @@ class CliEvalTest(unittest.TestCase):
         result = CliRunner().invoke(app, ["eval", "selection", "focus 30m", "--limit", "0"])
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("--limit must be greater than zero", result.output)
+        self.assertIn("--limit must be greater than zero", plain_output(result.output))
 
     def test_parse_outputs_low_stimulation_constraint(self) -> None:
         result = CliRunner().invoke(app, ["parse", "我要写论文，四十五分钟，低刺激，最好不要人声"])
@@ -247,7 +255,7 @@ class CliEvalTest(unittest.TestCase):
         result = CliRunner().invoke(app, ["eval", "suite", "--limit", "0"])
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("--limit must be greater than zero", result.output)
+        self.assertIn("--limit must be greater than zero", plain_output(result.output))
 
     def test_evaluate_intent_passes_packaged_corpus(self) -> None:
         payload = evaluate_intent()

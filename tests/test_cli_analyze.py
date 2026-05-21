@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,13 @@ from typer.testing import CliRunner
 from tonepath.cli import app
 from tonepath.db import TonepathStore
 from tonepath.models import Track
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def plain_output(output: str) -> str:
+    return ANSI_RE.sub("", output)
 
 
 class CliAnalyzeTest(unittest.TestCase):
@@ -129,13 +137,13 @@ class CliAnalyzeTest(unittest.TestCase):
                     result = CliRunner().invoke(app, ["analyze", "--features", "vocalness", "--method", "audio-separator"])
 
                 self.assertNotEqual(result.exit_code, 0)
-                self.assertIn("uv sync --extra models", result.output)
+                self.assertIn("uv sync --extra models", plain_output(result.output))
 
     def test_analyze_rejects_model_method_for_basic_features(self) -> None:
         result = CliRunner().invoke(app, ["analyze", "--features", "basic", "--method", "audio-separator"])
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("--method is only supported", result.output)
+        self.assertIn("--method is only supported", plain_output(result.output))
         self.assertIn("tags", result.output)
 
     def test_analyze_mir_command_is_supported(self) -> None:
