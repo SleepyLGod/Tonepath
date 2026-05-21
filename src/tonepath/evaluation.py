@@ -11,6 +11,7 @@ from importlib import resources
 from pathlib import Path
 
 from tonepath import config
+from tonepath.benchmark import evaluate_benchmark_scenario, load_benchmark_scenarios, scenario_from_prompt
 from tonepath.db import TonepathStore
 from tonepath.display import (
     canonical_track_key,
@@ -23,14 +24,6 @@ from tonepath.display import (
 from tonepath.models import CandidateScore, SessionPlan, TrackFeatures
 from tonepath.planner import parse_request, plan_session, request_constraints
 from tonepath.selector import select_path
-
-
-DEFAULT_EVAL_PROMPTS: tuple[str, ...] = (
-    "我现在很烦，想半小时后进入写代码状态，不要人声",
-    "我现在很累，想用二十分钟提神",
-    "晚上想放松下来，三十分钟，低刺激",
-    "深度工作四十五分钟，低刺激，不要人声",
-)
 
 
 def evaluate_selection(store: TonepathStore, prompt: str, limit: int) -> list[dict[str, object]]:
@@ -114,22 +107,33 @@ def run_codex_audit(evidence: dict[str, object], web: bool) -> dict[str, object]
     }
 
 
-def evaluate_suite(store: TonepathStore, limit: int, prompts: tuple[str, ...] = DEFAULT_EVAL_PROMPTS) -> list[dict[str, object]]:
+def evaluate_suite(store: TonepathStore, limit: int, prompts: tuple[str, ...] | None = None) -> list[dict[str, object]]:
     """Return product-oriented selection quality checks for multiple prompts."""
 
     payload: list[dict[str, object]] = []
-    for prompt in prompts:
+    scenarios = [scenario_from_prompt(prompt, limit) for prompt in prompts] if prompts is not None else load_benchmark_scenarios()
+    for scenario in scenarios:
+        prompt = str(scenario["prompt"])
         plan = plan_session(prompt)
-        rows = [candidate_to_eval_row(store, candidate) for candidate in eval_candidates(store, plan, limit)]
+        scenario_limit = min(limit, int(scenario["limit"]))
+        rows = [candidate_to_eval_row(store, candidate) for candidate in eval_candidates(store, plan, scenario_limit)]
         annotate_red_flags(rows, no_vocals=plan.request.no_vocals)
         annotate_yellow_flags(rows, no_vocals=plan.request.no_vocals)
+        actual_intent = request_intent_payload(plan)
+        benchmark = evaluate_benchmark_scenario(scenario, actual_intent, rows)
         payload.append(
             {
+                "scenario_id": scenario["id"],
+                "lang": scenario["lang"],
                 "prompt": prompt,
                 "source_state": plan.request.source_state,
                 "target_state": plan.request.target_state,
                 "duration_min": plan.request.duration_sec // 60,
                 "constraints": request_constraints(plan.request),
+                "expected_intent": benchmark["expected_intent"],
+                "actual_intent": benchmark["actual_intent"],
+                "result": benchmark["result"],
+                "checks": benchmark["checks"],
                 "red_flag_count": sum(len(row["red_flags"]) for row in rows),
                 "yellow_flag_count": sum(len(row["yellow_flags"]) for row in rows),
                 "dirty_metadata_count": candidate_dirty_metadata_count(rows),
@@ -514,6 +518,17 @@ def codex_audit_schema_path() -> Path:
         "schemas",
         "audit-output.schema.json",
     )
+
+
+def request_intent_payload(plan: SessionPlan) -> dict[str, object]:
+    """Return the normalized intent fields used by benchmark scenarios."""
+
+    return {
+        "source_state": plan.request.source_state,
+        "target_state": plan.request.target_state,
+        "duration_min": plan.request.duration_sec // 60,
+        "constraints": request_constraints(plan.request),
+    }
 
 
 def package_resource_path(*parts: str) -> Path:

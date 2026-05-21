@@ -887,13 +887,19 @@ def render_eval_suite(suites: list[dict[str, object]]) -> None:
         prompt = str(suite["prompt"])
         red_flag_count = int(suite["red_flag_count"])
         yellow_flag_count = int(suite.get("yellow_flag_count", 0))
-        console.print(f"\nPrompt: {prompt}")
+        result = str(suite.get("result", "WARN"))
+        scenario = str(suite.get("scenario_id", "ad_hoc"))
+        console.print(f"\nScenario: {scenario} · {result}")
+        console.print(f"Prompt: {prompt}")
         console.print(
             f"Target: {suite['source_state']} -> {suite['target_state']} · "
             f"red flags: {red_flag_count} · warnings: {yellow_flag_count} · "
             f"dirty metadata: {suite.get('dirty_metadata_count', 0)} · "
             f"duplicates: {suite.get('duplicate_candidate_count', 0)}"
         )
+        checks = suite.get("checks", [])
+        if isinstance(checks, list):
+            console.print(f"Checks: {benchmark_check_summary(checks)}")
         candidates = suite["candidates"]
         if not isinstance(candidates, list):
             raise TypeError("Evaluation suite candidates must be a list.")
@@ -920,6 +926,19 @@ def render_eval_suite_candidates(rows: list[dict[str, object]]) -> None:
             "\n".join(flags) if flags else "ok",
         )
     console.print(table)
+
+
+def benchmark_check_summary(checks: list[object]) -> str:
+    """Return compact benchmark check status counts."""
+
+    counts = {"pass": 0, "warn": 0, "fail": 0}
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        status = str(check.get("status", "pass")).lower()
+        if status in counts:
+            counts[status] += 1
+    return f"pass {counts['pass']} · warn {counts['warn']} · fail {counts['fail']}"
 
 
 def render_eval_intent(payload: dict[str, object]) -> None:
