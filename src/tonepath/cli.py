@@ -905,6 +905,7 @@ def print_status_summary(status: LibraryStatus, runtime_ready: bool) -> None:
 
     settings = tonepath_config.load_config()
     table = Table("Item", "Value", box=box.SIMPLE)
+    table.add_row("Readiness", readiness_label(status, runtime_ready, settings))
     table.add_row("Music directories", "\n".join(settings.music_dirs))
     table.add_row("Tracks", str(status.tracks))
     table.add_row("Features", str(status.features))
@@ -925,6 +926,7 @@ def print_status_summary(status: LibraryStatus, runtime_ready: bool) -> None:
     table.add_row("Essentia-TF runtime", "ready" if runtime_ready else "missing")
     table.add_row("Data directory", str(tonepath_config.ensure_data_dir()))
     table.add_row("Network mode", settings.network_mode)
+    table.add_row("Quality check", quality_check_hint(status))
     table.add_row("Next action", status_next_action(status, runtime_ready, settings))
     console.print(table)
 
@@ -968,6 +970,30 @@ def status_next_action(status: LibraryStatus, runtime_ready: bool, settings: ton
     if status.duplicate_tracks or status.dirty_metadata:
         return "Ready for TUI; review duplicate candidates or dirty metadata when recommendations look odd."
     return "Ready for TUI. Run `uv run tonepath`."
+
+
+def readiness_label(status: LibraryStatus, runtime_ready: bool, settings: tonepath_config.TonepathConfig) -> str:
+    """Return a compact readiness state for normal users."""
+
+    if status.tracks == 0 or status.tracks_outside_music_dirs:
+        return "Needs setup"
+    if status.missing_features or status.mir < status.tracks:
+        if status.features > 0 or status.mir > 0:
+            return "Review files"
+        return "Needs preparation"
+    if settings.models.mode != "fast" and (status.vocalness < status.tracks or status.tags < status.tracks):
+        return "Needs preparation" if runtime_ready else "Model setup available"
+    return "Ready for TUI"
+
+
+def quality_check_hint(status: LibraryStatus) -> str:
+    """Return a concise benchmark hint for the current library state."""
+
+    if status.tracks == 0:
+        return "Prepare a library before running benchmark checks."
+    if status.missing_features or status.mir < status.tracks:
+        return "Resolve missing analysis before relying on `uv run tonepath eval suite --limit 8`."
+    return "Run `uv run tonepath eval suite --limit 8` after prepare."
 
 
 def render_plan(candidates: list[CandidateScore]) -> None:

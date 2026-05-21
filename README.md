@@ -76,15 +76,15 @@ uv run tonepath doctor
 uv run tonepath prepare
 uv run tonepath status
 uv run tonepath
-uv run tonepath tui "我现在很烦，想半小时后进入写代码状态，不要人声"
-uv run tonepath start "我现在很烦，想半小时后进入写代码状态，不要人声"
 ```
 
-The TUI opens as a local workbench. Run `uv run tonepath` or `uv run tonepath tui`, type a listening goal, and press Enter to create a session. Passing a prompt to `tonepath tui "..."` creates the session immediately, but still does not autoplay. Playback events are recorded locally in SQLite for future preference learning.
+The normal workflow is `prepare -> status -> tonepath`. `prepare` updates the local library, `status` tells you whether the library is ready and what to do next, and `tonepath` opens the TUI workbench.
 
 `tonepath prepare` is the normal user-facing setup command. It scans configured music directories, prunes missing tracks, analyzes missing or changed MIR features, and follows the configured model policy. The default `balanced` policy uses the workspace-local Essentia-TF runtime for vocalness/tagging when that runtime is ready. If the tagging runtime is missing, `prepare` prints the setup command and still leaves the local library usable.
 
-`tonepath status` is the readiness dashboard. It shows library coverage, model policy, runtime readiness, local data path, network mode, and a concrete next action such as `Run tonepath prepare`, `Run tonepath models setup essentia-tf`, or `Ready for TUI`.
+`tonepath status` is the readiness dashboard. It shows an overall state such as `Ready for TUI`, `Needs preparation`, `Review files`, or `Model setup available`, plus a concrete next action. If a local file cannot be analyzed, Tonepath lists it under `Missing analysis files`; replace or remove the file if you want full-confidence recommendations, or keep it and Tonepath will treat it as low evidence.
+
+The TUI opens as a local workbench. Run `uv run tonepath` or `uv run tonepath tui`, type a listening goal, and press Enter to create a session. Passing a prompt to `tonepath tui "..."` creates the session immediately, but still does not autoplay. Playback events are recorded locally in SQLite for future preference learning.
 
 Use these keys:
 

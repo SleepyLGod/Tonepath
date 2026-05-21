@@ -192,7 +192,7 @@ class TonepathApp(App[None]):
         self.playback = PlaybackController(self.store)
         self.model_runtime_ready = model_runtime_status().ready
         if self.missing_feature_count():
-            self.log_event("Some tracks are missing analysis. Run `uv run tonepath prepare`.")
+            self.log_event("Some tracks need review. Run `uv run tonepath status`.")
         elif not self.model_runtime_ready:
             self.log_event("Better vocalness is available after `uv run tonepath models setup essentia-tf`.")
         if self.initial_prompt is None:
@@ -551,7 +551,7 @@ class TonepathApp(App[None]):
 
         missing = self.missing_feature_count()
         if missing:
-            guidance = f"Library needs preparation: {missing} track(s) need analysis. Run `uv run tonepath prepare`."
+            guidance = f"Library needs review: {missing} track(s) need analysis. Run `uv run tonepath status`."
         elif not self.model_runtime_ready:
             guidance = "Ready for playback. Better vocalness is available after `uv run tonepath models setup essentia-tf`."
         else:

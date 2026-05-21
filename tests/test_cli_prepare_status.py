@@ -182,6 +182,7 @@ class CliPrepareStatusTest(unittest.TestCase):
                     result = CliRunner().invoke(app, ["status"])
 
             self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("Readiness", result.output)
             self.assertIn("Tracks", result.output)
             self.assertIn("Vocalness coverage", result.output)
             self.assertIn("Tag coverage", result.output)
@@ -190,6 +191,7 @@ class CliPrepareStatusTest(unittest.TestCase):
             self.assertIn("Tracks outside music dirs", result.output)
             self.assertIn("Model mode", result.output)
             self.assertIn("Next action", result.output)
+            self.assertIn("Quality check", result.output)
             self.assertIn("ready", result.output)
             self.assertNotIn("secret-value", result.output)
 
@@ -228,6 +230,7 @@ class CliPrepareStatusTest(unittest.TestCase):
                     result = CliRunner().invoke(app, ["status"])
 
             self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("Review files", result.output)
             self.assertIn("Missing analysis files", result.output)
             self.assertIn("Bad - unknown", result.output)
             self.assertIn("Review or replace files with missing analysis", result.output)

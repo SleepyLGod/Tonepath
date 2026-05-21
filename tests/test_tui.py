@@ -185,7 +185,7 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                 app = TonepathApp()
                 async with app.run_test() as pilot:
                     renderable = app.query_one("#now-playing").render()
-                    self.assertIn("tonepath prepare", renderable.plain)
+                    self.assertIn("tonepath status", renderable.plain)
                     self.assertEqual(app.missing_feature_count(), 1)
                     await pilot.press("q")
 
