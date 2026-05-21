@@ -9,6 +9,7 @@ from tonepath.analysis import (
     loudness_to_unit,
 )
 from tonepath.db import TonepathStore
+from tonepath.display import canonical_track_key
 from tonepath.models import CandidateScore, SessionPlan, SessionPhase, Track, TrackFeatures
 
 
@@ -28,15 +29,25 @@ def select_path(
     tracks = store.list_tracks()
     selected: list[CandidateScore] = []
     used_ids: set[int] = set(excluded_track_ids or set())
+    used_keys = {canonical_track_key(track) for track in tracks if track.id in used_ids}
     for phase in plan.phases:
         candidates = [
             score_track(store, track, phase)
             for track in tracks
             if track.id is not None and track.id not in used_ids
+            and canonical_track_key(track) not in used_keys
         ]
         candidates.sort(key=lambda candidate: candidate.score, reverse=True)
-        for candidate in candidates[:limit_per_phase]:
+        added = 0
+        for candidate in candidates:
+            if added >= limit_per_phase:
+                break
+            key = canonical_track_key(candidate.track)
+            if key in used_keys:
+                continue
             selected.append(candidate)
+            used_keys.add(key)
+            added += 1
             if candidate.track.id is not None:
                 used_ids.add(candidate.track.id)
     return selected

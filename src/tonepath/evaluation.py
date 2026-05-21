@@ -12,6 +12,14 @@ from pathlib import Path
 
 from tonepath import config
 from tonepath.db import TonepathStore
+from tonepath.display import (
+    canonical_track_key,
+    dirty_metadata_issues_from_values,
+    display_artist,
+    display_label,
+    display_title,
+    normalize_key_part,
+)
 from tonepath.models import CandidateScore, SessionPlan, TrackFeatures
 from tonepath.planner import parse_request, plan_session, request_constraints
 from tonepath.selector import select_path
@@ -124,6 +132,8 @@ def evaluate_suite(store: TonepathStore, limit: int, prompts: tuple[str, ...] = 
                 "constraints": request_constraints(plan.request),
                 "red_flag_count": sum(len(row["red_flags"]) for row in rows),
                 "yellow_flag_count": sum(len(row["yellow_flags"]) for row in rows),
+                "dirty_metadata_count": candidate_dirty_metadata_count(rows),
+                "duplicate_candidate_count": duplicate_candidate_count(rows),
                 "candidates": rows,
             }
         )
@@ -321,6 +331,11 @@ def candidate_to_eval_row(store: TonepathStore, candidate: CandidateScore) -> di
             "album": candidate.track.album,
             "genre": candidate.track.genre,
             "format": candidate.track.format,
+            "display_title": display_title(candidate.track),
+            "display_artist": display_artist(candidate.track),
+            "display_label": display_label(candidate.track),
+            "canonical_key": list(canonical_track_key(candidate.track)),
+            "metadata_issues": dirty_metadata_issues_from_values(candidate.track.title, candidate.track.artist),
         },
         "score": round(candidate.score, 3),
         "confidence": candidate.confidence,
@@ -351,6 +366,48 @@ def features_to_eval_row(features: TrackFeatures | None) -> dict[str, object]:
         "bpm": round(features.bpm, 1) if features.bpm is not None else None,
         "vocalness": round(features.vocalness, 3) if features.vocalness is not None else None,
     }
+
+
+def candidate_dirty_metadata_count(rows: list[dict[str, object]]) -> int:
+    """Return how many displayed candidates have dirty raw metadata."""
+
+    count = 0
+    for row in rows:
+        track = row.get("track")
+        if isinstance(track, dict) and track.get("metadata_issues"):
+            count += 1
+    return count
+
+
+def duplicate_candidate_count(rows: list[dict[str, object]]) -> int:
+    """Return duplicate displayed candidates beyond the first occurrence."""
+
+    keys: list[tuple[str, str, int]] = []
+    for row in rows:
+        track = row.get("track")
+        if not isinstance(track, dict):
+            continue
+        raw_key = track.get("canonical_key")
+        if isinstance(raw_key, list) and len(raw_key) == 3:
+            keys.append((str(raw_key[0]), str(raw_key[1]), int(raw_key[2])))
+            continue
+        keys.append(
+            (
+                normalize_key_part(str(track.get("display_title") or track.get("title") or "")),
+                normalize_key_part(str(track.get("display_artist") or track.get("artist") or "")),
+                -1,
+            )
+        )
+    return duplicate_track_count_from_keys(keys)
+
+
+def duplicate_track_count_from_keys(keys: list[tuple[str, str, int]]) -> int:
+    """Return duplicate count from canonical keys."""
+
+    counts: dict[tuple[str, str, int], int] = {}
+    for key in keys:
+        counts[key] = counts.get(key, 0) + 1
+    return sum(count - 1 for count in counts.values() if count > 1)
 
 
 def annotate_red_flags(rows: list[dict[str, object]], no_vocals: bool) -> None:

@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 from tonepath import config
 from tonepath.cli import app
 from tonepath.db import TonepathStore
-from tonepath.models import TrackFeatures
+from tonepath.models import Track, TrackFeatures
 from tonepath.scanner import read_track
 
 
@@ -156,10 +156,56 @@ class CliPrepareStatusTest(unittest.TestCase):
             self.assertIn("Tracks", result.output)
             self.assertIn("Vocalness coverage", result.output)
             self.assertIn("Tag coverage", result.output)
+            self.assertIn("Dirty metadata", result.output)
+            self.assertIn("Duplicate candidates", result.output)
+            self.assertIn("Tracks outside music dirs", result.output)
             self.assertIn("Model mode", result.output)
             self.assertIn("Next action", result.output)
             self.assertIn("ready", result.output)
             self.assertNotIn("secret-value", result.output)
+
+    def test_status_reports_tracks_outside_configured_dirs_and_dirty_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            configured = Path(tmp) / "configured"
+            configured.mkdir()
+            outside = Path(tmp) / "songs"
+            outside.mkdir()
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
+                config.write_config(
+                    config.TonepathConfig(
+                        music_dirs=(str(configured),),
+                        data_dir=str(home),
+                        player="mpv",
+                        network_mode="offline",
+                        privacy=config.PrivacyConfig(),
+                        models=config.ModelConfig(),
+                    )
+                )
+                store = TonepathStore()
+                first_id = store.upsert_track(track_for(outside / "one.mp3", title="Song(null)", artist="unknown"))
+                second_id = store.upsert_track(track_for(outside / "two.mp3", title="Song", artist="unknown"))
+                for track_id in (first_id, second_id):
+                    store.upsert_features(
+                        TrackFeatures(
+                            track_id=track_id,
+                            bpm=100.0,
+                            loudness=-14.0,
+                            energy=0.5,
+                            vocalness=0.2,
+                            feature_source="test",
+                            confidence="high",
+                        )
+                    )
+                store.close()
+                with patch("tonepath.cli.model_runtime_status", return_value=SimpleNamespace(ready=True)):
+                    result = CliRunner().invoke(app, ["status"])
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("Dirty metadata", result.output)
+            self.assertIn("2", result.output)
+            self.assertIn("Tracks outside music dirs", result.output)
+            self.assertIn("config add-music-dir", result.output)
 
     def test_status_uses_model_policy_for_next_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -197,6 +243,23 @@ class CliPrepareStatusTest(unittest.TestCase):
             self.assertEqual(result.exit_code, 0, result.output)
             self.assertIn("full", result.output)
             self.assertIn("models setup essentia-tf", result.output)
+
+def track_for(path: Path, title: str | None, artist: str | None) -> Track:
+    """Create one status-test track payload."""
+
+    path.write_bytes(b"fake audio")
+    return Track(
+        id=None,
+        path=path,
+        file_hash=path.name,
+        mtime=1.0,
+        title=title,
+        artist=artist,
+        album=None,
+        genre=None,
+        duration=180.0,
+        format="mp3",
+    )
 
 
 if __name__ == "__main__":

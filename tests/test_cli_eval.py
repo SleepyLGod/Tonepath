@@ -149,8 +149,39 @@ class CliEvalTest(unittest.TestCase):
                 self.assertIn("prompt", first)
                 self.assertIn("red_flag_count", first)
                 self.assertIn("yellow_flag_count", first)
+                self.assertIn("dirty_metadata_count", first)
+                self.assertIn("duplicate_candidate_count", first)
                 self.assertEqual(first["candidates"][0]["features"]["source"], "model-essentia-voice-instrumental")
                 self.assertIn("high vocalness in no-vocals candidate", first["candidates"][0]["red_flags"])
+
+    def test_eval_output_includes_clean_display_metadata_and_hygiene_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                track_id = store.upsert_track(track_for(Path(tmp) / "clean-title.mp3", title="Song(null)", genre="ambient"))
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id=track_id,
+                        energy=0.4,
+                        loudness=-16.0,
+                        bpm=92.0,
+                        vocalness=0.2,
+                        feature_source="model-essentia-voice-instrumental",
+                        confidence="high",
+                    )
+                )
+                store.close()
+
+                result = CliRunner().invoke(app, ["eval", "suite", "--json", "--limit", "1"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output)
+                track = payload[0]["candidates"][0]["track"]
+                self.assertEqual(track["display_title"], "Song")
+                self.assertEqual(track["display_artist"], "artist")
+                self.assertEqual(track["display_label"], "Song - artist")
+                self.assertEqual(track["metadata_issues"], ["dirty title"])
+                self.assertEqual(payload[0]["dirty_metadata_count"], 1)
 
     def test_eval_suite_does_not_write_profile_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -8,6 +8,7 @@ from rich.text import Text
 
 from tonepath import config
 from tonepath.db import TonepathStore
+from tonepath.display import display_artist, fallback_track_label
 from tonepath.evaluation import evaluate_rerank
 from tonepath.model_runtime import model_runtime_status
 from tonepath.models import FeedbackType
@@ -384,7 +385,7 @@ class TonepathApp(App[None]):
             self.log_event(str(exc))
             return
         self.playback_status = "Playing"
-        self.log_event(f"Playing: {track_label(candidate.track.title, candidate.track.path.name)}")
+        self.log_event(f"Playing: {fallback_track_label(candidate.track.title, candidate.track.path.name)}")
         self.ensure_playback_polling()
         self.refresh_session_view()
 
@@ -437,7 +438,7 @@ class TonepathApp(App[None]):
             table.add_row(
                 queue_cell(queue_marker(position), current=current, align="center"),
                 queue_cell(candidate.phase.label, current=current),
-                queue_cell(truncate(track_label(candidate.track.title, candidate.track.path.name), 28), current=current),
+                queue_cell(truncate(fallback_track_label(candidate.track.title, candidate.track.path.name), 28), current=current),
                 queue_cell(self.energy_text(candidate.track.id), current=current),
                 queue_cell(confidence_label(candidate.confidence), current=current),
             )
@@ -470,8 +471,8 @@ class TonepathApp(App[None]):
         return "\n".join(
             [
                 f"{self.playback_status} | {candidate.phase.label} | {confidence_label(candidate.confidence)}",
-                truncate(track_label(candidate.track.title, candidate.track.path.name), 44),
-                candidate.track.artist or "unknown artist",
+                truncate(fallback_track_label(candidate.track.title, candidate.track.path.name), 44),
+                display_artist(candidate.track),
                 f"energy {energy} {meter} · bpm {bpm}",
                 f"loudness {loudness}",
             ]
@@ -700,13 +701,6 @@ def run_tui(prompt: str | None = None) -> None:
     """Run the Tonepath terminal interface."""
 
     TonepathApp(prompt=prompt).run()
-
-
-def track_label(title: str | None, fallback: str) -> str:
-    """Return a display-safe track label."""
-
-    label = title or fallback
-    return label.replace("(null)", "").strip() or fallback
 
 
 def truncate(value: str, limit: int) -> str:

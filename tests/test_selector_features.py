@@ -4,8 +4,8 @@ from pathlib import Path
 
 from tonepath.analysis import AUDIO_SEPARATOR_FEATURE_SOURCE, ESSENTIA_VOICE_FEATURE_SOURCE
 from tonepath.db import TonepathStore
-from tonepath.models import SessionPhase, Track, TrackFeatures
-from tonepath.selector import score_track
+from tonepath.models import SessionPhase, SessionPlan, SessionRequest, Track, TrackFeatures
+from tonepath.selector import score_track, select_path
 
 
 class SelectorFeaturesTest(unittest.TestCase):
@@ -470,8 +470,37 @@ class SelectorFeaturesTest(unittest.TestCase):
             self.assertGreater(classifier.score, separator.score)
             store.close()
 
+    def test_select_path_deduplicates_canonical_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            first_id = store.upsert_track(track_for(tmp, "duplicate-one.wav", title="A Serene Garden", artist="Composer"))
+            second_id = store.upsert_track(track_for(tmp, "duplicate-two.wav", title="A Serene Garden(null)", artist="Composer"))
+            other_id = store.upsert_track(track_for(tmp, "other.wav", title="Different", artist="Composer"))
+            for track_id in (first_id, second_id, other_id):
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id,
+                        bpm=92.0,
+                        loudness=-16.0,
+                        energy=0.4,
+                        vocalness=0.2,
+                        feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                        confidence="high",
+                    )
+                )
+            phase = SessionPhase("focus", 0, 600, 0.5, 0.6, 0.5, "avoid")
+            plan = SessionPlan(SessionRequest("focus", "unspecified", "focus", 1800, no_vocals=True), (phase,))
 
-def track_for(tmp: str, name: str) -> Track:
+            candidates = select_path(store, plan, limit_per_phase=3)
+
+            titles = [candidate.track.title for candidate in candidates]
+            self.assertEqual(len(candidates), 2)
+            self.assertIn("Different", titles)
+            self.assertEqual(sum(1 for title in titles if title and "A Serene Garden" in title), 1)
+            store.close()
+
+
+def track_for(tmp: str, name: str, title: str | None = None, artist: str | None = "artist") -> Track:
     path = Path(tmp) / name
     path.write_bytes(b"not real audio")
     return Track(
@@ -479,8 +508,8 @@ def track_for(tmp: str, name: str) -> Track:
         path=path,
         file_hash=name,
         mtime=1.0,
-        title=name,
-        artist="artist",
+        title=title or name,
+        artist=artist,
         album=None,
         genre=None,
         duration=None,

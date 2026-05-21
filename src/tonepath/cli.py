@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,7 @@ except ImportError as exc:  # pragma: no cover - exercised before dependency ins
 
 from tonepath.analysis import AnalysisProgress, analyze_library
 from tonepath.db import TonepathStore
+from tonepath.display import clean_metadata_text, dirty_metadata_issues, display_artist, display_title, duplicate_track_count
 from tonepath.doctor import run_doctor
 from tonepath.enrichment import EnrichmentProvider, enrich_library
 from tonepath.evaluation import evaluate_audit, evaluate_intent, evaluate_rerank, evaluate_selection, evaluate_suite, run_codex_audit
@@ -79,6 +81,10 @@ class LibraryStatus:
     vocalness: int
     mir: int
     tags: int
+    dirty_metadata: int = 0
+    duplicate_tracks: int = 0
+    tracks_outside_music_dirs: int = 0
+    suggested_music_dir: str | None = None
 
 
 @app.callback(invoke_without_command=True)
@@ -699,6 +705,8 @@ def print_scan_summary(summary: ScanSummary) -> None:
 def library_status(store: TonepathStore) -> LibraryStatus:
     """Return local library readiness counts."""
 
+    tracks = store.list_tracks()
+    outside_tracks = tracks_outside_configured_dirs(tracks)
     row = store.conn.execute(
         """
         SELECT
@@ -725,7 +733,39 @@ def library_status(store: TonepathStore) -> LibraryStatus:
         vocalness=int(row["vocalness"] or 0),
         mir=int(row["mir"] or 0),
         tags=int(row["tags"] or 0),
+        dirty_metadata=sum(1 for track in tracks if dirty_metadata_issues(track)),
+        duplicate_tracks=duplicate_track_count(tracks),
+        tracks_outside_music_dirs=len(outside_tracks),
+        suggested_music_dir=suggested_music_dir(outside_tracks),
     )
+
+
+def tracks_outside_configured_dirs(tracks: list[Track]) -> list[Track]:
+    """Return tracks not covered by configured music directories."""
+
+    roots = [path.expanduser().resolve() for path in tonepath_config.load_config().expanded_music_dirs()]
+    outside: list[Track] = []
+    for track in tracks:
+        resolved_path = track.path.expanduser().resolve()
+        if not any(resolved_path.is_relative_to(root) for root in roots):
+            outside.append(track)
+    return outside
+
+
+def suggested_music_dir(tracks: list[Track]) -> str | None:
+    """Return a likely directory to add to config for uncovered tracks."""
+
+    if not tracks:
+        return None
+    parents = [str(track.path.expanduser().resolve().parent) for track in tracks]
+    common = Path(os.path.commonpath(parents))
+    try:
+        relative = common.relative_to(Path.cwd())
+    except ValueError:
+        return str(common)
+    if str(relative) != ".":
+        return str(relative)
+    return str(common)
 
 
 def print_status_summary(status: LibraryStatus, runtime_ready: bool) -> None:
@@ -740,6 +780,9 @@ def print_status_summary(status: LibraryStatus, runtime_ready: bool) -> None:
     table.add_row("Vocalness coverage", f"{status.vocalness}/{status.tracks}")
     table.add_row("MIR coverage", f"{status.mir}/{status.tracks}")
     table.add_row("Tag coverage", f"{status.tags}/{status.tracks}")
+    table.add_row("Dirty metadata", str(status.dirty_metadata))
+    table.add_row("Duplicate candidates", str(status.duplicate_tracks))
+    table.add_row("Tracks outside music dirs", str(status.tracks_outside_music_dirs))
     table.add_row("Model mode", settings.models.mode)
     table.add_row("Model setup allowed", "yes" if settings.models.allow_setup else "no")
     table.add_row("Online models", "yes" if settings.models.allow_online else "no")
@@ -772,6 +815,10 @@ def status_next_action(status: LibraryStatus, runtime_ready: bool, settings: ton
 
     if status.tracks == 0:
         return "Add a music directory, then run `uv run tonepath prepare`."
+    if status.tracks_outside_music_dirs:
+        if status.suggested_music_dir:
+            return f"Run `uv run tonepath config add-music-dir {status.suggested_music_dir}`, then `uv run tonepath prepare`."
+        return "Add the active library directory to config, then run `uv run tonepath prepare`."
     if status.missing_features or status.mir < status.tracks:
         return "Run `uv run tonepath prepare`."
     if settings.models.mode == "fast":
@@ -782,6 +829,8 @@ def status_next_action(status: LibraryStatus, runtime_ready: bool, settings: ton
         if settings.models.mode == "full":
             return "Run `uv run tonepath models setup essentia-tf`, then `uv run tonepath prepare --full`."
         return "Ready for TUI; run `uv run tonepath models setup essentia-tf` for better vocalness."
+    if status.duplicate_tracks or status.dirty_metadata:
+        return "Ready for TUI; review duplicate candidates or dirty metadata when recommendations look odd."
     return "Ready for TUI. Run `uv run tonepath`."
 
 
@@ -792,8 +841,8 @@ def render_plan(candidates: list[CandidateScore]) -> None:
     for candidate in candidates:
         table.add_row(
             candidate.phase.label,
-            candidate.track.title or "unknown",
-            candidate.track.artist or "unknown",
+            display_title(candidate.track),
+            display_artist(candidate.track),
             candidate.confidence,
             f"{candidate.score:.2f}",
         )
@@ -841,7 +890,9 @@ def render_eval_suite(suites: list[dict[str, object]]) -> None:
         console.print(f"\nPrompt: {prompt}")
         console.print(
             f"Target: {suite['source_state']} -> {suite['target_state']} · "
-            f"red flags: {red_flag_count} · warnings: {yellow_flag_count}"
+            f"red flags: {red_flag_count} · warnings: {yellow_flag_count} · "
+            f"dirty metadata: {suite.get('dirty_metadata_count', 0)} · "
+            f"duplicates: {suite.get('duplicate_candidate_count', 0)}"
         )
         candidates = suite["candidates"]
         if not isinstance(candidates, list):
@@ -996,8 +1047,13 @@ def audit_flags(row: dict[str, object]) -> list[str]:
 def eval_track_label(track: dict[str, object]) -> str:
     """Return a compact track label for evaluation tables."""
 
-    title = track.get("title") or "unknown"
-    artist = track.get("artist") or "unknown"
+    display = track.get("display_label")
+    if display:
+        return str(display)
+    title = clean_metadata_text(str(track["title"])) if track.get("title") is not None else None
+    artist = clean_metadata_text(str(track["artist"])) if track.get("artist") is not None else None
+    title = title or "unknown"
+    artist = artist or "unknown"
     return f"{title} - {artist}"
 
 
