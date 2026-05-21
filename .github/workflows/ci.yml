@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CLICOLOR: "0"
+      NO_COLOR: "1"
+    defaults:
+      run:
+        working-directory: music-agents/tonepath
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          path: music-agents/tonepath
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install default dependencies
+        run: uv sync --locked
+
+      - name: Run tests
+        run: uv run python -m unittest discover -s tests
+
+      - name: Run CLI smoke checks
+        run: |
+          uv run tonepath --help
+          uv run tonepath eval intent
+          uv run tonepath eval suite --limit 3 --json
+
+      - name: Build wheel and verify resources
+        run: |
+          uv build --wheel --out-dir dist
+          uv run python -c "import glob, zipfile; wheels=glob.glob('dist/*.whl'); assert len(wheels)==1, wheels; names=set(zipfile.ZipFile(wheels[0]).namelist()); required={'tonepath/resources/intent_prompts.jsonl','tonepath/resources/selection_benchmark.jsonl','tonepath/resources/codex/skills/tonepath-dj/SKILL.md','tonepath/resources/codex/skills/tonepath-dj/schemas/audit-output.schema.json'}; missing=sorted(required - names); assert not missing, missing; print('packaged resources ok')"
