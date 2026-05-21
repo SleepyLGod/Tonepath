@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterable
+import shutil
+import subprocess
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -13,6 +15,7 @@ try:
     import typer
     from rich import box
     from rich.console import Console
+    from rich.markup import escape
     from rich.table import Table
 except ImportError as exc:  # pragma: no cover - exercised before dependency install
     raise RuntimeError("Tonepath CLI dependencies are missing. Run `uv sync` first.") from exc
@@ -85,6 +88,16 @@ class LibraryStatus:
     duplicate_tracks: int = 0
     tracks_outside_music_dirs: int = 0
     suggested_music_dir: str | None = None
+    missing_analysis_tracks: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class AnalysisFailure:
+    """One failed analysis item from a prepare run."""
+
+    stage: str
+    track: Track
+    error: str
 
 
 @app.callback(invoke_without_command=True)
@@ -147,7 +160,15 @@ def prepare(
         console.print("Prepare: scan")
         print_scan_summary(scan_summary)
 
-        mir_analyzed, mir_skipped = analyze_library(store, features="mir", method="essentia", changed_only=True, limit=limit)
+        failures: list[AnalysisFailure] = []
+        mir_analyzed, mir_skipped = analyze_library(
+            store,
+            features="mir",
+            method="essentia",
+            changed_only=True,
+            limit=limit,
+            progress=collect_analysis_failures("MIR", failures),
+        )
         console.print(f"Prepare: MIR analyzed {mir_analyzed} track(s); skipped {mir_skipped} track(s).")
 
         runtime_status = model_runtime_status()
@@ -166,6 +187,7 @@ def prepare(
                 method="essentia-tf",
                 changed_only=True,
                 limit=limit,
+                progress=collect_analysis_failures("tags", failures),
             )
             console.print(f"Prepare: tags analyzed {tag_analyzed} track(s); skipped {tag_skipped} track(s).")
         elif mode == "full":
@@ -176,6 +198,7 @@ def prepare(
         else:
             console.print("Prepare: tags skipped. Run `uv run tonepath models setup essentia-tf` for vocalness tagging.")
 
+        print_analysis_failure_summary(failures)
         print_status_summary(library_status(store), runtime_ready=runtime_ready)
     except RuntimeError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -331,12 +354,85 @@ def print_analysis_progress(event: AnalysisProgress) -> None:
     )
 
 
+def collect_analysis_failures(stage: str, failures: list[AnalysisFailure]) -> Callable[[AnalysisProgress], None]:
+    """Return a progress callback that records failed prepare analysis items."""
+
+    def collect(event: AnalysisProgress) -> None:
+        if event.error is not None:
+            failures.append(AnalysisFailure(stage=stage, track=event.track, error=event.error))
+
+    return collect
+
+
+def print_analysis_failure_summary(failures: list[AnalysisFailure], limit: int = 5) -> None:
+    """Print a short user-facing summary for failed prepare analysis files."""
+
+    if not failures:
+        return
+    console.print("Prepare: some files could not be analyzed:")
+    for failure in failures[:limit]:
+        path = display_relative_path(failure.track.path)
+        diagnostic = audio_probe_diagnostic(failure.track.path)
+        console.print(f"- {failure.stage}: {escape(display_track(failure.track))} ({escape(path)})")
+        console.print(f"  error: {escape(concise_analysis_error(failure.error))}")
+        if diagnostic:
+            console.print(f"  probe: {escape(diagnostic)}")
+    if len(failures) > limit:
+        console.print(f"... and {len(failures) - limit} more failed analysis item(s).")
+
+
+def concise_analysis_error(error: str) -> str:
+    """Return the user-relevant part of a possibly verbose analysis error."""
+
+    lines = [line.strip() for line in error.splitlines() if line.strip()]
+    if not lines:
+        return "analysis failed"
+    return lines[-1][:220]
+
+
+def audio_probe_diagnostic(path: Path) -> str | None:
+    """Return a concise ffprobe diagnostic for one failed audio file."""
+
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        return None
+    try:
+        completed = subprocess.run(
+            [ffprobe, "-hide_banner", "-v", "error", "-show_format", "-show_streams", str(path)],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode == 0:
+        return "ffprobe can read the file; model analysis still failed."
+    message = " ".join((completed.stderr or completed.stdout).split())
+    if "Failed to find two consecutive MPEG audio frames" in message:
+        return "invalid audio: no MPEG frames found"
+    if "Invalid data found when processing input" in message:
+        return "invalid audio data"
+    return message[:180] if message else "ffprobe could not read this file"
+
+
 def display_track(track: Track) -> str:
     """Return a compact track label for terminal progress output."""
 
-    title = track.title or track.path.stem
-    artist = track.artist or "unknown"
+    title = display_title(track)
+    artist = display_artist(track)
     return f"{title} - {artist}"
+
+
+def display_relative_path(path: Path) -> str:
+    """Return a compact display path relative to the current directory when possible."""
+
+    resolved = path.expanduser().resolve()
+    try:
+        return str(resolved.relative_to(Path.cwd()))
+    except ValueError:
+        return str(resolved)
 
 
 @app.command()
@@ -737,7 +833,43 @@ def library_status(store: TonepathStore) -> LibraryStatus:
         duplicate_tracks=duplicate_track_count(tracks),
         tracks_outside_music_dirs=len(outside_tracks),
         suggested_music_dir=suggested_music_dir(outside_tracks),
+        missing_analysis_tracks=missing_analysis_track_labels(store, limit=5),
     )
+
+
+def missing_analysis_track_labels(store: TonepathStore, limit: int) -> tuple[str, ...]:
+    """Return display labels for tracks missing feature rows or core MIR fields."""
+
+    rows = store.conn.execute(
+        """
+        SELECT t.*
+        FROM tracks t
+        LEFT JOIN track_features f ON f.track_id = t.id
+        WHERE f.track_id IS NULL
+           OR f.energy IS NULL
+           OR f.loudness IS NULL
+           OR f.bpm IS NULL
+        ORDER BY t.path
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    labels: list[str] = []
+    for row in rows:
+        track = Track(
+            id=int(row["id"]),
+            path=Path(row["path"]),
+            file_hash=str(row["file_hash"]),
+            mtime=float(row["mtime"]),
+            title=row["title"],
+            artist=row["artist"],
+            album=row["album"],
+            genre=row["genre"],
+            duration=row["duration"],
+            format=row["format"],
+        )
+        labels.append(f"{escape(display_track(track))} ({escape(display_relative_path(track.path))})")
+    return tuple(labels)
 
 
 def tracks_outside_configured_dirs(tracks: list[Track]) -> list[Track]:
@@ -783,6 +915,8 @@ def print_status_summary(status: LibraryStatus, runtime_ready: bool) -> None:
     table.add_row("Dirty metadata", str(status.dirty_metadata))
     table.add_row("Duplicate candidates", str(status.duplicate_tracks))
     table.add_row("Tracks outside music dirs", str(status.tracks_outside_music_dirs))
+    if status.missing_analysis_tracks:
+        table.add_row("Missing analysis files", "\n".join(status.missing_analysis_tracks))
     table.add_row("Model mode", settings.models.mode)
     table.add_row("Model setup allowed", "yes" if settings.models.allow_setup else "no")
     table.add_row("Online models", "yes" if settings.models.allow_online else "no")
@@ -820,6 +954,8 @@ def status_next_action(status: LibraryStatus, runtime_ready: bool, settings: ton
             return f"Run `uv run tonepath config add-music-dir {status.suggested_music_dir}`, then `uv run tonepath prepare`."
         return "Add the active library directory to config, then run `uv run tonepath prepare`."
     if status.missing_features or status.mir < status.tracks:
+        if status.features > 0 or status.mir > 0:
+            return "Review or replace files with missing analysis, then run `uv run tonepath prepare`."
         return "Run `uv run tonepath prepare`."
     if settings.models.mode == "fast":
         return "Ready for TUI. Run `uv run tonepath`."

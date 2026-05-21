@@ -8,6 +8,7 @@ from unittest.mock import patch
 from typer.testing import CliRunner
 
 from tonepath import config
+from tonepath.analysis import AnalysisProgress
 from tonepath.cli import app
 from tonepath.db import TonepathStore
 from tonepath.models import Track, TrackFeatures
@@ -129,6 +130,34 @@ class CliPrepareStatusTest(unittest.TestCase):
             self.assertIn("skipped TensorFlow tags (--fast)", result.output)
             self.assertEqual(analyze.call_count, 1)
 
+    def test_prepare_prints_failed_analysis_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            music = Path(tmp) / "music"
+            music.mkdir()
+            bad_track = track_for(music / "bad.mp3", title="Bad", artist=None)
+
+            def fake_analyze(*args: object, **kwargs: object) -> tuple[int, int]:
+                progress = kwargs.get("progress")
+                if callable(progress):
+                    progress(AnalysisProgress(1, 1, bad_track, error="Essentia MIR analysis failed for bad.mp3."))
+                return (0, 1)
+
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home), "HOME": str(Path(tmp) / "user-home")}):
+                runner = CliRunner()
+                self.assertEqual(runner.invoke(app, ["config", "init"]).exit_code, 0)
+                self.assertEqual(runner.invoke(app, ["config", "add-music-dir", str(music)]).exit_code, 0)
+                with patch("tonepath.cli.model_runtime_status", return_value=SimpleNamespace(ready=True)), patch(
+                    "tonepath.cli.analyze_library",
+                    side_effect=fake_analyze,
+                ), patch("tonepath.cli.audio_probe_diagnostic", return_value="invalid audio: no MPEG frames found"):
+                    result = runner.invoke(app, ["prepare"])
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("some files could not be analyzed", result.output)
+            self.assertIn("Bad - unknown", result.output)
+            self.assertIn("invalid audio: no MPEG frames found", result.output)
+
     def test_status_prints_counts_without_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
@@ -163,6 +192,45 @@ class CliPrepareStatusTest(unittest.TestCase):
             self.assertIn("Next action", result.output)
             self.assertIn("ready", result.output)
             self.assertNotIn("secret-value", result.output)
+
+    def test_status_lists_missing_analysis_tracks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            music = Path(tmp) / "music"
+            music.mkdir()
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
+                config.write_config(
+                    config.TonepathConfig(
+                        music_dirs=(str(music),),
+                        data_dir=str(home),
+                        player="mpv",
+                        network_mode="offline",
+                        privacy=config.PrivacyConfig(),
+                        models=config.ModelConfig(),
+                    )
+                )
+                store = TonepathStore()
+                good_id = store.upsert_track(track_for(music / "good.mp3", title="Good", artist="Artist"))
+                store.upsert_features(
+                    TrackFeatures(
+                        good_id,
+                        bpm=100.0,
+                        loudness=-14.0,
+                        energy=0.5,
+                        vocalness=0.2,
+                        feature_source="test",
+                        confidence="high",
+                    )
+                )
+                store.upsert_track(track_for(music / "bad.mp3", title="Bad", artist=None))
+                store.close()
+                with patch("tonepath.cli.model_runtime_status", return_value=SimpleNamespace(ready=True)):
+                    result = CliRunner().invoke(app, ["status"])
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("Missing analysis files", result.output)
+            self.assertIn("Bad - unknown", result.output)
+            self.assertIn("Review or replace files with missing analysis", result.output)
 
     def test_status_reports_tracks_outside_configured_dirs_and_dirty_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

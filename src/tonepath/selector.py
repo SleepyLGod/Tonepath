@@ -89,6 +89,9 @@ def score_track(store: TonepathStore, track: Track, phase: SessionPhase) -> Cand
             reasons.append("phase stimulation penalty adjusted the score")
     else:
         reasons.append("audio features unavailable; selection uses metadata and feedback")
+        if track.duration is None:
+            score -= 4.0
+            reasons.append("low-evidence/unverified audio candidate")
 
     if phase.vocal_policy == "avoid":
         if features and features.vocalness is not None:

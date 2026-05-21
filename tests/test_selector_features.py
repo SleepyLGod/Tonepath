@@ -499,6 +499,30 @@ class SelectorFeaturesTest(unittest.TestCase):
             self.assertEqual(sum(1 for title in titles if title and "A Serene Garden" in title), 1)
             store.close()
 
+    def test_unverified_audio_without_duration_or_features_is_demoted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            verified_id = store.upsert_track(track_for(tmp, "verified.wav"))
+            unverified_id = store.upsert_track(track_for(tmp, "broken.mp3"))
+            store.upsert_features(
+                TrackFeatures(
+                    verified_id,
+                    bpm=92.0,
+                    loudness=-16.0,
+                    energy=0.4,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            phase = SessionPhase("calm", 0, 600, 0.2, 0.5, 0.2)
+            verified = score_track(store, store.get_track(verified_id), phase)
+            unverified = score_track(store, store.get_track(unverified_id), phase)
+
+            self.assertGreater(verified.score, unverified.score)
+            self.assertIn("low-evidence/unverified audio candidate", unverified.reasons)
+            store.close()
+
 
 def track_for(tmp: str, name: str, title: str | None = None, artist: str | None = "artist") -> Track:
     path = Path(tmp) / name
