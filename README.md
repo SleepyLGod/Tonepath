@@ -1,5 +1,7 @@
 # Tonepath
 
+[![CI](https://github.com/SleepyLGod/Tonepath/actions/workflows/ci.yml/badge.svg)](https://github.com/SleepyLGod/Tonepath/actions/workflows/ci.yml)
+
 Tonepath is a local-first terminal music state-transition agent.
 
 It turns a request like `I am irritated and want to focus in 30 minutes` into an explainable listening path: current state -> intermediate phases -> target state. Tonepath scans your local music library, stores metadata locally, selects tracks with confidence labels, and can play local files through `mpv`.
