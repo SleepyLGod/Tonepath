@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from tonepath import config
-from tonepath.models import EnrichmentRecord, SessionPhase, SessionPlan, Track, TrackFeatures
+from tonepath.models import EnrichmentRecord, ProfileRule, SessionPhase, SessionPlan, Track, TrackFeatures
 
 
 SCHEMA = """
@@ -391,6 +391,41 @@ class TonepathStore:
             row = self.conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
             summary[table] = int(row["count"])
         return summary
+
+    def upsert_profile_rule(self, rule: ProfileRule) -> int:
+        """Insert or update one local profile rule."""
+
+        self.conn.execute("DELETE FROM profile_rules WHERE key = ? AND source = ?", (rule.key, rule.source))
+        cursor = self.conn.execute(
+            """
+            INSERT INTO profile_rules (key, value, source, confidence)
+            VALUES (?, ?, ?, ?)
+            """,
+            (rule.key, rule.value, rule.source, rule.confidence),
+        )
+        self.conn.commit()
+        return int(cursor.lastrowid)
+
+    def list_profile_rules(self) -> list[ProfileRule]:
+        """Return active local profile rules."""
+
+        rows = self.conn.execute(
+            """
+            SELECT id, key, value, source, confidence
+            FROM profile_rules
+            ORDER BY created_at, id
+            """
+        ).fetchall()
+        return [
+            ProfileRule(
+                id=int(row["id"]),
+                key=str(row["key"]),
+                value=str(row["value"]),
+                source=str(row["source"]),
+                confidence=str(row["confidence"]),
+            )
+            for row in rows
+        ]
 
     def upsert_enrichment(self, record: EnrichmentRecord) -> None:
         """Insert or update a source-attributed track enrichment field."""

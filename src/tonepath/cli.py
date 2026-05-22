@@ -33,6 +33,15 @@ from tonepath.models import CandidateScore, Track
 from tonepath.planner import plan_session, request_constraints
 from tonepath.playback import MpvAdapter
 from tonepath.playback_controller import PlaybackController
+from tonepath.profile import (
+    apply_suggestion,
+    build_profile_evidence,
+    deterministic_suggestions,
+    run_codex_profile_suggest,
+    save_suggestions,
+    suggest_with_llm,
+    write_profile_evidence,
+)
 from tonepath.privacy import delete_profile, privacy_status
 from tonepath.scanner import scan_directory
 from tonepath.selector import select_path
@@ -692,17 +701,27 @@ def feedback_no_vocals() -> None:
 
 @profile_app.command("inspect")
 def profile_inspect(json_output: Annotated[bool, typer.Option("--json", help="Print raw summary as JSON-like repr.")] = False) -> None:
-    """Inspect local profile data counts."""
+    """Inspect local profile data and active preference rules."""
 
     store = TonepathStore()
     summary = store.profile_summary()
+    rules = store.list_profile_rules()
+    store.close()
     if json_output:
-        console.print(summary)
+        print_json_payload({"summary": summary, "rules": [json.loads(rule.value) for rule in rules]})
         return
     table = Table("Table", "Rows")
     for key, value in summary.items():
         table.add_row(key, str(value))
     console.print(table)
+    if rules:
+        rule_table = Table("Rule", "Source", "Confidence", "Rationale", box=box.SIMPLE)
+        for rule in rules:
+            payload = json.loads(rule.value)
+            rule_table.add_row(str(payload["rule_type"]), rule.source, rule.confidence, str(payload["rationale"]))
+        console.print(rule_table)
+    else:
+        console.print("No active profile rules.")
 
 
 @profile_app.command("export")
@@ -711,6 +730,53 @@ def profile_export() -> None:
 
     store = TonepathStore()
     console.print(store.profile_summary())
+
+
+@profile_app.command("suggest")
+def profile_suggest(
+    use_llm: Annotated[bool, typer.Option("--llm", help="Use configured DeepSeek/Qwen LLM to suggest profile rules.")] = False,
+    use_codex: Annotated[bool, typer.Option("--codex", help="Use Codex to suggest profile rules from local evidence.")] = False,
+    provider: Annotated[str | None, typer.Option(help="LLM provider: deepseek or qwen.")] = None,
+    confirm: Annotated[bool, typer.Option("--confirm", help="Confirm sending a privacy-safe evidence summary to the LLM.")] = False,
+    web: Annotated[bool, typer.Option("--web", help="Allow Codex web search for public music context.")] = False,
+) -> None:
+    """Generate pending profile-rule suggestions without applying them."""
+
+    if use_llm and use_codex:
+        raise typer.BadParameter("Choose only one of --llm or --codex.")
+    store = TonepathStore()
+    try:
+        evidence = build_profile_evidence(store)
+    finally:
+        store.close()
+    evidence_path = write_profile_evidence(evidence)
+    settings = tonepath_config.load_config()
+    if use_llm:
+        if not confirm and not settings.privacy.send_to_llm:
+            raise typer.BadParameter("profile suggest --llm requires --confirm or privacy.send_to_llm = true.")
+        suggestions = suggest_with_llm(evidence, provider=provider)
+        source = "llm"
+    elif use_codex:
+        payload = run_codex_profile_suggest(evidence_path, web=web)
+        suggestions = payload["suggestions"]
+        source = "codex"
+    else:
+        suggestions = deterministic_suggestions(evidence)
+        source = "deterministic"
+    suggestions_path = save_suggestions(evidence, suggestions, source=source)
+    render_profile_suggestions(suggestions, evidence_path, suggestions_path)
+
+
+@profile_app.command("apply")
+def profile_apply(suggestion_id: Annotated[str, typer.Argument(help="Pending profile suggestion id to apply.")]) -> None:
+    """Apply one pending profile suggestion as an active local rule."""
+
+    store = TonepathStore()
+    try:
+        rule = apply_suggestion(store, suggestion_id)
+    finally:
+        store.close()
+    console.print(f"Applied profile rule: {rule.key}")
 
 
 @profile_app.command("delete")
@@ -1208,6 +1274,26 @@ def render_eval_rerank(payload: dict[str, object]) -> None:
             eval_track_label(track),
             str(row["suggested_action"]),
             risks,
+        )
+    console.print(table)
+
+
+def render_profile_suggestions(suggestions: list[dict[str, object]], evidence_path: Path, suggestions_path: Path) -> None:
+    """Render pending profile suggestions."""
+
+    console.print(f"Profile evidence: {evidence_path}")
+    console.print(f"Pending suggestions: {suggestions_path}")
+    if not suggestions:
+        console.print("No profile suggestions yet; more feedback is needed.")
+        return
+    table = Table("ID", "Scope", "Rule", "Confidence", "Rationale", box=box.SIMPLE, expand=True)
+    for item in suggestions:
+        table.add_row(
+            str(item["suggestion_id"]),
+            str(item["scope"]),
+            str(item["rule_type"]),
+            str(item["confidence"]),
+            str(item["rationale"]),
         )
     console.print(table)
 

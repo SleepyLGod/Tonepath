@@ -97,3 +97,14 @@ class EnrichmentRecord:
     source: str
     confidence: str
     is_online: bool = False
+
+
+@dataclass(frozen=True)
+class ProfileRule:
+    """A local, explainable user preference rule."""
+
+    id: int | None
+    key: str
+    value: str
+    source: str
+    confidence: str

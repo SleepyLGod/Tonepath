@@ -1,0 +1,45 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["suggestions"],
+  "properties": {
+    "suggestions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "suggestion_id",
+          "scope",
+          "rule_type",
+          "target",
+          "threshold",
+          "weight",
+          "confidence",
+          "rationale",
+          "evidence_count"
+        ],
+        "properties": {
+          "suggestion_id": {"type": "string"},
+          "scope": {"type": "string"},
+          "rule_type": {
+            "type": "string",
+            "enum": [
+              "prefer_lower_loudness",
+              "prefer_lower_energy",
+              "prefer_lower_vocalness",
+              "demote_high_bpm",
+              "prefer_artist"
+            ]
+          },
+          "target": {"type": "string"},
+          "threshold": {"type": "number"},
+          "weight": {"type": "number"},
+          "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+          "rationale": {"type": "string"},
+          "evidence_count": {"type": "integer", "minimum": 0}
+        }
+      }
+    }
+  }
+}

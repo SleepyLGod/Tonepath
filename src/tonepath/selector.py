@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from tonepath.analysis import (
     AUDIO_SEPARATOR_FEATURE_SOURCE,
     DEMUCS_FEATURE_SOURCE,
@@ -10,7 +12,7 @@ from tonepath.analysis import (
 )
 from tonepath.db import TonepathStore
 from tonepath.display import canonical_track_key
-from tonepath.models import CandidateScore, SessionPlan, SessionPhase, Track, TrackFeatures
+from tonepath.models import CandidateScore, ProfileRule, SessionPlan, SessionPhase, Track, TrackFeatures
 
 
 QUIET_GENRES = ("ambient", "classical", "instrumental", "lofi", "lo-fi", "downtempo")
@@ -27,12 +29,13 @@ def select_path(
     """Select tracks for every phase in a session plan."""
 
     tracks = store.list_tracks()
+    profile_rules = store.list_profile_rules()
     selected: list[CandidateScore] = []
     used_ids: set[int] = set(excluded_track_ids or set())
     used_keys = {canonical_track_key(track) for track in tracks if track.id in used_ids}
     for phase in plan.phases:
         candidates = [
-            score_track(store, track, phase)
+            score_track(store, track, phase, profile_rules=profile_rules)
             for track in tracks
             if track.id is not None and track.id not in used_ids
             and canonical_track_key(track) not in used_keys
@@ -53,7 +56,9 @@ def select_path(
     return selected
 
 
-def score_track(store: TonepathStore, track: Track, phase: SessionPhase) -> CandidateScore:
+def score_track(
+    store: TonepathStore, track: Track, phase: SessionPhase, profile_rules: list[ProfileRule] | None = None
+) -> CandidateScore:
     """Score one track against one phase using explainable components."""
 
     if track.id is None:
@@ -129,6 +134,10 @@ def score_track(store: TonepathStore, track: Track, phase: SessionPhase) -> Cand
 
     if feedback:
         reasons.append("previous local feedback adjusted the score")
+
+    profile_delta, profile_reasons = profile_rule_adjustment(profile_rules if profile_rules is not None else store.list_profile_rules(), track, features, phase)
+    score += profile_delta
+    reasons.extend(profile_reasons)
 
     if track.duration:
         score += 0.2
@@ -239,3 +248,61 @@ def bpm_fit(bpm: float, phase: SessionPhase) -> float:
     if phase.target_energy >= 0.6 and 90.0 <= bpm <= 165.0:
         score += 0.25
     return score
+
+
+def profile_rule_adjustment(
+    rules: list[ProfileRule], track: Track, features: TrackFeatures | None, phase: SessionPhase
+) -> tuple[float, list[str]]:
+    """Return score adjustments from active profile rules."""
+
+    score = 0.0
+    reasons: list[str] = []
+    for rule in rules:
+        try:
+            payload = json.loads(rule.value)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or not profile_scope_matches(str(payload.get("scope", "global")), phase):
+            continue
+        rule_type = str(payload.get("rule_type", ""))
+        weight = float_payload(payload.get("weight"), 0.5)
+        threshold = float_payload(payload.get("threshold"), 0.0)
+        delta = profile_rule_delta(rule_type, threshold, weight, str(payload.get("target", "")), track, features)
+        if delta == 0.0:
+            continue
+        score += delta
+        reasons.append(f"profile rule: {payload.get('rationale', rule_type)}")
+    return score, reasons
+
+
+def profile_scope_matches(scope: str, phase: SessionPhase) -> bool:
+    """Return whether a profile rule applies to one phase."""
+
+    return scope in {"global", phase.label}
+
+
+def profile_rule_delta(rule_type: str, threshold: float, weight: float, target: str, track: Track, features: TrackFeatures | None) -> float:
+    """Return one profile rule score delta."""
+
+    if rule_type == "prefer_artist":
+        return weight if track.artist and target and target.lower() in track.artist.lower() else 0.0
+    if features is None:
+        return 0.0
+    if rule_type == "prefer_lower_loudness" and features.loudness is not None:
+        return weight if features.loudness <= threshold else -weight
+    if rule_type == "prefer_lower_energy" and features.energy is not None:
+        return weight if features.energy <= threshold else -weight
+    if rule_type == "prefer_lower_vocalness" and features.vocalness is not None:
+        return weight if features.vocalness <= threshold else -weight
+    if rule_type == "demote_high_bpm" and features.bpm is not None:
+        return -weight if features.bpm >= threshold else 0.0
+    return 0.0
+
+
+def float_payload(value: object, default: float) -> float:
+    """Return a float from a profile rule payload."""
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
