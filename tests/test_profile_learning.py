@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,13 @@ from tonepath.models import Track, TrackFeatures
 from tonepath.planner import plan_session
 from tonepath.profile import build_profile_evidence, deterministic_suggestions
 from tonepath.selector import score_track
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def plain_output(output: str) -> str:
+    return ANSI_RE.sub("", output)
 
 
 class ProfileLearningTest(unittest.TestCase):
@@ -52,7 +60,7 @@ class ProfileLearningTest(unittest.TestCase):
                 result = CliRunner().invoke(app, ["profile", "suggest", "--llm"])
 
                 self.assertNotEqual(result.exit_code, 0)
-                self.assertIn("requires --confirm", result.output)
+                self.assertIn("requires --confirm", plain_output(result.output))
 
     def test_profile_suggest_llm_writes_pending_suggestions(self) -> None:
         body = {
