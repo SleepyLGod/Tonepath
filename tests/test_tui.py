@@ -8,7 +8,9 @@ from unittest.mock import patch
 from tonepath.db import TonepathStore
 from tonepath.models import Track, TrackFeatures
 from tonepath.playback import MpvAdapter
-from tonepath.tui import TonepathApp, bpm_text, confidence_label, energy_meter, queue_marker, vocalness_text
+from tonepath.planner import plan_session
+from tonepath.profile import build_profile_evidence, deterministic_suggestions, save_suggestions
+from tonepath.tui import TonepathApp, bpm_text, confidence_label, energy_meter, profile_learning_hint, queue_marker, vocalness_text
 from textual.widgets import Input
 
 
@@ -34,6 +36,35 @@ class FinishedProcess(FakeProcess):
 
 
 class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
+    def test_tui_profile_learning_hint_points_to_suggest_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                self.assertIn("profile suggest", profile_learning_hint())
+
+    def test_tui_profile_learning_hint_points_to_inspect_when_suggestions_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                track_id = self.add_track(store, tmp, "a.mp3")
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id=track_id,
+                        bpm=100.0,
+                        loudness=-8.0,
+                        energy=0.5,
+                        vocalness=0.2,
+                        feature_source="test",
+                        confidence="medium",
+                    )
+                )
+                session_id = store.save_session(plan_session("focus 30m"))
+                store.record_feedback("too-loud", session_id=session_id, track_id=track_id)
+                evidence = build_profile_evidence(store)
+                save_suggestions(evidence, deterministic_suggestions(evidence), "deterministic")
+                store.close()
+
+                self.assertIn("profile inspect", profile_learning_hint())
+
     async def test_tui_launches_intake_without_session_or_playback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):

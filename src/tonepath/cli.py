@@ -25,7 +25,15 @@ from tonepath.db import TonepathStore
 from tonepath.display import clean_metadata_text, dirty_metadata_issues, display_artist, display_title, duplicate_track_count
 from tonepath.doctor import run_doctor
 from tonepath.enrichment import EnrichmentProvider, enrich_library
-from tonepath.evaluation import evaluate_audit, evaluate_intent, evaluate_rerank, evaluate_selection, evaluate_suite, run_codex_audit
+from tonepath.evaluation import (
+    evaluate_audit,
+    evaluate_intent,
+    evaluate_profile_comparison,
+    evaluate_rerank,
+    evaluate_selection,
+    evaluate_suite,
+    run_codex_audit,
+)
 from tonepath.explanation import explain_candidate
 from tonepath.llm import llm_doctor, parse_prompt_with_llm
 from tonepath.model_runtime import isolation_report, model_runtime_report, model_runtime_status, setup_essentia_tf_runtime
@@ -34,6 +42,7 @@ from tonepath.planner import plan_session, request_constraints
 from tonepath.playback import MpvAdapter
 from tonepath.playback_controller import PlaybackController
 from tonepath.profile import (
+    active_rule_payload,
     apply_suggestion,
     build_profile_evidence,
     delete_profile_markdown,
@@ -41,7 +50,9 @@ from tonepath.profile import (
     list_pending_suggestions,
     memory_context_text,
     profile_evidence_latest_path,
+    profile_learning_hint,
     profile_memory_path,
+    profile_readiness,
     run_codex_profile_suggest,
     save_suggestions,
     suggest_with_llm,
@@ -565,6 +576,27 @@ def eval_selection(
     render_eval_table(candidates)
 
 
+@eval_app.command("profile")
+def eval_profile(
+    prompt: Annotated[str, typer.Argument(help="State transition prompt to compare.")],
+    limit: Annotated[int, typer.Option("--limit", help="Maximum number of candidates to compare.")] = 8,
+    json_output: Annotated[bool, typer.Option("--json", help="Print stable JSON for comparison.")] = False,
+) -> None:
+    """Compare selection with and without active profile rules."""
+
+    if limit <= 0:
+        raise typer.BadParameter("--limit must be greater than zero")
+    store = TonepathStore()
+    try:
+        payload = evaluate_profile_comparison(store, prompt, limit)
+    finally:
+        store.close()
+    if json_output:
+        print_json_payload(payload)
+        return
+    render_eval_profile(payload)
+
+
 @eval_app.command("suite")
 def eval_suite(
     limit: Annotated[int, typer.Option("--limit", help="Maximum number of candidates per prompt.")] = 5,
@@ -730,41 +762,61 @@ def profile_inspect(json_output: Annotated[bool, typer.Option("--json", help="Pr
     memory_path = profile_memory_path()
     evidence_path = profile_evidence_latest_path()
     pending = list_pending_suggestions()
+    active_rules = [active_rule_payload(rule) for rule in rules]
+    readiness = profile_readiness(summary, active_rules, pending)
     if json_output:
         print_json_payload(
             {
+                "readiness": readiness,
                 "summary": summary,
-                "rules": [json.loads(rule.value) for rule in rules],
+                "active_rules": active_rules,
+                # Keep the legacy "rules" alias for scripts written before active_rules existed.
+                "rules": active_rules,
                 "pending_suggestions": pending,
                 "memory": {"path": str(memory_path), "exists": memory_path.exists()},
                 "evidence": {"path": str(evidence_path), "exists": evidence_path.exists()},
             }
         )
         return
+    console.print(f"Profile readiness: {readiness}")
     table = Table("Table", "Rows")
     for key, value in summary.items():
         table.add_row(key, str(value))
     console.print(table)
     console.print(f"Profile memory: {memory_path} ({'exists' if memory_path.exists() else 'missing'})")
     console.print(f"Profile evidence: {evidence_path} ({'exists' if evidence_path.exists() else 'missing'})")
-    if rules:
-        rule_table = Table("Rule", "Source", "Confidence", "Rationale", box=box.SIMPLE)
-        for rule in rules:
-            payload = json.loads(rule.value)
-            rule_table.add_row(str(payload["rule_type"]), rule.source, rule.confidence, str(payload["rationale"]))
+    if active_rules:
+        rule_table = Table("Scope", "Rule", "Target", "Threshold", "Weight", "Source", "Confidence", "Rationale", box=box.SIMPLE, expand=True)
+        for rule in active_rules:
+            rule_table.add_row(
+                str(rule["scope"]),
+                str(rule["rule_type"]),
+                str(rule["target"]),
+                str(rule.get("threshold", "--")),
+                str(rule.get("weight", "--")),
+                str(rule["source"]),
+                str(rule["confidence"]),
+                str(rule["rationale"]),
+            )
         console.print(rule_table)
     else:
         console.print("No active profile rules.")
     if pending:
-        pending_table = Table("Suggestion", "Rule", "Source", "Confidence", box=box.SIMPLE)
+        pending_table = Table("Suggestion", "Rule", "Source", "Confidence", "Evidence", "Apply", "Rationale", box=box.SIMPLE, expand=True)
         for item in pending[:10]:
             pending_table.add_row(
                 str(item.get("suggestion_id", "--")),
                 str(item.get("rule_type", "--")),
                 str(item.get("source", "--")),
                 str(item.get("confidence", "--")),
+                str(item.get("evidence_count", "--")),
+                f"uv run tonepath profile apply {item.get('suggestion_id', '--')}",
+                str(item.get("rationale", "")),
             )
         console.print(pending_table)
+        first_id = pending[0].get("suggestion_id", "--")
+        console.print(f"Apply a suggestion: uv run tonepath profile apply {first_id}")
+        console.print(f"Suggestion rationale: {pending[0].get('rationale', '')}")
 
 
 @profile_memory_app.command("write")
@@ -901,8 +953,12 @@ def record_feedback(feedback_type: str) -> None:
     """Record feedback against the current session."""
 
     store = TonepathStore()
-    store.record_feedback(feedback_type, session_id=store.current_session_id())
+    try:
+        store.record_feedback(feedback_type, session_id=store.current_session_id())
+    finally:
+        store.close()
     console.print(f"Recorded feedback: {feedback_type}")
+    console.print(profile_learning_hint())
 
 
 def print_json_payload(payload: object) -> None:
@@ -1186,6 +1242,38 @@ def render_eval_table(rows: list[dict[str, object]]) -> None:
             str(row["confidence"]),
             eval_feature_summary(features),
             "\n".join(summarize_eval_reasons(str(reason) for reason in reasons)),
+        )
+    console.print(table)
+
+
+def render_eval_profile(payload: dict[str, object]) -> None:
+    """Render profile comparison output for manual review."""
+
+    console.print(f"Profile comparison: {payload['prompt']}")
+    console.print(str(payload["message"]))
+    console.print(f"Active profile rules: {payload['active_rule_count']}")
+    movements = payload.get("movements")
+    if not isinstance(movements, list):
+        raise TypeError("Profile comparison payload must include movements.")
+    if not movements:
+        console.print("No candidates found. Run `tonepath scan ~/Music` first.")
+        return
+    table = Table("With", "No", "ΔRank", "ΔScore", "Track", "Profile Reasons", box=box.SIMPLE, expand=True)
+    for row in movements:
+        if not isinstance(row, dict):
+            raise TypeError("Profile movement row must be an object.")
+        track = row.get("track")
+        if not isinstance(track, dict):
+            raise TypeError("Profile movement row must include track.")
+        reasons = row.get("profile_reasons", [])
+        reason_text = "\n".join(str(reason) for reason in reasons) if isinstance(reasons, list) and reasons else "--"
+        table.add_row(
+            str(row.get("rank_with_profile", "--")),
+            str(row.get("rank_no_profile", "--")),
+            str(row.get("rank_delta", "--")),
+            str(row.get("score_delta", "--")),
+            eval_track_label(track),
+            reason_text,
         )
     console.print(table)
 

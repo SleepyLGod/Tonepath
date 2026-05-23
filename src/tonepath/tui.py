@@ -13,6 +13,7 @@ from tonepath.evaluation import evaluate_rerank
 from tonepath.model_runtime import model_runtime_status
 from tonepath.models import FeedbackType
 from tonepath.playback_controller import PlaybackController
+from tonepath.profile import profile_learning_hint
 from tonepath.session import SessionRunner
 
 try:
@@ -332,6 +333,7 @@ class TonepathApp(App[None]):
             return
         message = self.runner.apply_feedback(feedback_type)
         self.log_event(message)
+        self.log_event(profile_learning_hint())
         self.refresh_session_view()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:

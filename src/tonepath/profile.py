@@ -262,7 +262,7 @@ def deterministic_suggestions(evidence: dict[str, object]) -> list[dict[str, obj
                 weight=0.7,
                 confidence="medium",
                 source="deterministic-profile",
-                rationale="Focus sessions include too-loud feedback; prefer quieter tracks in future focus paths.",
+                rationale="Focus prefers quieter tracks after too-loud feedback in focus sessions.",
                 evidence_count=len(focus_loud),
             )
         )
@@ -427,26 +427,19 @@ def apply_suggestion(store: TonepathStore, suggestion_id: str) -> ProfileRule:
 def find_pending_suggestion(suggestion_id: str) -> dict[str, object] | None:
     """Find one pending suggestion in the local profile cache."""
 
-    root = config.ensure_data_dir() / "cache" / "profile"
-    if not root.exists():
-        return None
-    for path in sorted(root.glob("*/suggestions.json"), key=lambda item: item.stat().st_mtime, reverse=True):
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        suggestions = payload.get("suggestions")
-        if not isinstance(suggestions, list):
-            continue
-        for suggestion_item in suggestions:
-            if isinstance(suggestion_item, dict) and suggestion_item.get("suggestion_id") == suggestion_id:
-                return suggestion_item
+    for suggestion_item in list_pending_suggestions():
+        if suggestion_item.get("suggestion_id") == suggestion_id:
+            return suggestion_item
     return None
 
 
 def list_pending_suggestions() -> list[dict[str, object]]:
-    """Return pending profile suggestions from the local cache."""
+    """Return unapplied profile suggestions from the local cache."""
 
     root = config.ensure_data_dir() / "cache" / "profile"
     if not root.exists():
         return []
+    applied_keys = applied_profile_rule_keys()
     pending: list[dict[str, object]] = []
     for path in sorted(root.glob("*/suggestions.json"), key=lambda item: item.stat().st_mtime, reverse=True):
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -454,9 +447,77 @@ def list_pending_suggestions() -> list[dict[str, object]]:
         if not isinstance(suggestions, list):
             continue
         for suggestion_item in suggestions:
-            if isinstance(suggestion_item, dict):
+            if not isinstance(suggestion_item, dict):
+                continue
+            key = suggestion_rule_key(suggestion_item)
+            if key is not None and key not in applied_keys:
                 pending.append(suggestion_item)
     return pending
+
+
+def applied_profile_rule_keys() -> set[str]:
+    """Return keys for active profile rules."""
+
+    store = TonepathStore()
+    try:
+        return {rule.key for rule in store.list_profile_rules()}
+    finally:
+        store.close()
+
+
+def suggestion_rule_key(payload: dict[str, object]) -> str | None:
+    """Return the profile rule key implied by one suggestion."""
+
+    try:
+        clean = sanitize_suggestion(payload, source=str(payload.get("source") or "profile-suggestion"))
+    except RuntimeError:
+        return None
+    return f"{clean['scope']}:{clean['rule_type']}:{clean['target']}"
+
+
+def active_rule_payload(rule: ProfileRule) -> dict[str, object]:
+    """Return one active profile rule as a display-safe payload."""
+
+    parse_error = False
+    try:
+        payload = json.loads(rule.value)
+    except (json.JSONDecodeError, TypeError):
+        payload = {}
+        parse_error = True
+    return {
+        "id": rule.id,
+        "key": rule.key,
+        "scope": str(payload.get("scope", "global")),
+        "rule_type": str(payload.get("rule_type", "unknown")),
+        "target": str(payload.get("target", "unknown")),
+        "threshold": payload.get("threshold"),
+        "weight": payload.get("weight"),
+        "source": rule.source,
+        "confidence": rule.confidence,
+        "rationale": str(payload.get("rationale", "")),
+        "evidence_count": payload.get("evidence_count"),
+        "parse_error": parse_error,
+    }
+
+
+def profile_readiness(summary: dict[str, int], active_rules: list[dict[str, object]], pending_suggestions: list[dict[str, object]]) -> str:
+    """Return a user-facing profile learning readiness state."""
+
+    if active_rules:
+        return "Active profile rules"
+    if pending_suggestions:
+        return "Suggestions pending"
+    if summary.get("feedback", 0) == 0:
+        return "No feedback yet"
+    return "Feedback ready for suggestions"
+
+
+def profile_learning_hint() -> str:
+    """Return a lightweight post-feedback profile learning hint."""
+
+    if list_pending_suggestions():
+        return "Run `uv run tonepath profile inspect` to review pending preference suggestions."
+    return "Run `uv run tonepath profile suggest` to review possible preference rules."
 
 
 def delete_profile_markdown() -> None:

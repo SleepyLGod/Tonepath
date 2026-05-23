@@ -281,11 +281,11 @@ Engineering rules:
 
 ## Immediate Next Step
 
-Implement and validate the profile comparison loop before starting the journal workflow:
+Make profile learning visible and comparable before starting the journal workflow:
 
 ```bash
-uv run tonepath eval selection "我要写论文，四十五分钟，低刺激，最好不要人声" --no-profile
-uv run tonepath eval selection "我要写论文，四十五分钟，低刺激，最好不要人声" --with-profile
+uv run tonepath profile inspect
+uv run tonepath eval profile "我要写论文，四十五分钟，低刺激，最好不要人声" --limit 8
 ```
 
-Only after profile learning is visible, reversible, and testable should Tonepath add the private journal workflow.
+Phase 1 is complete only when feedback points users toward inspectable suggestions, applied rules explain recommendation changes, `eval profile` shows the with-profile/no-profile delta, and `profile delete --all` can remove the personalization effect. Only then should Tonepath add the private journal workflow.

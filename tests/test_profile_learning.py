@@ -10,9 +10,9 @@ from typer.testing import CliRunner
 
 from tonepath.cli import app
 from tonepath.db import TonepathStore
-from tonepath.models import Track, TrackFeatures
+from tonepath.models import ProfileRule, Track, TrackFeatures
 from tonepath.planner import plan_session
-from tonepath.profile import build_profile_evidence, deterministic_suggestions, suggest_with_llm
+from tonepath.profile import build_profile_evidence, deterministic_suggestions, save_suggestions, suggest_with_llm
 from tonepath.selector import score_track
 
 
@@ -308,7 +308,6 @@ class ProfileLearningTest(unittest.TestCase):
                 store.record_feedback("too-loud", session_id=session_id, track_id=track_id)
                 evidence = build_profile_evidence(store)
                 suggestions = deterministic_suggestions(evidence)
-                from tonepath.profile import save_suggestions
 
                 save_suggestions(evidence, suggestions, "deterministic")
                 result = CliRunner().invoke(app, ["profile", "apply", "focus-lower-loudness"])
@@ -322,11 +321,162 @@ class ProfileLearningTest(unittest.TestCase):
                 self.assertEqual(store.profile_summary()["profile_rules"], 1)
                 store.close()
 
-    def test_roadmap_documents_profile_comparison_loop(self) -> None:
+    def test_profile_inspect_reports_no_feedback_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                result = CliRunner().invoke(app, ["profile", "inspect", "--json"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output)
+                self.assertEqual(payload["readiness"], "No feedback yet")
+                self.assertEqual(payload["active_rules"], [])
+                self.assertEqual(payload["pending_suggestions"], [])
+                self.assertEqual(payload["memory"]["path"], str(home / "profile" / "memory.md"))
+                self.assertFalse(payload["memory"]["exists"])
+
+    def test_profile_inspect_shows_pending_suggestion_apply_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                store, track_id = populated_store(tmp, loudness=-8.0, bpm=120.0, vocalness=0.2)
+                session_id = store.save_session(plan_session("focus 30m"))
+                store.record_feedback("too-loud", session_id=session_id, track_id=track_id)
+                evidence = build_profile_evidence(store)
+                suggestions = deterministic_suggestions(evidence)
+                save_suggestions(evidence, suggestions, "deterministic")
+                store.close()
+
+                result = CliRunner().invoke(app, ["profile", "inspect"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                output = plain_output(result.output)
+                self.assertIn("Profile readiness: Suggestions pending", output)
+                self.assertIn("uv run tonepath profile apply focus-lower-loudness", output)
+                self.assertIn("focus prefers quieter tracks", output.lower())
+
+    def test_profile_inspect_json_shows_active_rule_details(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                store, track_id = populated_store(tmp, loudness=-8.0, bpm=120.0, vocalness=0.2)
+                session_id = store.save_session(plan_session("focus 30m"))
+                store.record_feedback("too-loud", session_id=session_id, track_id=track_id)
+                evidence = build_profile_evidence(store)
+                suggestions = deterministic_suggestions(evidence)
+                save_suggestions(evidence, suggestions, "deterministic")
+                store.close()
+
+                apply_result = CliRunner().invoke(app, ["profile", "apply", "focus-lower-loudness"])
+                self.assertEqual(apply_result.exit_code, 0, apply_result.output)
+                result = CliRunner().invoke(app, ["profile", "inspect", "--json"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output)
+                self.assertEqual(payload["readiness"], "Active profile rules")
+                rule = payload["active_rules"][0]
+                self.assertEqual(rule["scope"], "focus")
+                self.assertEqual(rule["rule_type"], "prefer_lower_loudness")
+                self.assertEqual(rule["target"], "loudness")
+                self.assertEqual(rule["threshold"], -12.0)
+                self.assertEqual(rule["weight"], 0.7)
+                self.assertEqual(rule["source"], "deterministic-profile")
+                self.assertEqual(rule["confidence"], "medium")
+                self.assertIn("focus prefers quieter tracks", rule["rationale"].lower())
+                self.assertEqual(rule["evidence_count"], 1)
+                self.assertEqual(payload["pending_suggestions"], [])
+                self.assertIn("evidence", payload)
+
+    def test_profile_inspect_json_handles_malformed_active_rule(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                store = TonepathStore()
+                store.upsert_profile_rule(
+                    ProfileRule(
+                        id=None,
+                        key="bad-rule",
+                        value="{not json",
+                        source="test",
+                        confidence="low",
+                    )
+                )
+                store.close()
+
+                result = CliRunner().invoke(app, ["profile", "inspect", "--json"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output)
+                rule = payload["active_rules"][0]
+                self.assertEqual(rule["key"], "bad-rule")
+                self.assertEqual(rule["scope"], "global")
+                self.assertEqual(rule["rule_type"], "unknown")
+                self.assertEqual(rule["target"], "unknown")
+                self.assertTrue(rule["parse_error"])
+
+    def test_profile_inspect_keeps_unapplied_suggestions_pending_after_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                store, track_id = populated_store(tmp, loudness=-8.0, bpm=120.0, vocalness=0.2)
+                session_id = store.save_session(plan_session("focus 30m"))
+                store.record_feedback("too-loud", session_id=session_id, track_id=track_id)
+                store.record_feedback("like", session_id=session_id, track_id=track_id)
+                evidence = build_profile_evidence(store)
+                save_suggestions(evidence, deterministic_suggestions(evidence), "deterministic")
+                store.close()
+
+                apply_result = CliRunner().invoke(app, ["profile", "apply", "focus-lower-loudness"])
+                self.assertEqual(apply_result.exit_code, 0, apply_result.output)
+                result = CliRunner().invoke(app, ["profile", "inspect", "--json"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output)
+                pending_ids = {item["suggestion_id"] for item in payload["pending_suggestions"]}
+                self.assertNotIn("focus-lower-loudness", pending_ids)
+                self.assertIn("global-lower-vocalness", pending_ids)
+
+    def test_cli_feedback_points_to_profile_suggest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                store = TonepathStore()
+                session_id = store.save_session(plan_session("focus 30m"))
+                store.set_app_state("current_session_id", str(session_id))
+                store.close()
+
+                result = CliRunner().invoke(app, ["feedback", "like"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                output = plain_output(result.output)
+                self.assertIn("Recorded feedback: like", output)
+                self.assertIn("tonepath profile suggest", output)
+
+    def test_cli_feedback_points_to_profile_inspect_when_suggestions_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                store, track_id = populated_store(tmp, loudness=-8.0, bpm=120.0, vocalness=0.2)
+                session_id = store.save_session(plan_session("focus 30m"))
+                store.set_app_state("current_session_id", str(session_id))
+                store.record_feedback("too-loud", session_id=session_id, track_id=track_id)
+                evidence = build_profile_evidence(store)
+                save_suggestions(evidence, deterministic_suggestions(evidence), "deterministic")
+                store.close()
+
+                result = CliRunner().invoke(app, ["feedback", "like"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                output = plain_output(result.output)
+                self.assertIn("Recorded feedback: like", output)
+                self.assertIn("tonepath profile inspect", output)
+
+    def test_roadmap_documents_profile_visibility_loop(self) -> None:
         roadmap = (Path(__file__).resolve().parents[1] / "docs" / "tonepath-private-radio-agent-roadmap.md").read_text(encoding="utf-8")
 
-        self.assertIn("--no-profile", roadmap)
-        self.assertIn("--with-profile", roadmap)
+        self.assertIn("tonepath profile inspect", roadmap)
+        self.assertIn("tonepath eval profile", roadmap)
+        self.assertIn("profile delete --all", roadmap)
         self.assertIn("personalized radio loop is still early-stage", roadmap)
 
 

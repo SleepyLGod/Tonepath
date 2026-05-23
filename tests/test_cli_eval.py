@@ -19,6 +19,7 @@ from tonepath.evaluation import (
     evaluate_intent,
     evaluate_rerank,
     evaluate_suite,
+    profile_movements,
 )
 from tonepath.models import ProfileRule, Track, TrackFeatures
 
@@ -155,6 +156,142 @@ class CliEvalTest(unittest.TestCase):
 
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("Choose only one", result.output)
+
+    def test_eval_profile_reports_no_active_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                store.upsert_track(track_for(Path(tmp) / "quiet.mp3", title="quiet", genre="ambient"))
+                before = store.profile_summary()
+                store.close()
+
+                result = CliRunner().invoke(app, ["eval", "profile", "focus 30m", "--json", "--limit", "1"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output)
+                self.assertEqual(payload["active_rule_count"], 0)
+                self.assertIn("No active profile rules", payload["message"])
+                self.assertFalse(payload["no_profile"]["profile_enabled"])
+                self.assertTrue(payload["with_profile"]["profile_enabled"])
+                store = TonepathStore()
+                after = store.profile_summary()
+                store.close()
+                self.assertEqual(before, after)
+
+    def test_eval_profile_reports_score_delta_and_profile_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                track_id = store.upsert_track(track_for(Path(tmp) / "quiet.mp3", title="quiet", genre="ambient"))
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id=track_id,
+                        energy=0.24,
+                        loudness=-18.2,
+                        bpm=84.0,
+                        vocalness=0.18,
+                        feature_source="model-essentia-voice-instrumental",
+                        confidence="high",
+                    )
+                )
+                store.upsert_profile_rule(
+                    ProfileRule(
+                        id=None,
+                        key="global:prefer_lower_loudness:loudness",
+                        value=json.dumps(
+                            {
+                                "scope": "global",
+                                "rule_type": "prefer_lower_loudness",
+                                "target": "loudness",
+                                "threshold": -12.0,
+                                "weight": 0.7,
+                                "confidence": "medium",
+                                "source": "test",
+                                "rationale": "focus prefers quieter tracks",
+                                "evidence_count": 1,
+                            }
+                        ),
+                        source="test",
+                        confidence="medium",
+                    )
+                )
+                store.close()
+
+                result = CliRunner().invoke(app, ["eval", "profile", "focus 30m", "--json", "--limit", "1"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output)
+                self.assertEqual(payload["active_rule_count"], 1)
+                movement = payload["movements"][0]
+                self.assertNotEqual(movement["score_delta"], 0)
+                self.assertTrue(any("profile rule:" in reason for reason in movement["profile_reasons"]))
+
+    def test_eval_profile_explains_when_active_rules_do_not_match_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                track_id = store.upsert_track(track_for(Path(tmp) / "quiet.mp3", title="quiet", genre="ambient"))
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id=track_id,
+                        energy=0.24,
+                        loudness=-18.2,
+                        bpm=84.0,
+                        vocalness=0.18,
+                        feature_source="model-essentia-voice-instrumental",
+                        confidence="high",
+                    )
+                )
+                store.upsert_profile_rule(
+                    ProfileRule(
+                        id=None,
+                        key="focus:prefer_lower_loudness:loudness",
+                        value=json.dumps(
+                            {
+                                "scope": "focus",
+                                "rule_type": "prefer_lower_loudness",
+                                "target": "loudness",
+                                "threshold": -12.0,
+                                "weight": 0.7,
+                                "confidence": "medium",
+                                "source": "test",
+                                "rationale": "focus prefers quieter tracks",
+                                "evidence_count": 1,
+                            }
+                        ),
+                        source="test",
+                        confidence="medium",
+                    )
+                )
+                store.close()
+
+                result = CliRunner().invoke(app, ["eval", "profile", "focus 30m", "--json", "--limit", "1"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output)
+                self.assertIn("did not match", payload["message"])
+                self.assertIn("--limit", payload["message"])
+
+    def test_profile_movements_consumes_duplicate_identities_and_ignores_empty_identity(self) -> None:
+        rows = profile_movements(
+            [
+                {"track": {"display_label": "dup"}, "score": 1.0},
+                {"track": {"display_label": "dup"}, "score": 2.0},
+                {"track": {}, "score": 9.0},
+            ],
+            [
+                {"track": {"display_label": "dup"}, "score": 3.0, "reasons": []},
+                {"track": {"display_label": "dup"}, "score": 4.0, "reasons": []},
+                {"track": {}, "score": 5.0, "reasons": []},
+            ],
+        )
+
+        self.assertEqual(rows[0]["rank_no_profile"], 1)
+        self.assertEqual(rows[0]["score_delta"], 2.0)
+        self.assertEqual(rows[1]["rank_no_profile"], 2)
+        self.assertEqual(rows[1]["score_delta"], 2.0)
+        self.assertIsNone(rows[2]["rank_no_profile"])
+        self.assertIsNone(rows[2]["score_delta"])
 
     def test_eval_selection_rejects_non_positive_limit(self) -> None:
         result = CliRunner().invoke(app, ["eval", "selection", "focus 30m", "--limit", "0"])

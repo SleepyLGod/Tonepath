@@ -37,6 +37,27 @@ def evaluate_selection(store: TonepathStore, prompt: str, limit: int, profile_en
     }
 
 
+def evaluate_profile_comparison(store: TonepathStore, prompt: str, limit: int) -> dict[str, object]:
+    """Compare selection with and without active profile rules."""
+
+    no_profile = evaluate_selection(store, prompt, limit, profile_enabled=False)
+    with_profile = evaluate_selection(store, prompt, limit, profile_enabled=True)
+    no_candidates = no_profile.get("candidates", [])
+    with_candidates = with_profile.get("candidates", [])
+    if not isinstance(no_candidates, list) or not isinstance(with_candidates, list):
+        raise RuntimeError("Profile comparison requires candidate lists.")
+    movements = profile_movements(no_candidates, with_candidates)
+    active_rule_count = len(store.list_profile_rules())
+    return {
+        "prompt": prompt,
+        "active_rule_count": active_rule_count,
+        "message": profile_comparison_message(active_rule_count, movements),
+        "no_profile": no_profile,
+        "with_profile": with_profile,
+        "movements": movements,
+    }
+
+
 def evaluate_audit(store: TonepathStore, prompt: str, limit: int) -> dict[str, object]:
     """Build a stable local audit evidence pack without profile writes."""
 
@@ -61,6 +82,89 @@ def evaluate_audit(store: TonepathStore, prompt: str, limit: int) -> dict[str, o
     payload["cache_dir"] = str(audit_dir)
     payload["evidence_path"] = str(evidence_path)
     return payload
+
+
+def profile_movements(no_candidates: list[object], with_candidates: list[object]) -> list[dict[str, object]]:
+    """Return rank and score movement for with-profile candidates."""
+
+    no_index: dict[str, list[tuple[int, dict[str, object]]]] = {}
+    for index, row in enumerate(no_candidates, start=1):
+        if not isinstance(row, dict):
+            continue
+        identity = candidate_identity(row)
+        if not identity:
+            continue
+        no_index.setdefault(identity, []).append((index, row))
+    movements: list[dict[str, object]] = []
+    for with_rank, row in enumerate(with_candidates, start=1):
+        if not isinstance(row, dict):
+            continue
+        identity = candidate_identity(row)
+        matches = no_index.get(identity) if identity else None
+        no_match = matches.pop(0) if matches else None
+        no_rank = None if no_match is None else no_match[0]
+        no_row = None if no_match is None else no_match[1]
+        with_score = numeric_score(row)
+        no_score = None if no_row is None else numeric_score(no_row)
+        movements.append(
+            {
+                "track": row.get("track"),
+                "phase": row.get("phase"),
+                "rank_no_profile": no_rank,
+                "rank_with_profile": with_rank,
+                "rank_delta": None if no_rank is None else no_rank - with_rank,
+                "score_no_profile": no_score,
+                "score_with_profile": with_score,
+                "score_delta": None if no_score is None or with_score is None else round(with_score - no_score, 3),
+                "profile_reasons": profile_reasons(row),
+            }
+        )
+    return movements
+
+
+def candidate_identity(row: dict[str, object]) -> str:
+    """Return a stable identity for one evaluation row."""
+
+    track = row.get("track")
+    if not isinstance(track, dict):
+        return ""
+    track_id = track.get("id")
+    if track_id is not None:
+        return f"id:{track_id}"
+    canonical = track.get("canonical_key")
+    if isinstance(canonical, list):
+        key = "|".join(str(part) for part in canonical)
+        return f"key:{key}" if key else ""
+    label = track.get("display_label")
+    return str(label) if label else ""
+
+
+def numeric_score(row: dict[str, object]) -> float | None:
+    """Return a row score as a float when available."""
+
+    value = row.get("score")
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def profile_reasons(row: dict[str, object]) -> list[str]:
+    """Return profile-specific candidate reasons."""
+
+    reasons = row.get("reasons")
+    if not isinstance(reasons, list):
+        return []
+    return [str(reason) for reason in reasons if "profile rule:" in str(reason)]
+
+
+def profile_comparison_message(active_rule_count: int, movements: list[dict[str, object]]) -> str:
+    """Return a concise profile comparison message."""
+
+    if active_rule_count == 0:
+        return "No active profile rules; recommendations are unchanged."
+    if any(row.get("profile_reasons") for row in movements):
+        return "Active profile rules changed selection scores."
+    return "Active profile rules did not match the compared candidates; try a larger --limit or a prompt whose phases match the rule scope."
 
 
 def run_codex_audit(evidence: dict[str, object], web: bool) -> dict[str, object]:
