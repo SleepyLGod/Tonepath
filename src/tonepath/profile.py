@@ -28,6 +28,12 @@ SUPPORTED_RULE_TYPES = {
     "prefer_artist",
 }
 
+GENERATED_START = "<!-- tonepath:generated:start -->"
+GENERATED_END = "<!-- tonepath:generated:end -->"
+HUMAN_NOTES_START = "<!-- tonepath:human-notes:start -->"
+HUMAN_NOTES_END = "<!-- tonepath:human-notes:end -->"
+DEFAULT_HUMAN_NOTES = "Add personal listening notes here. Tonepath preserves this section when regenerating the file."
+
 
 def build_profile_evidence(store: TonepathStore, limit: int = 80) -> dict[str, object]:
     """Build a privacy-safe evidence pack for profile suggestion."""
@@ -121,6 +127,112 @@ def write_profile_evidence(evidence: dict[str, object]) -> Path:
     return path
 
 
+def write_profile_memory(store: TonepathStore) -> Path:
+    """Write a human-editable Markdown profile memory file."""
+
+    path = profile_memory_path()
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    human_notes = extract_human_notes(existing)
+    evidence = build_profile_evidence(store, limit=20)
+    rules = store.list_profile_rules()
+    generated = "\n".join(
+        [
+            "## Profile Status",
+            "",
+            "This file is editable. Tonepath uses it as LLM/Codex context only; selector behavior changes only after a validated suggestion is applied.",
+            "",
+            "## Local Summary",
+            "",
+            markdown_kv_table(evidence.get("summary")),
+            "",
+            "## Active Rules",
+            "",
+            markdown_rule_table(rules),
+            "",
+            "## Pending Suggestions",
+            "",
+            markdown_suggestion_table(list_pending_suggestions()),
+            "",
+            "## Recent Feedback Evidence",
+            "",
+            markdown_feedback_table(evidence),
+        ]
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(markdown_document("Tonepath Profile Memory", generated, human_notes), encoding="utf-8")
+    return path
+
+
+def write_profile_evidence_markdown(
+    evidence: dict[str, object], rules: list[ProfileRule] | None = None, pending_suggestions: list[dict[str, object]] | None = None
+) -> Path:
+    """Write a human-readable Markdown evidence snapshot."""
+
+    run_id = str(evidence["run_id"])
+    latest_path = profile_evidence_latest_path()
+    existing = latest_path.read_text(encoding="utf-8") if latest_path.exists() else ""
+    human_notes = extract_human_notes(existing)
+    generated = "\n".join(
+        [
+            "## Privacy Boundary",
+            "",
+            markdown_kv_table(evidence.get("privacy")),
+            "",
+            "## Local Summary",
+            "",
+            markdown_kv_table(evidence.get("summary")),
+            "",
+            "## Active Rules",
+            "",
+            markdown_rule_table(rules or []),
+            "",
+            "## Pending Suggestions",
+            "",
+            markdown_suggestion_table(pending_suggestions or []),
+            "",
+            "## Recent Feedback Events",
+            "",
+            markdown_feedback_table(evidence),
+            "",
+            "## LLM Instructions",
+            "",
+            "- Suggest profile rules only when supported by the evidence above or explicit human notes.",
+            "- Do not invent BPM, vocalness, genre, mood, artist facts, or track facts.",
+            "- Return structured suggestions; Markdown is context, not an executable rule.",
+        ]
+    )
+    text = markdown_document("Tonepath Profile Evidence", generated, human_notes)
+    latest_path.parent.mkdir(parents=True, exist_ok=True)
+    latest_path.write_text(text, encoding="utf-8")
+    archive_path = profile_evidence_dir() / f"{run_id}.md"
+    archive_path.write_text(text, encoding="utf-8")
+    return latest_path
+
+
+def profile_data_dir() -> Path:
+    """Return the local profile Markdown directory."""
+
+    return config.ensure_data_dir() / "profile"
+
+
+def profile_memory_path() -> Path:
+    """Return the human-editable profile memory path."""
+
+    return profile_data_dir() / "memory.md"
+
+
+def profile_evidence_dir() -> Path:
+    """Return the profile Markdown evidence directory."""
+
+    return profile_data_dir() / "evidence"
+
+
+def profile_evidence_latest_path() -> Path:
+    """Return the latest profile Markdown evidence path."""
+
+    return profile_evidence_dir() / "latest.md"
+
+
 def profile_cache_dir(run_id: str) -> Path:
     """Return the cache directory for one profile suggestion run."""
 
@@ -203,7 +315,7 @@ def deterministic_suggestions(evidence: dict[str, object]) -> list[dict[str, obj
     return suggestions
 
 
-def suggest_with_llm(evidence: dict[str, object], provider: str | None = None) -> list[dict[str, object]]:
+def suggest_with_llm(evidence: dict[str, object], provider: str | None = None, memory_context: str | None = None) -> list[dict[str, object]]:
     """Ask an opt-in LLM for profile suggestions from a safe evidence pack."""
 
     settings = provider_config(provider)
@@ -219,10 +331,17 @@ def suggest_with_llm(evidence: dict[str, object], provider: str | None = None) -
                 "content": (
                     "You summarize Tonepath user listening feedback into strict JSON only. "
                     "Do not invent audio facts, track facts, genre, mood, BPM, or vocalness. "
-                    "Use only the provided evidence. Output an object with a suggestions array."
+                    "Use only the provided evidence. Output an object with a suggestions array. "
+                    "If focus feedback includes too-loud feedback and known loudness, suggest prefer_lower_loudness. "
+                    "If a no-vocals or focus context includes a liked low-vocalness track, suggest prefer_lower_vocalness. "
+                    "If focus feedback skips tracks with BPM >= 135, suggest demote_high_bpm. "
+                    "Weak evidence may produce low-confidence suggestions, but never invent missing fields. "
+                    "Each suggestion must include suggestion_id, scope, rule_type, target, threshold, weight, "
+                    "confidence, rationale, and evidence_count. Supported rule_type values are: "
+                    "prefer_lower_loudness, prefer_lower_energy, prefer_lower_vocalness, demote_high_bpm, prefer_artist."
                 ),
             },
-            {"role": "user", "content": json.dumps(evidence, ensure_ascii=False)},
+            {"role": "user", "content": llm_profile_payload(evidence, memory_context)},
         ],
         "response_format": {"type": "json_object"},
     }
@@ -244,7 +363,7 @@ def suggest_with_llm(evidence: dict[str, object], provider: str | None = None) -
     return sanitize_suggestions(parsed.get("suggestions"), source=f"llm-{settings.provider}")
 
 
-def run_codex_profile_suggest(evidence_path: Path, web: bool = False) -> dict[str, object]:
+def run_codex_profile_suggest(evidence_path: Path, web: bool = False, memory_paths: list[Path] | None = None) -> dict[str, object]:
     """Run Codex against one profile evidence pack."""
 
     codex = shutil.which("codex")
@@ -270,7 +389,7 @@ def run_codex_profile_suggest(evidence_path: Path, web: bool = False) -> dict[st
     )
     subprocess.run(
         command,
-        input=profile_codex_prompt(evidence_path, web=web),
+        input=profile_codex_prompt(evidence_path, web=web, memory_paths=memory_paths),
         text=True,
         check=True,
         stdout=subprocess.PIPE,
@@ -320,6 +439,32 @@ def find_pending_suggestion(suggestion_id: str) -> dict[str, object] | None:
             if isinstance(suggestion_item, dict) and suggestion_item.get("suggestion_id") == suggestion_id:
                 return suggestion_item
     return None
+
+
+def list_pending_suggestions() -> list[dict[str, object]]:
+    """Return pending profile suggestions from the local cache."""
+
+    root = config.ensure_data_dir() / "cache" / "profile"
+    if not root.exists():
+        return []
+    pending: list[dict[str, object]] = []
+    for path in sorted(root.glob("*/suggestions.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        suggestions = payload.get("suggestions")
+        if not isinstance(suggestions, list):
+            continue
+        for suggestion_item in suggestions:
+            if isinstance(suggestion_item, dict):
+                pending.append(suggestion_item)
+    return pending
+
+
+def delete_profile_markdown() -> None:
+    """Delete local human-editable profile Markdown files."""
+
+    root = profile_data_dir()
+    if root.exists():
+        shutil.rmtree(root)
 
 
 def rule_from_suggestion(payload: dict[str, object]) -> ProfileRule:
@@ -402,16 +547,32 @@ def suggestion(
     )
 
 
-def profile_codex_prompt(evidence_path: Path, web: bool) -> str:
+def llm_profile_payload(evidence: dict[str, object], memory_context: str | None) -> str:
+    """Return the user message payload for LLM profile suggestion."""
+
+    if memory_context is None:
+        return json.dumps(evidence, ensure_ascii=False)
+    return json.dumps(
+        {
+            "profile_evidence_json": evidence,
+            "profile_memory_markdown": memory_context,
+        },
+        ensure_ascii=False,
+    )
+
+
+def profile_codex_prompt(evidence_path: Path, web: bool, memory_paths: list[Path] | None = None) -> str:
     """Return the prompt passed to Codex for profile suggestion."""
 
     web_line = "Web search is allowed only for public music context." if web else "Do not use web search."
+    memory_lines = [f"Markdown context path: {path}" for path in memory_paths or []]
     return "\n".join(
         [
             "<task>",
             "Suggest Tonepath profile rules from the local profile evidence pack.",
             f"Skill path: {profile_skill_path()}",
             f"Evidence pack path: {evidence_path}",
+            *memory_lines,
             web_line,
             "</task>",
             "<output_contract>",
@@ -438,6 +599,158 @@ def package_resource_path(*parts: str) -> Path:
     """Return a packaged Tonepath resource path."""
 
     return Path(str(resources.files("tonepath").joinpath(*parts)))
+
+
+def memory_context_text(paths: list[Path]) -> str:
+    """Return Markdown memory context from existing local paths."""
+
+    parts: list[str] = []
+    for path in paths:
+        if path.exists():
+            parts.append(f"<!-- source: {path.name} -->\n{path.read_text(encoding='utf-8')}")
+    return "\n\n".join(parts)
+
+
+def markdown_document(title: str, generated: str, human_notes: str) -> str:
+    """Return a Markdown document with generated and human-editable sections."""
+
+    notes = human_notes.strip() or DEFAULT_HUMAN_NOTES
+    return "\n".join(
+        [
+            f"# {title}",
+            "",
+            GENERATED_START,
+            generated.rstrip(),
+            GENERATED_END,
+            "",
+            "## Human Notes",
+            "",
+            HUMAN_NOTES_START,
+            notes,
+            HUMAN_NOTES_END,
+            "",
+        ]
+    )
+
+
+def extract_human_notes(text: str) -> str:
+    """Extract preserved human notes from a generated Markdown document."""
+
+    start_marker = text.find(HUMAN_NOTES_START)
+    if start_marker == -1:
+        return DEFAULT_HUMAN_NOTES
+    start = start_marker + len(HUMAN_NOTES_START)
+    end = text.find(HUMAN_NOTES_END, start)
+    if end == -1:
+        return DEFAULT_HUMAN_NOTES
+    return text[start:end].strip() or DEFAULT_HUMAN_NOTES
+
+
+def markdown_kv_table(value: object) -> str:
+    """Render a simple key/value object as a Markdown table."""
+
+    if not isinstance(value, dict) or not value:
+        return "_No data yet._"
+    rows = ["| Key | Value |", "|---|---|"]
+    for key in sorted(value):
+        rows.append(f"| {markdown_cell(key)} | {markdown_cell(value[key])} |")
+    return "\n".join(rows)
+
+
+def markdown_rule_table(rules: list[ProfileRule]) -> str:
+    """Render active profile rules as a Markdown table."""
+
+    if not rules:
+        return "_No active profile rules._"
+    rows = ["| Rule | Scope | Source | Confidence | Rationale |", "|---|---|---|---|---|"]
+    for rule in rules:
+        payload = json.loads(rule.value)
+        rows.append(
+            "| "
+            + " | ".join(
+                [
+                    markdown_cell(payload.get("rule_type")),
+                    markdown_cell(payload.get("scope")),
+                    markdown_cell(rule.source),
+                    markdown_cell(rule.confidence),
+                    markdown_cell(payload.get("rationale")),
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(rows)
+
+
+def markdown_suggestion_table(suggestions: list[dict[str, object]]) -> str:
+    """Render pending profile suggestions as a Markdown table."""
+
+    if not suggestions:
+        return "_No pending profile suggestions._"
+    rows = ["| Suggestion | Scope | Rule | Source | Confidence | Rationale |", "|---|---|---|---|---|---|"]
+    for item in suggestions[:20]:
+        rows.append(
+            "| "
+            + " | ".join(
+                [
+                    markdown_cell(item.get("suggestion_id")),
+                    markdown_cell(item.get("scope")),
+                    markdown_cell(item.get("rule_type")),
+                    markdown_cell(item.get("source")),
+                    markdown_cell(item.get("confidence")),
+                    markdown_cell(item.get("rationale")),
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(rows)
+
+
+def markdown_feedback_table(evidence: dict[str, object]) -> str:
+    """Render profile evidence feedback events as a Markdown table."""
+
+    events = [event for event in evidence.get("feedback_events", []) if isinstance(event, dict)]
+    if not events:
+        return "_Not enough feedback yet._"
+    rows = ["| Feedback | Prompt | Track | BPM | Loudness | Energy | Vocalness | Source |", "|---|---|---|---:|---:|---:|---:|---|"]
+    for event in events[-20:]:
+        track = event.get("track") if isinstance(event.get("track"), dict) else {}
+        features = track.get("features") if isinstance(track, dict) and isinstance(track.get("features"), dict) else {}
+        rows.append(
+            "| "
+            + " | ".join(
+                [
+                    markdown_cell(event.get("feedback_type")),
+                    markdown_cell(event.get("prompt")),
+                    markdown_cell(track.get("label") if isinstance(track, dict) else None),
+                    markdown_number(features.get("bpm") if isinstance(features, dict) else None),
+                    markdown_number(features.get("loudness") if isinstance(features, dict) else None),
+                    markdown_number(features.get("energy") if isinstance(features, dict) else None),
+                    markdown_number(features.get("vocalness") if isinstance(features, dict) else None),
+                    markdown_cell(features.get("source") if isinstance(features, dict) else None),
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(rows)
+
+
+def markdown_cell(value: object) -> str:
+    """Return a safe Markdown table cell."""
+
+    if value is None:
+        return "--"
+    return str(value).replace("\n", " ").replace("|", "\\|")
+
+
+def markdown_number(value: object) -> str:
+    """Return a compact Markdown number value."""
+
+    if value is None:
+        return "--"
+    try:
+        return f"{float(value):.3g}"
+    except (TypeError, ValueError):
+        return markdown_cell(value)
 
 
 def feature_value(event: dict[str, object], field: str) -> object | None:

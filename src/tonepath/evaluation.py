@@ -26,11 +26,15 @@ from tonepath.planner import parse_request, plan_session, request_constraints
 from tonepath.selector import select_path
 
 
-def evaluate_selection(store: TonepathStore, prompt: str, limit: int) -> list[dict[str, object]]:
+def evaluate_selection(store: TonepathStore, prompt: str, limit: int, profile_enabled: bool = True) -> dict[str, object]:
     """Return stable selection-evaluation rows without writing profile state."""
 
     plan = plan_session(prompt)
-    return [candidate_to_eval_row(store, candidate) for candidate in eval_candidates(store, plan, limit)]
+    return {
+        "prompt": prompt,
+        "profile_enabled": profile_enabled,
+        "candidates": [candidate_to_eval_row(store, candidate) for candidate in eval_candidates(store, plan, limit, profile_enabled=profile_enabled)],
+    }
 
 
 def evaluate_audit(store: TonepathStore, prompt: str, limit: int) -> dict[str, object]:
@@ -315,11 +319,11 @@ def suggested_action(decision: str) -> str:
     return "keep original position"
 
 
-def eval_candidates(store: TonepathStore, plan: SessionPlan, limit: int) -> list[CandidateScore]:
+def eval_candidates(store: TonepathStore, plan: SessionPlan, limit: int, profile_enabled: bool = True) -> list[CandidateScore]:
     """Return a small balanced candidate set for evaluation output."""
 
     per_phase = max(1, math.ceil(limit / max(len(plan.phases), 1)))
-    return select_path(store, plan, limit_per_phase=per_phase)[:limit]
+    return select_path(store, plan, limit_per_phase=per_phase, profile_enabled=profile_enabled)[:limit]
 
 
 def candidate_to_eval_row(store: TonepathStore, candidate: CandidateScore) -> dict[str, object]:

@@ -36,11 +36,18 @@ from tonepath.playback_controller import PlaybackController
 from tonepath.profile import (
     apply_suggestion,
     build_profile_evidence,
+    delete_profile_markdown,
     deterministic_suggestions,
+    list_pending_suggestions,
+    memory_context_text,
+    profile_evidence_latest_path,
+    profile_memory_path,
     run_codex_profile_suggest,
     save_suggestions,
     suggest_with_llm,
     write_profile_evidence,
+    write_profile_evidence_markdown,
+    write_profile_memory,
 )
 from tonepath.privacy import delete_profile, privacy_status
 from tonepath.scanner import scan_directory
@@ -53,6 +60,8 @@ app = typer.Typer(help="Local-first music state-transition agent.")
 config_app = typer.Typer(help="Manage local config.")
 feedback_app = typer.Typer(help="Record local feedback.")
 profile_app = typer.Typer(help="Inspect, export, or delete local profile data.")
+profile_memory_app = typer.Typer(help="Manage human-editable profile memory.")
+profile_evidence_app = typer.Typer(help="Manage human-readable profile evidence.")
 privacy_app = typer.Typer(help="Inspect local privacy status.")
 explain_app = typer.Typer(help="Explain selections.")
 eval_app = typer.Typer(help="Evaluate local selection quality.")
@@ -63,6 +72,8 @@ llm_app = typer.Typer(help="Inspect optional LLM integrations.")
 app.add_typer(config_app, name="config")
 app.add_typer(feedback_app, name="feedback")
 app.add_typer(profile_app, name="profile")
+profile_app.add_typer(profile_memory_app, name="memory")
+profile_app.add_typer(profile_evidence_app, name="evidence")
 app.add_typer(privacy_app, name="privacy")
 app.add_typer(explain_app, name="explain")
 app.add_typer(eval_app, name="eval")
@@ -528,21 +539,30 @@ def eval_selection(
     prompt: Annotated[str, typer.Argument(help="State transition prompt to evaluate.")],
     limit: Annotated[int, typer.Option("--limit", help="Maximum number of candidates to print.")] = 8,
     json_output: Annotated[bool, typer.Option("--json", help="Print stable JSON for comparison.")] = False,
+    with_profile: Annotated[bool, typer.Option("--with-profile", help="Evaluate using active profile rules.")] = False,
+    no_profile: Annotated[bool, typer.Option("--no-profile", help="Evaluate with profile rules disabled.")] = False,
 ) -> None:
     """Evaluate selection candidates without playback or profile writes."""
 
     if limit <= 0:
         raise typer.BadParameter("--limit must be greater than zero")
+    if with_profile and no_profile:
+        raise typer.BadParameter("Choose only one of --with-profile or --no-profile.")
+    profile_enabled = not no_profile
     store = TonepathStore()
     try:
-        payload = evaluate_selection(store, prompt, limit)
+        payload = evaluate_selection(store, prompt, limit, profile_enabled=profile_enabled)
     finally:
         store.close()
 
     if json_output:
         print_json_payload(payload)
         return
-    render_eval_table(payload)
+    console.print(f"Profile: {'enabled' if profile_enabled else 'disabled'}")
+    candidates = payload["candidates"]
+    if not isinstance(candidates, list):
+        raise TypeError("Selection evaluation payload must include candidate rows.")
+    render_eval_table(candidates)
 
 
 @eval_app.command("suite")
@@ -707,13 +727,26 @@ def profile_inspect(json_output: Annotated[bool, typer.Option("--json", help="Pr
     summary = store.profile_summary()
     rules = store.list_profile_rules()
     store.close()
+    memory_path = profile_memory_path()
+    evidence_path = profile_evidence_latest_path()
+    pending = list_pending_suggestions()
     if json_output:
-        print_json_payload({"summary": summary, "rules": [json.loads(rule.value) for rule in rules]})
+        print_json_payload(
+            {
+                "summary": summary,
+                "rules": [json.loads(rule.value) for rule in rules],
+                "pending_suggestions": pending,
+                "memory": {"path": str(memory_path), "exists": memory_path.exists()},
+                "evidence": {"path": str(evidence_path), "exists": evidence_path.exists()},
+            }
+        )
         return
     table = Table("Table", "Rows")
     for key, value in summary.items():
         table.add_row(key, str(value))
     console.print(table)
+    console.print(f"Profile memory: {memory_path} ({'exists' if memory_path.exists() else 'missing'})")
+    console.print(f"Profile evidence: {evidence_path} ({'exists' if evidence_path.exists() else 'missing'})")
     if rules:
         rule_table = Table("Rule", "Source", "Confidence", "Rationale", box=box.SIMPLE)
         for rule in rules:
@@ -722,6 +755,42 @@ def profile_inspect(json_output: Annotated[bool, typer.Option("--json", help="Pr
         console.print(rule_table)
     else:
         console.print("No active profile rules.")
+    if pending:
+        pending_table = Table("Suggestion", "Rule", "Source", "Confidence", box=box.SIMPLE)
+        for item in pending[:10]:
+            pending_table.add_row(
+                str(item.get("suggestion_id", "--")),
+                str(item.get("rule_type", "--")),
+                str(item.get("source", "--")),
+                str(item.get("confidence", "--")),
+            )
+        console.print(pending_table)
+
+
+@profile_memory_app.command("write")
+def profile_memory_write() -> None:
+    """Write or refresh the human-editable profile memory Markdown file."""
+
+    store = TonepathStore()
+    try:
+        path = write_profile_memory(store)
+    finally:
+        store.close()
+    console.print(f"Profile memory written: {path}")
+
+
+@profile_evidence_app.command("write")
+def profile_evidence_write() -> None:
+    """Write a human-readable profile evidence Markdown snapshot."""
+
+    store = TonepathStore()
+    try:
+        evidence = build_profile_evidence(store)
+        rules = store.list_profile_rules()
+    finally:
+        store.close()
+    path = write_profile_evidence_markdown(evidence, rules=rules, pending_suggestions=list_pending_suggestions())
+    console.print(f"Profile evidence written: {path}")
 
 
 @profile_app.command("export")
@@ -736,6 +805,7 @@ def profile_export() -> None:
 def profile_suggest(
     use_llm: Annotated[bool, typer.Option("--llm", help="Use configured DeepSeek/Qwen LLM to suggest profile rules.")] = False,
     use_codex: Annotated[bool, typer.Option("--codex", help="Use Codex to suggest profile rules from local evidence.")] = False,
+    use_memory: Annotated[bool, typer.Option("--memory", help="Include editable Markdown profile memory/evidence as context.")] = False,
     provider: Annotated[str | None, typer.Option(help="LLM provider: deepseek or qwen.")] = None,
     confirm: Annotated[bool, typer.Option("--confirm", help="Confirm sending a privacy-safe evidence summary to the LLM.")] = False,
     web: Annotated[bool, typer.Option("--web", help="Allow Codex web search for public music context.")] = False,
@@ -744,25 +814,36 @@ def profile_suggest(
 
     if use_llm and use_codex:
         raise typer.BadParameter("Choose only one of --llm or --codex.")
+    settings = tonepath_config.load_config()
+    if use_llm and not confirm and not settings.privacy.send_to_llm:
+        raise typer.BadParameter("profile suggest --llm requires --confirm or privacy.send_to_llm = true.")
     store = TonepathStore()
     try:
         evidence = build_profile_evidence(store)
+        rules = store.list_profile_rules()
+        memory_path = write_profile_memory(store) if use_memory else None
     finally:
         store.close()
     evidence_path = write_profile_evidence(evidence)
-    settings = tonepath_config.load_config()
-    if use_llm:
-        if not confirm and not settings.privacy.send_to_llm:
-            raise typer.BadParameter("profile suggest --llm requires --confirm or privacy.send_to_llm = true.")
-        suggestions = suggest_with_llm(evidence, provider=provider)
-        source = "llm"
-    elif use_codex:
-        payload = run_codex_profile_suggest(evidence_path, web=web)
-        suggestions = payload["suggestions"]
-        source = "codex"
-    else:
-        suggestions = deterministic_suggestions(evidence)
-        source = "deterministic"
+    memory_paths: list[Path] = []
+    memory_context = None
+    if use_memory:
+        evidence_markdown_path = write_profile_evidence_markdown(evidence, rules=rules, pending_suggestions=list_pending_suggestions())
+        memory_paths = [path for path in (memory_path, evidence_markdown_path) if path is not None]
+        memory_context = memory_context_text(memory_paths)
+    try:
+        if use_llm:
+            suggestions = suggest_with_llm(evidence, provider=provider, memory_context=memory_context)
+            source = "llm"
+        elif use_codex:
+            payload = run_codex_profile_suggest(evidence_path, web=web, memory_paths=memory_paths)
+            suggestions = payload["suggestions"]
+            source = "codex"
+        else:
+            suggestions = deterministic_suggestions(evidence)
+            source = "deterministic"
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     suggestions_path = save_suggestions(evidence, suggestions, source=source)
     render_profile_suggestions(suggestions, evidence_path, suggestions_path)
 
@@ -787,7 +868,11 @@ def profile_delete(all_data: Annotated[bool, typer.Option("--all", help="Delete 
         console.print("Pass --all to confirm profile deletion.")
         raise typer.Exit(code=1)
     store = TonepathStore()
-    delete_profile(store)
+    try:
+        delete_profile(store)
+    finally:
+        store.close()
+    delete_profile_markdown()
     console.print("Deleted local profile, feedback, play, and session data.")
 
 

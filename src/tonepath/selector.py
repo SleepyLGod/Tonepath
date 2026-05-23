@@ -25,11 +25,12 @@ def select_path(
     plan: SessionPlan,
     limit_per_phase: int = 2,
     excluded_track_ids: set[int] | None = None,
+    profile_enabled: bool = True,
 ) -> list[CandidateScore]:
     """Select tracks for every phase in a session plan."""
 
     tracks = store.list_tracks()
-    profile_rules = store.list_profile_rules()
+    profile_rules = store.list_profile_rules() if profile_enabled else []
     selected: list[CandidateScore] = []
     used_ids: set[int] = set(excluded_track_ids or set())
     used_keys = {canonical_track_key(track) for track in tracks if track.id in used_ids}
@@ -57,7 +58,11 @@ def select_path(
 
 
 def score_track(
-    store: TonepathStore, track: Track, phase: SessionPhase, profile_rules: list[ProfileRule] | None = None
+    store: TonepathStore,
+    track: Track,
+    phase: SessionPhase,
+    profile_rules: list[ProfileRule] | None = None,
+    profile_enabled: bool = True,
 ) -> CandidateScore:
     """Score one track against one phase using explainable components."""
 
@@ -135,9 +140,11 @@ def score_track(
     if feedback:
         reasons.append("previous local feedback adjusted the score")
 
-    profile_delta, profile_reasons = profile_rule_adjustment(profile_rules if profile_rules is not None else store.list_profile_rules(), track, features, phase)
-    score += profile_delta
-    reasons.extend(profile_reasons)
+    if profile_enabled:
+        active_rules = profile_rules if profile_rules is not None else store.list_profile_rules()
+        profile_delta, profile_reasons = profile_rule_adjustment(active_rules, track, features, phase)
+        score += profile_delta
+        reasons.extend(profile_reasons)
 
     if track.duration:
         score += 0.2

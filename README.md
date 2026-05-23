@@ -289,6 +289,16 @@ uv run tonepath privacy status
 uv run tonepath profile inspect
 ```
 
+Write human-editable profile memory and evidence Markdown:
+
+```bash
+uv run tonepath profile memory write
+uv run tonepath profile evidence write
+uv run tonepath profile suggest --llm --memory --confirm
+```
+
+Markdown profile files are local context for you and optional LLM/Codex suggestions. They do not directly change selection; only validated suggestions applied through `profile apply` become active profile rules.
+
 Delete local profile, session, feedback, and play data while keeping scanned tracks:
 
 ```bash

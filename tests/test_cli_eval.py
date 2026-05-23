@@ -20,7 +20,7 @@ from tonepath.evaluation import (
     evaluate_rerank,
     evaluate_suite,
 )
-from tonepath.models import Track, TrackFeatures
+from tonepath.models import ProfileRule, Track, TrackFeatures
 
 
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -56,12 +56,14 @@ class CliEvalTest(unittest.TestCase):
 
                 self.assertEqual(result.exit_code, 0, result.output)
                 payload = json.loads(result.output)
-                self.assertEqual(payload[0]["phase"], "decompress")
-                self.assertEqual(payload[0]["track"]["title"], "quiet")
-                self.assertEqual(payload[0]["features"]["source"], "model-audio-separator")
-                self.assertEqual(payload[0]["features"]["confidence"], "high")
-                self.assertEqual(payload[0]["features"]["vocalness"], 0.18)
-                self.assertIn("vocalness feature supports no-vocals constraint", payload[0]["reasons"])
+                self.assertTrue(payload["profile_enabled"])
+                row = payload["candidates"][0]
+                self.assertEqual(row["phase"], "decompress")
+                self.assertEqual(row["track"]["title"], "quiet")
+                self.assertEqual(row["features"]["source"], "model-audio-separator")
+                self.assertEqual(row["features"]["confidence"], "high")
+                self.assertEqual(row["features"]["vocalness"], 0.18)
+                self.assertIn("vocalness feature supports no-vocals constraint", row["reasons"])
 
     def test_eval_selection_does_not_write_profile_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -90,10 +92,69 @@ class CliEvalTest(unittest.TestCase):
 
                 self.assertEqual(result.exit_code, 0, result.output)
                 payload = json.loads(result.output)
-                self.assertIsNone(payload[0]["features"]["source"])
-                self.assertIsNone(payload[0]["features"]["energy"])
-                self.assertIsNone(payload[0]["features"]["bpm"])
-                self.assertIsNone(payload[0]["features"]["vocalness"])
+                row = payload["candidates"][0]
+                self.assertIsNone(row["features"]["source"])
+                self.assertIsNone(row["features"]["energy"])
+                self.assertIsNone(row["features"]["bpm"])
+                self.assertIsNone(row["features"]["vocalness"])
+
+    def test_eval_selection_can_disable_profile_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                track_id = store.upsert_track(track_for(Path(tmp) / "quiet.mp3", title="quiet", genre="ambient"))
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id=track_id,
+                        energy=0.24,
+                        loudness=-18.2,
+                        bpm=84.0,
+                        vocalness=0.18,
+                        feature_source="model-essentia-voice-instrumental",
+                        confidence="high",
+                    )
+                )
+                store.upsert_profile_rule(
+                    ProfileRule(
+                        id=None,
+                        key="global:prefer_lower_loudness:loudness",
+                        value=json.dumps(
+                            {
+                                "scope": "global",
+                                "rule_type": "prefer_lower_loudness",
+                                "target": "loudness",
+                                "threshold": -12.0,
+                                "weight": 0.7,
+                                "confidence": "medium",
+                                "source": "test",
+                                "rationale": "focus prefers quieter tracks",
+                                "evidence_count": 1,
+                            }
+                        ),
+                        source="test",
+                        confidence="medium",
+                    )
+                )
+                store.close()
+
+                with_profile = CliRunner().invoke(app, ["eval", "selection", "focus 30m", "--json", "--with-profile"])
+                no_profile = CliRunner().invoke(app, ["eval", "selection", "focus 30m", "--json", "--no-profile"])
+
+                self.assertEqual(with_profile.exit_code, 0, with_profile.output)
+                self.assertEqual(no_profile.exit_code, 0, no_profile.output)
+                with_payload = json.loads(with_profile.output)
+                no_payload = json.loads(no_profile.output)
+                self.assertTrue(with_payload["profile_enabled"])
+                self.assertFalse(no_payload["profile_enabled"])
+                self.assertNotEqual(with_payload["candidates"][0]["score"], no_payload["candidates"][0]["score"])
+                self.assertTrue(any("profile rule:" in reason for reason in with_payload["candidates"][0]["reasons"]))
+                self.assertFalse(any("profile rule:" in reason for reason in no_payload["candidates"][0]["reasons"]))
+
+    def test_eval_selection_rejects_conflicting_profile_flags(self) -> None:
+        result = CliRunner().invoke(app, ["eval", "selection", "focus 30m", "--with-profile", "--no-profile"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Choose only one", result.output)
 
     def test_eval_selection_rejects_non_positive_limit(self) -> None:
         result = CliRunner().invoke(app, ["eval", "selection", "focus 30m", "--limit", "0"])
