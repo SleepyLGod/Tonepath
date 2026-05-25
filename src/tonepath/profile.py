@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import urllib.error
@@ -424,25 +425,126 @@ def apply_suggestion(store: TonepathStore, suggestion_id: str) -> ProfileRule:
     return rule
 
 
+def apply_suggestion_group(store: TonepathStore, group_id: str) -> dict[str, object]:
+    """Apply every suggestion in one derived profile suggestion group."""
+
+    group = find_suggestion_group(group_id)
+    if group is None:
+        raise RuntimeError(f"No profile suggestion group found for {group_id}.")
+    active_keys = {rule.key for rule in store.list_profile_rules()}
+    applied: list[str] = []
+    skipped: list[str] = []
+    records = group.get("_records")
+    if not isinstance(records, list):
+        raise RuntimeError(f"Profile suggestion group {group_id} is malformed.")
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        suggestion_id = str(record.get("suggestion_id", "--"))
+        rule_key = str(record.get("_rule_key") or "")
+        if rule_key in active_keys:
+            skipped.append(suggestion_id)
+            continue
+        rule = rule_from_suggestion(record)
+        store.upsert_profile_rule(rule)
+        active_keys.add(rule.key)
+        applied.append(suggestion_id)
+    return {
+        "group_id": group_id,
+        "scope": group.get("scope", "global"),
+        "applied": applied,
+        "skipped": skipped,
+    }
+
+
 def find_pending_suggestion(suggestion_id: str) -> dict[str, object] | None:
     """Find one pending suggestion in the local profile cache."""
 
-    for suggestion_item in list_pending_suggestions():
+    for suggestion_item in suggestion_cache_records(include_applied=False):
         if suggestion_item.get("suggestion_id") == suggestion_id:
-            return suggestion_item
+            return public_suggestion(suggestion_item)
     return None
 
 
 def list_pending_suggestions() -> list[dict[str, object]]:
     """Return unapplied profile suggestions from the local cache."""
 
+    return [public_suggestion(item) for item in suggestion_cache_records(include_applied=False)]
+
+
+def pending_suggestion_groups() -> list[dict[str, object]]:
+    """Return unapplied profile suggestions grouped for safer review."""
+
+    return public_suggestion_groups(include_applied=False)
+
+
+def find_suggestion_group(group_id: str) -> dict[str, object] | None:
+    """Find one suggestion group, including already-applied suggestions."""
+
+    for group in suggestion_groups(include_applied=True):
+        if group.get("group_id") == group_id:
+            return group
+    return None
+
+
+def public_suggestion_groups(include_applied: bool) -> list[dict[str, object]]:
+    """Return suggestion groups without internal record payloads."""
+
+    public: list[dict[str, object]] = []
+    for group in suggestion_groups(include_applied=include_applied):
+        public.append({key: value for key, value in group.items() if key != "_records"})
+    return public
+
+
+def suggestion_groups(include_applied: bool) -> list[dict[str, object]]:
+    """Group profile suggestions by suggestion run and scope."""
+
+    grouped: dict[tuple[str, str], list[dict[str, object]]] = {}
+    for record in suggestion_cache_records(include_applied=include_applied):
+        run_id = str(record.get("_run_id") or "")
+        scope = str(record.get("scope") or "global")
+        grouped.setdefault((run_id, scope), []).append(record)
+
+    groups: list[dict[str, object]] = []
+    used_ids: set[str] = set()
+    for (run_id, scope), records in grouped.items():
+        base_id = profile_group_id(scope)
+        group_id = unique_group_id(base_id, used_ids)
+        used_ids.add(group_id)
+        rule_types = [str(item.get("rule_type", "--")) for item in records]
+        rationale_parts = [str(item.get("rationale", "")).strip() for item in records if str(item.get("rationale", "")).strip()]
+        groups.append(
+            {
+                "group_id": group_id,
+                "run_id": run_id,
+                "scope": scope,
+                "source": str(records[0].get("_source") or "--"),
+                "suggestion_ids": [str(item.get("suggestion_id", "--")) for item in records],
+                "rules": rule_types,
+                "confidence": group_confidence(records),
+                "evidence_count": sum(int_or_default(item.get("evidence_count"), 0) for item in records),
+                "rationale": " ".join(rationale_parts[:2]),
+                "hint": group_hint(set(rule_types), scope),
+                "apply_command": f"uv run tonepath profile apply-group {group_id}",
+                "_records": records,
+            }
+        )
+    return groups
+
+
+def suggestion_cache_records(include_applied: bool) -> list[dict[str, object]]:
+    """Return normalized suggestion cache records with run metadata."""
+
     root = config.ensure_data_dir() / "cache" / "profile"
     if not root.exists():
         return []
     applied_keys = applied_profile_rule_keys()
-    pending: list[dict[str, object]] = []
+    records: list[dict[str, object]] = []
     for path in sorted(root.glob("*/suggestions.json"), key=lambda item: item.stat().st_mtime, reverse=True):
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
         suggestions = payload.get("suggestions")
         if not isinstance(suggestions, list):
             continue
@@ -450,9 +552,59 @@ def list_pending_suggestions() -> list[dict[str, object]]:
             if not isinstance(suggestion_item, dict):
                 continue
             key = suggestion_rule_key(suggestion_item)
-            if key is not None and key not in applied_keys:
-                pending.append(suggestion_item)
-    return pending
+            if key is None or (not include_applied and key in applied_keys):
+                continue
+            clean = sanitize_suggestion(suggestion_item, source=str(suggestion_item.get("source") or payload.get("source") or "profile-suggestion"))
+            clean["_run_id"] = str(payload.get("run_id") or path.parent.name)
+            clean["_source"] = str(payload.get("source") or clean.get("source") or "profile-suggestion")
+            clean["_rule_key"] = key
+            clean["_mtime"] = path.stat().st_mtime
+            records.append(clean)
+    return records
+
+
+def public_suggestion(record: dict[str, object]) -> dict[str, object]:
+    """Return a suggestion payload without internal cache metadata."""
+
+    return {key: value for key, value in record.items() if not key.startswith("_")}
+
+
+def profile_group_id(scope: str) -> str:
+    """Return a stable readable suggestion group id for a scope."""
+
+    slug = re.sub(r"[^a-z0-9]+", "-", scope.lower()).strip("-") or "global"
+    return f"{slug}-profile-group"
+
+
+def unique_group_id(base_id: str, used_ids: set[str]) -> str:
+    """Return a non-conflicting profile group id."""
+
+    if base_id not in used_ids:
+        return base_id
+    index = 2
+    while f"{base_id}-{index}" in used_ids:
+        index += 1
+    return f"{base_id}-{index}"
+
+
+def group_confidence(records: list[dict[str, object]]) -> str:
+    """Return the strongest confidence label in a suggestion group."""
+
+    rank = {"low": 0, "medium": 1, "high": 2}
+    best = "low"
+    for record in records:
+        confidence = str(record.get("confidence") or "low")
+        if rank.get(confidence, 0) > rank[best]:
+            best = confidence
+    return best
+
+
+def group_hint(rule_types: set[str], scope: str) -> str:
+    """Return a short safety hint for complementary profile rules."""
+
+    if {"prefer_lower_vocalness", "demote_high_bpm"}.issubset(rule_types):
+        return f"Apply together for low-vocal / low-stimulation {scope} preferences."
+    return ""
 
 
 def applied_profile_rule_keys() -> set[str]:

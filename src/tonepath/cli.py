@@ -43,6 +43,7 @@ from tonepath.playback import MpvAdapter
 from tonepath.playback_controller import PlaybackController
 from tonepath.profile import (
     active_rule_payload,
+    apply_suggestion_group,
     apply_suggestion,
     build_profile_evidence,
     delete_profile_markdown,
@@ -53,6 +54,7 @@ from tonepath.profile import (
     profile_learning_hint,
     profile_memory_path,
     profile_readiness,
+    pending_suggestion_groups,
     run_codex_profile_suggest,
     save_suggestions,
     suggest_with_llm,
@@ -762,6 +764,7 @@ def profile_inspect(json_output: Annotated[bool, typer.Option("--json", help="Pr
     memory_path = profile_memory_path()
     evidence_path = profile_evidence_latest_path()
     pending = list_pending_suggestions()
+    groups = pending_suggestion_groups()
     active_rules = [active_rule_payload(rule) for rule in rules]
     readiness = profile_readiness(summary, active_rules, pending)
     if json_output:
@@ -773,6 +776,7 @@ def profile_inspect(json_output: Annotated[bool, typer.Option("--json", help="Pr
                 # Keep the legacy "rules" alias for scripts written before active_rules existed.
                 "rules": active_rules,
                 "pending_suggestions": pending,
+                "suggestion_groups": groups,
                 "memory": {"path": str(memory_path), "exists": memory_path.exists()},
                 "evidence": {"path": str(evidence_path), "exists": evidence_path.exists()},
             }
@@ -817,6 +821,20 @@ def profile_inspect(json_output: Annotated[bool, typer.Option("--json", help="Pr
         first_id = pending[0].get("suggestion_id", "--")
         console.print(f"Apply a suggestion: uv run tonepath profile apply {first_id}")
         console.print(f"Suggestion rationale: {pending[0].get('rationale', '')}")
+    if groups:
+        group_table = Table("Group", "Scope", "Rules", "Confidence", "Evidence", "Apply", "Hint", box=box.SIMPLE, expand=True)
+        for group in groups[:10]:
+            rules_text = ", ".join(str(rule) for rule in group.get("rules", [])) if isinstance(group.get("rules"), list) else "--"
+            group_table.add_row(
+                str(group.get("group_id", "--")),
+                str(group.get("scope", "--")),
+                rules_text,
+                str(group.get("confidence", "--")),
+                str(group.get("evidence_count", "--")),
+                str(group.get("apply_command", "--")),
+                str(group.get("hint", "")),
+            )
+        console.print(group_table)
 
 
 @profile_memory_app.command("write")
@@ -910,6 +928,28 @@ def profile_apply(suggestion_id: Annotated[str, typer.Argument(help="Pending pro
     finally:
         store.close()
     console.print(f"Applied profile rule: {rule.key}")
+
+
+@profile_app.command("apply-group")
+def profile_apply_group(group_id: Annotated[str, typer.Argument(help="Pending profile suggestion group id to apply.")]) -> None:
+    """Apply every suggestion in one profile suggestion group."""
+
+    store = TonepathStore()
+    try:
+        result = apply_suggestion_group(store, group_id)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        store.close()
+    applied = result.get("applied", [])
+    skipped = result.get("skipped", [])
+    console.print(f"Profile suggestion group: {result['group_id']}")
+    if isinstance(applied, list) and applied:
+        console.print(f"Applied: {', '.join(str(item) for item in applied)}")
+    else:
+        console.print("Applied: none")
+    if isinstance(skipped, list) and skipped:
+        console.print(f"Skipped already active: {', '.join(str(item) for item in skipped)}")
 
 
 @profile_app.command("delete")
@@ -1252,6 +1292,10 @@ def render_eval_profile(payload: dict[str, object]) -> None:
     console.print(f"Profile comparison: {payload['prompt']}")
     console.print(str(payload["message"]))
     console.print(f"Active profile rules: {payload['active_rule_count']}")
+    warnings = payload.get("warnings", [])
+    if isinstance(warnings, list):
+        for warning in warnings:
+            console.print(f"Warning: {warning}")
     movements = payload.get("movements")
     if not isinstance(movements, list):
         raise TypeError("Profile comparison payload must include movements.")

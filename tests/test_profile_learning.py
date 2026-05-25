@@ -436,6 +436,53 @@ class ProfileLearningTest(unittest.TestCase):
                 self.assertNotIn("focus-lower-loudness", pending_ids)
                 self.assertIn("global-lower-vocalness", pending_ids)
 
+    def test_profile_inspect_shows_suggestion_group_apply_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                store, _ = populated_store(tmp, loudness=-13.0, bpm=90.0, vocalness=0.2)
+                evidence = build_profile_evidence(store)
+                save_suggestions(evidence, focus_group_suggestions(), "codex")
+                store.close()
+
+                result = CliRunner().invoke(app, ["profile", "inspect", "--json"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output)
+                group = payload["suggestion_groups"][0]
+                self.assertEqual(group["group_id"], "focus-profile-group")
+                self.assertEqual(group["rules"], ["prefer_lower_vocalness", "demote_high_bpm"])
+                self.assertEqual(group["apply_command"], "uv run tonepath profile apply-group focus-profile-group")
+                self.assertEqual(group["hint"], "Apply together for low-vocal / low-stimulation focus preferences.")
+
+    def test_profile_apply_group_applies_companion_rules_and_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                store, _ = populated_store(tmp, loudness=-13.0, bpm=90.0, vocalness=0.2)
+                evidence = build_profile_evidence(store)
+                save_suggestions(evidence, focus_group_suggestions(), "codex")
+                store.close()
+
+                result = CliRunner().invoke(app, ["profile", "apply-group", "focus-profile-group"])
+                self.assertEqual(result.exit_code, 0, result.output)
+                output = plain_output(result.output)
+                self.assertIn("Applied: focus-lower-vocalness, focus-demote-high-bpm", output)
+
+                inspect_result = CliRunner().invoke(app, ["profile", "inspect", "--json"])
+                self.assertEqual(inspect_result.exit_code, 0, inspect_result.output)
+                payload = json.loads(inspect_result.output)
+                rule_types = {rule["rule_type"] for rule in payload["active_rules"]}
+                self.assertEqual(rule_types, {"prefer_lower_vocalness", "demote_high_bpm"})
+                self.assertEqual(payload["pending_suggestions"], [])
+                self.assertEqual(payload["suggestion_groups"], [])
+
+                second = CliRunner().invoke(app, ["profile", "apply-group", "focus-profile-group"])
+                self.assertEqual(second.exit_code, 0, second.output)
+                second_output = plain_output(second.output)
+                self.assertIn("Applied: none", second_output)
+                self.assertIn("Skipped already active: focus-lower-vocalness, focus-demote-high-bpm", second_output)
+
     def test_cli_feedback_points_to_profile_suggest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
@@ -510,3 +557,34 @@ def populated_store(tmp: str, loudness: float, bpm: float, vocalness: float) -> 
         )
     )
     return store, track_id
+
+
+def focus_group_suggestions() -> list[dict[str, object]]:
+    """Return paired focus profile suggestions for group tests."""
+
+    return [
+        {
+            "suggestion_id": "focus-lower-vocalness",
+            "scope": "focus",
+            "rule_type": "prefer_lower_vocalness",
+            "target": "vocalness",
+            "threshold": 0.35,
+            "weight": 0.6,
+            "confidence": "high",
+            "source": "codex-profile",
+            "rationale": "Focus feedback favors low-vocalness tracks.",
+            "evidence_count": 2,
+        },
+        {
+            "suggestion_id": "focus-demote-high-bpm",
+            "scope": "focus",
+            "rule_type": "demote_high_bpm",
+            "target": "bpm",
+            "threshold": 135.0,
+            "weight": 0.8,
+            "confidence": "medium",
+            "source": "codex-profile",
+            "rationale": "Focus feedback demotes fast, overstimulating tracks.",
+            "evidence_count": 1,
+        },
+    ]

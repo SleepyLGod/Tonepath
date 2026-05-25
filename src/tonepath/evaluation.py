@@ -21,7 +21,7 @@ from tonepath.display import (
     display_title,
     normalize_key_part,
 )
-from tonepath.models import CandidateScore, SessionPlan, TrackFeatures
+from tonepath.models import CandidateScore, ProfileRule, SessionPlan, TrackFeatures
 from tonepath.planner import parse_request, plan_session, request_constraints
 from tonepath.selector import select_path
 
@@ -47,11 +47,13 @@ def evaluate_profile_comparison(store: TonepathStore, prompt: str, limit: int) -
     if not isinstance(no_candidates, list) or not isinstance(with_candidates, list):
         raise RuntimeError("Profile comparison requires candidate lists.")
     movements = profile_movements(no_candidates, with_candidates)
-    active_rule_count = len(store.list_profile_rules())
+    active_rules = store.list_profile_rules()
+    active_rule_count = len(active_rules)
     return {
         "prompt": prompt,
         "active_rule_count": active_rule_count,
         "message": profile_comparison_message(active_rule_count, movements),
+        "warnings": profile_comparison_warnings(active_rules, with_candidates),
         "no_profile": no_profile,
         "with_profile": with_profile,
         "movements": movements,
@@ -165,6 +167,47 @@ def profile_comparison_message(active_rule_count: int, movements: list[dict[str,
     if any(row.get("profile_reasons") for row in movements):
         return "Active profile rules changed selection scores."
     return "Active profile rules did not match the compared candidates; try a larger --limit or a prompt whose phases match the rule scope."
+
+
+def profile_comparison_warnings(rules: list[ProfileRule], candidates: list[object]) -> list[str]:
+    """Return warnings for risky profile-rule combinations."""
+
+    parsed_rules = [payload for payload in (profile_rule_payload(rule) for rule in rules) if payload is not None]
+    lower_vocal_scopes = {str(rule.get("scope") or "global") for rule in parsed_rules if rule.get("rule_type") == "prefer_lower_vocalness"}
+    if not lower_vocal_scopes:
+        return []
+    demote_bpm_scopes = {str(rule.get("scope") or "global") for rule in parsed_rules if rule.get("rule_type") == "demote_high_bpm"}
+    if any(high_bpm_without_companion(candidate, lower_vocal_scopes, demote_bpm_scopes) for candidate in candidates):
+        return ["Lower-vocalness rule may need a high-BPM demotion companion."]
+    return []
+
+
+def profile_rule_payload(rule: ProfileRule) -> dict[str, object] | None:
+    """Return one profile rule JSON payload, or None if malformed."""
+
+    try:
+        payload = json.loads(rule.value)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def high_bpm_without_companion(candidate: object, lower_vocal_scopes: set[str], demote_bpm_scopes: set[str]) -> bool:
+    """Return whether one candidate has high-BPM risk without a matching companion rule."""
+
+    if not isinstance(candidate, dict):
+        return False
+    phase = str(candidate.get("phase") or "")
+    lower_vocal_applies = "global" in lower_vocal_scopes or phase in lower_vocal_scopes
+    demote_bpm_applies = "global" in demote_bpm_scopes or phase in demote_bpm_scopes
+    if not lower_vocal_applies or demote_bpm_applies:
+        return False
+    features = candidate.get("features")
+    bpm = float_or_none(features.get("bpm")) if isinstance(features, dict) else None
+    if bpm is not None and bpm >= 135.0:
+        return True
+    reasons = candidate.get("reasons")
+    return isinstance(reasons, list) and any("overstimulating" in str(reason) for reason in reasons)
 
 
 def run_codex_audit(evidence: dict[str, object], web: bool) -> dict[str, object]:

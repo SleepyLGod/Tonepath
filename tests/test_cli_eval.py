@@ -226,6 +226,57 @@ class CliEvalTest(unittest.TestCase):
                 self.assertNotEqual(movement["score_delta"], 0)
                 self.assertTrue(any("profile rule:" in reason for reason in movement["profile_reasons"]))
 
+    def test_eval_profile_warns_when_lower_vocalness_lacks_high_bpm_companion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                track_id = store.upsert_track(track_for(Path(tmp) / "fast.mp3", title="fast instrumental", genre="instrumental"))
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id=track_id,
+                        energy=0.48,
+                        loudness=-13.0,
+                        bpm=144.0,
+                        vocalness=0.12,
+                        feature_source="model-essentia-voice-instrumental",
+                        confidence="high",
+                    )
+                )
+                store.upsert_profile_rule(profile_rule("global", "prefer_lower_vocalness", "vocalness", 0.35, 0.6))
+                store.close()
+
+                result = CliRunner().invoke(app, ["eval", "profile", "focus 30m no vocals", "--json", "--limit", "1"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output)
+                self.assertEqual(payload["warnings"], ["Lower-vocalness rule may need a high-BPM demotion companion."])
+
+    def test_eval_profile_warning_disappears_with_high_bpm_companion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                track_id = store.upsert_track(track_for(Path(tmp) / "fast.mp3", title="fast instrumental", genre="instrumental"))
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id=track_id,
+                        energy=0.48,
+                        loudness=-13.0,
+                        bpm=144.0,
+                        vocalness=0.12,
+                        feature_source="model-essentia-voice-instrumental",
+                        confidence="high",
+                    )
+                )
+                store.upsert_profile_rule(profile_rule("global", "prefer_lower_vocalness", "vocalness", 0.35, 0.6))
+                store.upsert_profile_rule(profile_rule("global", "demote_high_bpm", "bpm", 135.0, 0.8))
+                store.close()
+
+                result = CliRunner().invoke(app, ["eval", "profile", "focus 30m no vocals", "--json", "--limit", "1"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output)
+                self.assertEqual(payload["warnings"], [])
+
     def test_eval_profile_explains_when_active_rules_do_not_match_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
@@ -805,6 +856,30 @@ def decision(track_id: int, value: str, risk_flags: list[str] | None = None) -> 
         "reason": f"{value} reason",
         "evidence_used": [{"type": "local", "field": "bpm", "value": 90}],
     }
+
+
+def profile_rule(scope: str, rule_type: str, target: str, threshold: float, weight: float) -> ProfileRule:
+    """Return one active profile rule fixture."""
+
+    return ProfileRule(
+        id=None,
+        key=f"{scope}:{rule_type}:{target}",
+        value=json.dumps(
+            {
+                "scope": scope,
+                "rule_type": rule_type,
+                "target": target,
+                "threshold": threshold,
+                "weight": weight,
+                "confidence": "medium",
+                "source": "test",
+                "rationale": f"{scope} {rule_type}",
+                "evidence_count": 1,
+            }
+        ),
+        source="test",
+        confidence="medium",
+    )
 
 
 if __name__ == "__main__":
