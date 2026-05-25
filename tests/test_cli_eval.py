@@ -251,6 +251,47 @@ class CliEvalTest(unittest.TestCase):
                 payload = json.loads(result.output)
                 self.assertEqual(payload["warnings"], ["Lower-vocalness rule may need a high-BPM demotion companion."])
 
+    def test_eval_profile_warns_when_small_limit_hides_high_bpm_companion_risk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                quiet_id = store.upsert_track(track_for(Path(tmp) / "quiet.mp3", title="quiet", genre="instrumental"))
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id=quiet_id,
+                        energy=0.24,
+                        loudness=-18.2,
+                        bpm=84.0,
+                        vocalness=0.18,
+                        feature_source="model-essentia-voice-instrumental",
+                        confidence="high",
+                    )
+                )
+                fast_id = store.upsert_track(track_for(Path(tmp) / "fast.mp3", title="fast instrumental", genre="instrumental"))
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id=fast_id,
+                        energy=0.48,
+                        loudness=-13.0,
+                        bpm=144.0,
+                        vocalness=0.12,
+                        feature_source="model-essentia-voice-instrumental",
+                        confidence="high",
+                    )
+                )
+                store.upsert_profile_rule(profile_rule("global", "prefer_lower_vocalness", "vocalness", 0.35, 0.6))
+                store.close()
+
+                result = CliRunner().invoke(app, ["eval", "profile", "focus 30m no vocals", "--json", "--limit", "1"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output)
+                self.assertEqual(
+                    payload["warnings"],
+                    ["Profile risk may be hidden by --limit; rerun with --limit 20 to check high-BPM companion risk."],
+                )
+                self.assertEqual(len(payload["with_profile"]["candidates"]), 1)
+
     def test_eval_profile_warning_disappears_with_high_bpm_companion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):

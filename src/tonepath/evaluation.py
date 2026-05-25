@@ -37,6 +37,11 @@ def evaluate_selection(store: TonepathStore, prompt: str, limit: int, profile_en
     }
 
 
+PROFILE_RISK_SCAN_LIMIT = 20
+PROFILE_COMPANION_WARNING = "Lower-vocalness rule may need a high-BPM demotion companion."
+PROFILE_COVERAGE_WARNING = "Profile risk may be hidden by --limit; rerun with --limit 20 to check high-BPM companion risk."
+
+
 def evaluate_profile_comparison(store: TonepathStore, prompt: str, limit: int) -> dict[str, object]:
     """Compare selection with and without active profile rules."""
 
@@ -49,11 +54,17 @@ def evaluate_profile_comparison(store: TonepathStore, prompt: str, limit: int) -
     movements = profile_movements(no_candidates, with_candidates)
     active_rules = store.list_profile_rules()
     active_rule_count = len(active_rules)
+    warnings = profile_comparison_warnings(active_rules, with_candidates)
+    if not warnings and limit < PROFILE_RISK_SCAN_LIMIT:
+        risk_scan = evaluate_selection(store, prompt, PROFILE_RISK_SCAN_LIMIT, profile_enabled=True)
+        risk_candidates = risk_scan.get("candidates", [])
+        if isinstance(risk_candidates, list) and profile_comparison_warnings(active_rules, risk_candidates):
+            warnings = [PROFILE_COVERAGE_WARNING]
     return {
         "prompt": prompt,
         "active_rule_count": active_rule_count,
         "message": profile_comparison_message(active_rule_count, movements),
-        "warnings": profile_comparison_warnings(active_rules, with_candidates),
+        "warnings": warnings,
         "no_profile": no_profile,
         "with_profile": with_profile,
         "movements": movements,
@@ -178,7 +189,7 @@ def profile_comparison_warnings(rules: list[ProfileRule], candidates: list[objec
         return []
     demote_bpm_scopes = {str(rule.get("scope") or "global") for rule in parsed_rules if rule.get("rule_type") == "demote_high_bpm"}
     if any(high_bpm_without_companion(candidate, lower_vocal_scopes, demote_bpm_scopes) for candidate in candidates):
-        return ["Lower-vocalness rule may need a high-BPM demotion companion."]
+        return [PROFILE_COMPANION_WARNING]
     return []
 
 
