@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,6 +27,7 @@ class ConfigTest(unittest.TestCase):
                 self.assertFalse(settings.models.allow_online)
                 self.assertEqual(settings.models.preferred_tagger, "essentia-tf")
                 self.assertEqual(settings.models.separator_fallback, "off")
+                self.assertEqual(settings.experience.mode, "private")
 
     def test_default_home_is_workspace_local_when_not_overridden(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
@@ -53,6 +55,7 @@ class ConfigTest(unittest.TestCase):
                     network_mode="offline",
                     privacy=config.PrivacyConfig(),
                     models=config.ModelConfig(),
+                    experience=config.ExperienceConfig(),
                 )
                 config.write_config(settings)
                 report = run_doctor()
@@ -60,6 +63,42 @@ class ConfigTest(unittest.TestCase):
                 self.assertIn(f"Config path: {tonepath_home / 'config.toml'}", report)
                 self.assertIn("Player: mpv", report)
                 self.assertIn("Network mode: offline", report)
+
+    def test_preset_config_private_is_local_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                music_dir = Path(tmp) / "music"
+                settings = config.preset_config("private", music_dir=music_dir)
+
+                self.assertEqual(settings.experience.mode, "private")
+                self.assertEqual(settings.music_dirs, (str(music_dir),))
+                self.assertEqual(settings.network_mode, "offline")
+                self.assertFalse(settings.privacy.send_to_llm)
+                self.assertEqual(settings.models.mode, "balanced")
+                self.assertFalse(settings.models.allow_online)
+
+    def test_preset_config_music_dir_replaces_existing_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            first = Path(tmp) / "first"
+            second = Path(tmp) / "second"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
+                config.write_config(replace(config.default_config(), music_dirs=(str(first), str(second))))
+                settings = config.preset_config("private", music_dir=first)
+
+                self.assertEqual(settings.music_dirs, (str(first),))
+
+    def test_preset_config_smart_is_opt_in_intelligent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                settings = config.preset_config("smart")
+
+                self.assertEqual(settings.experience.mode, "smart")
+                self.assertEqual(settings.network_mode, "online-opt-in")
+                self.assertTrue(settings.privacy.send_to_llm)
+                self.assertEqual(settings.models.mode, "full")
+                self.assertTrue(settings.models.allow_online)
+                self.assertFalse(settings.models.allow_setup)
 
 
 if __name__ == "__main__":

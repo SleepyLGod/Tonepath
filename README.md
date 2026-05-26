@@ -53,28 +53,29 @@ git clone https://github.com/SleepyLGod/Tonepath.git
 cd Tonepath
 uv sync
 cp .env.example .env
-uv run tonepath config init
+uv run tonepath setup --preset private
 uv run tonepath config add-music-dir ~/Music
 uv run tonepath prepare
 uv run tonepath status
-uv run tonepath
+uv run tonepath listen "from tired to focused in 30 minutes, no vocals" --dry-run
 ```
 
 The normal workflow is:
 
 ```text
-config add-music-dir -> prepare -> status -> tonepath
+setup -> add music -> prepare -> listen or tonepath
 ```
 
-`prepare` scans and analyzes your local library. `status` tells you whether the library is ready and what to do next. `tonepath` opens the TUI workbench.
+`setup` chooses a Private, Smart, or Custom experience preset. `prepare` scans and analyzes your local library. `status` tells you whether the library is ready and what to do next. `listen` is the smart default CLI path; `tonepath` opens the TUI workbench.
 
 ## Common Commands
 
 ```bash
 uv run tonepath doctor
+uv run tonepath setup --preset smart --dry-run
 uv run tonepath status
 uv run tonepath prepare --limit 5
-uv run tonepath start "from irritated to focused in 30 minutes, no vocals" --dry-run
+uv run tonepath listen "from irritated to focused in 30 minutes, no vocals" --dry-run
 uv run tonepath eval suite --limit 5
 uv run tonepath profile inspect
 uv run tonepath privacy status
@@ -83,7 +84,7 @@ uv run tonepath privacy status
 Actual playback uses local files through `mpv`:
 
 ```bash
-uv run tonepath start "from tired to energized in 10 minutes"
+uv run tonepath listen "from tired to energized in 10 minutes"
 uv run tonepath stop
 ```
 

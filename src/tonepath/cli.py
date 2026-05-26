@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 from collections.abc import Callable, Iterable
@@ -22,9 +21,10 @@ except ImportError as exc:  # pragma: no cover - exercised before dependency ins
 
 from tonepath.analysis import AnalysisProgress, analyze_library
 from tonepath.db import TonepathStore
-from tonepath.display import clean_metadata_text, dirty_metadata_issues, display_artist, display_title, duplicate_track_count
+from tonepath.display import clean_metadata_text, display_artist, display_title
 from tonepath.doctor import run_doctor
 from tonepath.enrichment import EnrichmentProvider, enrich_library
+from tonepath.experience import listen_intelligence_summary, setup_next_step, smart_plan_session
 from tonepath.evaluation import (
     evaluate_audit,
     evaluate_intent,
@@ -37,7 +37,7 @@ from tonepath.evaluation import (
 from tonepath.explanation import explain_candidate
 from tonepath.llm import llm_doctor, parse_prompt_with_llm
 from tonepath.model_runtime import isolation_report, model_runtime_report, model_runtime_status, setup_essentia_tf_runtime
-from tonepath.models import CandidateScore, Track
+from tonepath.models import CandidateScore, SessionPlan, Track
 from tonepath.planner import plan_session, request_constraints
 from tonepath.playback import MpvAdapter
 from tonepath.playback_controller import PlaybackController
@@ -64,6 +64,14 @@ from tonepath.profile import (
     write_profile_memory,
 )
 from tonepath.privacy import delete_profile, privacy_status
+from tonepath.readiness import (
+    LibraryStatus,
+    library_status,
+    quality_check_hint,
+    readiness_blocks_session,
+    readiness_label,
+    status_next_action,
+)
 from tonepath.scanner import scan_directory
 from tonepath.selector import select_path
 from tonepath.tui import run_tui
@@ -109,23 +117,6 @@ class ScanSummary:
 
 
 @dataclass(frozen=True)
-class LibraryStatus:
-    """Current local library readiness counts."""
-
-    tracks: int
-    features: int
-    missing_features: int
-    vocalness: int
-    mir: int
-    tags: int
-    dirty_metadata: int = 0
-    duplicate_tracks: int = 0
-    tracks_outside_music_dirs: int = 0
-    suggested_music_dir: str | None = None
-    missing_analysis_tracks: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
 class AnalysisFailure:
     """One failed analysis item from a prepare run."""
 
@@ -152,6 +143,73 @@ def tui_command(
         run_tui()
         return
     run_tui(prompt=prompt)
+
+
+@app.command()
+def setup(
+    preset: Annotated[str | None, typer.Option("--preset", help="Experience preset: private, smart, or custom.")] = None,
+    music_dir: Annotated[Path | None, typer.Option("--music-dir", help="Music directory to save in config.")] = None,
+    allow_model_setup: Annotated[bool | None, typer.Option("--allow-model-setup/--no-allow-model-setup", help="Allow prepare to set up local model runtimes.")] = None,
+    send_to_llm: Annotated[bool | None, typer.Option("--send-to-llm/--no-send-to-llm", help="Allow opt-in LLM profile reflection when configured.")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show the config that would be written.")] = False,
+) -> None:
+    """Guide first-run setup around Private, Smart, or Custom experience presets."""
+
+    chosen = preset.strip().lower() if preset else ""
+    if not chosen:
+        console.print("Tonepath setup presets: private, smart, custom")
+        chosen = typer.prompt("Choose preset", default="private").strip().lower()
+    try:
+        settings = tonepath_config.preset_config(
+            chosen,
+            music_dir=music_dir,
+            allow_model_setup=allow_model_setup,
+            send_to_llm=send_to_llm,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    rendered = tonepath_config.render_config(settings)
+    if dry_run:
+        console.print(f"Would write config: {tonepath_config.config_path()}")
+        console.print(rendered, markup=False, end="")
+        return
+    path = tonepath_config.write_config(settings)
+    console.print(f"Configured Tonepath {settings.experience.mode.title()} experience: {path}")
+    console.print(setup_next_step(settings))
+
+
+@app.command()
+def listen(
+    prompt: Annotated[str, typer.Argument(help="What you feel now and what music should help you become.")],
+    dry_run: Annotated[bool, typer.Option(help="Print the selected path without launching mpv.")] = False,
+    background: Annotated[bool, typer.Option(help="Start mpv in the background and return immediately.")] = False,
+    limit_per_phase: Annotated[int, typer.Option(help="Number of tracks to select per phase.")] = 2,
+) -> None:
+    """Smart default entrypoint: check readiness, plan a path, and play or preview it."""
+
+    settings = tonepath_config.load_config()
+    store = TonepathStore()
+    try:
+        status = library_status(store)
+        runtime_ready = model_runtime_status().ready
+        console.print(f"Tonepath experience: {settings.experience.mode.title()}")
+        console.print(listen_intelligence_summary(settings, runtime_ready))
+        if status.tracks == 0:
+            console.print("No prepared library yet.")
+            console.print(f"Next action: {status_next_action(status, runtime_ready, settings)}")
+            raise typer.Exit(code=1)
+        readiness = readiness_label(status, runtime_ready, settings)
+        if readiness != "Ready for TUI":
+            console.print(f"Readiness: {readiness}")
+            console.print(f"Guidance: {status_next_action(status, runtime_ready, settings)}")
+            if readiness_blocks_session(readiness):
+                raise typer.Exit(code=1)
+        plan, note = smart_plan_session(prompt, settings)
+        if note:
+            console.print(note)
+        run_planned_session(store, plan, dry_run=dry_run, background=background, limit_per_phase=limit_per_phase)
+    finally:
+        store.close()
 
 
 @app.command()
@@ -263,36 +321,48 @@ def start(
     store = TonepathStore()
     try:
         plan = plan_session(prompt)
-        session_id = store.save_session(plan)
-        candidates = select_path(store, plan, limit_per_phase=limit_per_phase)
-        if not candidates:
-            console.print("No tracks found. Run `tonepath scan ~/Music` first.")
-            raise typer.Exit(code=1)
-
-        render_plan(candidates)
-        paths = [candidate.track.path for candidate in candidates]
-        adapter = MpvAdapter()
-        command = adapter.build_command(paths)
-        if dry_run:
-            console.print("Dry-run mpv command:")
-            console.print(" ".join(command))
-            console.print(f"Session {session_id} planned.")
-            return
-
-        controller = PlaybackController(store, adapter=adapter)
-        process = controller.start(paths)
-        console.print(f"Session {session_id} started with mpv PID {process.pid}.")
-        if background:
-            console.print("Run `tonepath stop` to stop background playback.")
-            return
-
-        try:
-            controller.wait_foreground(process)
-        except KeyboardInterrupt:
-            console.print("Playback stopped.")
-            raise typer.Exit(code=130) from None
+        run_planned_session(store, plan, dry_run=dry_run, background=background, limit_per_phase=limit_per_phase)
     finally:
         store.close()
+
+
+def run_planned_session(
+    store: TonepathStore,
+    plan: SessionPlan,
+    dry_run: bool,
+    background: bool,
+    limit_per_phase: int,
+) -> None:
+    """Create and optionally play one already-planned session."""
+
+    candidates = select_path(store, plan, limit_per_phase=limit_per_phase)
+    if not candidates:
+        console.print("No tracks found. Run `tonepath scan ~/Music` first.")
+        raise typer.Exit(code=1)
+
+    render_plan(candidates)
+    paths = [candidate.track.path for candidate in candidates]
+    adapter = MpvAdapter()
+    command = adapter.build_command(paths)
+    if dry_run:
+        console.print("Dry-run mpv command:")
+        console.print(" ".join(command))
+        console.print("Dry-run only; session not saved.")
+        return
+
+    session_id = store.save_session(plan)
+    controller = PlaybackController(store, adapter=adapter)
+    process = controller.start(paths)
+    console.print(f"Session {session_id} started with mpv PID {process.pid}.")
+    if background:
+        console.print("Run `tonepath stop` to stop background playback.")
+        return
+
+    try:
+        controller.wait_foreground(process)
+    except KeyboardInterrupt:
+        console.print("Playback stopped.")
+        raise typer.Exit(code=130) from None
 
 
 @app.command()
@@ -1047,108 +1117,6 @@ def print_scan_summary(summary: ScanSummary) -> None:
         console.print(f"Pruned {summary.pruned} missing track(s).")
 
 
-def library_status(store: TonepathStore) -> LibraryStatus:
-    """Return local library readiness counts."""
-
-    tracks = store.list_tracks()
-    outside_tracks = tracks_outside_configured_dirs(tracks)
-    row = store.conn.execute(
-        """
-        SELECT
-          COUNT(t.id) AS tracks,
-          COUNT(f.track_id) AS features,
-          SUM(CASE WHEN f.track_id IS NULL THEN 1 ELSE 0 END) AS missing_features,
-          SUM(CASE WHEN f.vocalness IS NOT NULL THEN 1 ELSE 0 END) AS vocalness,
-          SUM(CASE WHEN f.energy IS NOT NULL AND f.loudness IS NOT NULL AND f.bpm IS NOT NULL THEN 1 ELSE 0 END) AS mir,
-          (
-            SELECT COUNT(DISTINCT track_id)
-            FROM track_enrichment
-            WHERE field LIKE 'tag:%'
-          ) AS tags
-        FROM tracks t
-        LEFT JOIN track_features f ON f.track_id = t.id
-        """
-    ).fetchone()
-    if row is None:
-        return LibraryStatus(0, 0, 0, 0, 0, 0)
-    return LibraryStatus(
-        tracks=int(row["tracks"] or 0),
-        features=int(row["features"] or 0),
-        missing_features=int(row["missing_features"] or 0),
-        vocalness=int(row["vocalness"] or 0),
-        mir=int(row["mir"] or 0),
-        tags=int(row["tags"] or 0),
-        dirty_metadata=sum(1 for track in tracks if dirty_metadata_issues(track)),
-        duplicate_tracks=duplicate_track_count(tracks),
-        tracks_outside_music_dirs=len(outside_tracks),
-        suggested_music_dir=suggested_music_dir(outside_tracks),
-        missing_analysis_tracks=missing_analysis_track_labels(store, limit=5),
-    )
-
-
-def missing_analysis_track_labels(store: TonepathStore, limit: int) -> tuple[str, ...]:
-    """Return display labels for tracks missing feature rows or core MIR fields."""
-
-    rows = store.conn.execute(
-        """
-        SELECT t.*
-        FROM tracks t
-        LEFT JOIN track_features f ON f.track_id = t.id
-        WHERE f.track_id IS NULL
-           OR f.energy IS NULL
-           OR f.loudness IS NULL
-           OR f.bpm IS NULL
-        ORDER BY t.path
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
-    labels: list[str] = []
-    for row in rows:
-        track = Track(
-            id=int(row["id"]),
-            path=Path(row["path"]),
-            file_hash=str(row["file_hash"]),
-            mtime=float(row["mtime"]),
-            title=row["title"],
-            artist=row["artist"],
-            album=row["album"],
-            genre=row["genre"],
-            duration=row["duration"],
-            format=row["format"],
-        )
-        labels.append(f"{escape(display_track(track))} ({escape(display_relative_path(track.path))})")
-    return tuple(labels)
-
-
-def tracks_outside_configured_dirs(tracks: list[Track]) -> list[Track]:
-    """Return tracks not covered by configured music directories."""
-
-    roots = [path.expanduser().resolve() for path in tonepath_config.load_config().expanded_music_dirs()]
-    outside: list[Track] = []
-    for track in tracks:
-        resolved_path = track.path.expanduser().resolve()
-        if not any(resolved_path.is_relative_to(root) for root in roots):
-            outside.append(track)
-    return outside
-
-
-def suggested_music_dir(tracks: list[Track]) -> str | None:
-    """Return a likely directory to add to config for uncovered tracks."""
-
-    if not tracks:
-        return None
-    parents = [str(track.path.expanduser().resolve().parent) for track in tracks]
-    common = Path(os.path.commonpath(parents))
-    try:
-        relative = common.relative_to(Path.cwd())
-    except ValueError:
-        return str(common)
-    if str(relative) != ".":
-        return str(relative)
-    return str(common)
-
-
 def print_status_summary(status: LibraryStatus, runtime_ready: bool) -> None:
     """Print local library, model policy, and runtime readiness without secrets."""
 
@@ -1193,56 +1161,6 @@ def prepare_mode(settings: tonepath_config.TonepathConfig, fast: bool, full: boo
     if mode not in {"fast", "balanced", "full"}:
         raise typer.BadParameter("models.mode must be one of: fast, balanced, full")
     return mode
-
-
-def status_next_action(status: LibraryStatus, runtime_ready: bool, settings: tonepath_config.TonepathConfig) -> str:
-    """Return one concise next action for normal users."""
-
-    if status.tracks == 0:
-        return "Add a music directory, then run `uv run tonepath prepare`."
-    if status.tracks_outside_music_dirs:
-        if status.suggested_music_dir:
-            return f"Run `uv run tonepath config add-music-dir {status.suggested_music_dir}`, then `uv run tonepath prepare`."
-        return "Add the active library directory to config, then run `uv run tonepath prepare`."
-    if status.missing_features or status.mir < status.tracks:
-        if status.features > 0 or status.mir > 0:
-            return "Review or replace files with missing analysis, then run `uv run tonepath prepare`."
-        return "Run `uv run tonepath prepare`."
-    if settings.models.mode == "fast":
-        return "Ready for TUI. Run `uv run tonepath`."
-    if status.vocalness < status.tracks or status.tags < status.tracks:
-        if runtime_ready:
-            return "Run `uv run tonepath prepare` for model-backed tags."
-        if settings.models.mode == "full":
-            return "Run `uv run tonepath models setup essentia-tf`, then `uv run tonepath prepare --full`."
-        return "Ready for TUI; run `uv run tonepath models setup essentia-tf` for better vocalness."
-    if status.duplicate_tracks or status.dirty_metadata:
-        return "Ready for TUI; review duplicate candidates or dirty metadata when recommendations look odd."
-    return "Ready for TUI. Run `uv run tonepath`."
-
-
-def readiness_label(status: LibraryStatus, runtime_ready: bool, settings: tonepath_config.TonepathConfig) -> str:
-    """Return a compact readiness state for normal users."""
-
-    if status.tracks == 0 or status.tracks_outside_music_dirs:
-        return "Needs setup"
-    if status.missing_features or status.mir < status.tracks:
-        if status.features > 0 or status.mir > 0:
-            return "Review files"
-        return "Needs preparation"
-    if settings.models.mode != "fast" and (status.vocalness < status.tracks or status.tags < status.tracks):
-        return "Needs preparation" if runtime_ready else "Model setup available"
-    return "Ready for TUI"
-
-
-def quality_check_hint(status: LibraryStatus) -> str:
-    """Return a concise benchmark hint for the current library state."""
-
-    if status.tracks == 0:
-        return "Prepare a library before running benchmark checks."
-    if status.missing_features or status.mir < status.tracks:
-        return "Resolve missing analysis before relying on `uv run tonepath eval suite --limit 8`."
-    return "Run `uv run tonepath eval suite --limit 8` after prepare."
 
 
 def render_plan(candidates: list[CandidateScore]) -> None:

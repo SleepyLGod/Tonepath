@@ -12,10 +12,30 @@ from tonepath.analysis import AnalysisProgress
 from tonepath.cli import app
 from tonepath.db import TonepathStore
 from tonepath.models import Track, TrackFeatures
+from tonepath.readiness import suggested_music_dir
 from tonepath.scanner import read_track
 
 
 class CliPrepareStatusTest(unittest.TestCase):
+    def test_suggested_music_dir_handles_commonpath_value_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            track = Track(
+                id=1,
+                path=Path(tmp) / "music" / "song.mp3",
+                file_hash="hash",
+                mtime=1.0,
+                title="song",
+                artist="artist",
+                album=None,
+                genre=None,
+                duration=180.0,
+                format="mp3",
+            )
+            with patch("tonepath.readiness.os.path.commonpath", side_effect=ValueError):
+                suggestion = suggested_music_dir([track])
+
+            self.assertEqual(suggestion, str((Path(tmp) / "music").resolve()))
+
     def test_prepare_runs_scan_mir_and_tags_when_runtime_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
@@ -209,6 +229,7 @@ class CliPrepareStatusTest(unittest.TestCase):
                         network_mode="offline",
                         privacy=config.PrivacyConfig(),
                         models=config.ModelConfig(),
+                        experience=config.ExperienceConfig(),
                     )
                 )
                 store = TonepathStore()
@@ -251,6 +272,7 @@ class CliPrepareStatusTest(unittest.TestCase):
                         network_mode="offline",
                         privacy=config.PrivacyConfig(),
                         models=config.ModelConfig(),
+                        experience=config.ExperienceConfig(),
                     )
                 )
                 store = TonepathStore()
@@ -292,6 +314,7 @@ class CliPrepareStatusTest(unittest.TestCase):
                         network_mode="offline",
                         privacy=config.PrivacyConfig(),
                         models=config.ModelConfig(mode="full"),
+                        experience=config.ExperienceConfig(),
                     )
                 )
                 store = TonepathStore()

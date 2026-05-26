@@ -14,11 +14,17 @@ from tonepath.selector import select_path
 class SessionRunner:
     """Run a mutable listening session over the deterministic selector."""
 
-    def __init__(self, store: TonepathStore, prompt: str, limit_per_phase: int = 2) -> None:
+    def __init__(
+        self,
+        store: TonepathStore,
+        prompt: str,
+        limit_per_phase: int = 2,
+        plan: SessionPlan | None = None,
+    ) -> None:
         self.store = store
         self.prompt = prompt
         self.limit_per_phase = limit_per_phase
-        self.base_plan = plan_session(prompt)
+        self.base_plan = plan or plan_session(prompt)
         self.session_id = store.save_session(self.base_plan)
         self.current_index = 0
         self.energy_delta = 0.0

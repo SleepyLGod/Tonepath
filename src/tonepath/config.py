@@ -11,6 +11,7 @@ from pathlib import Path
 APP_DIR_NAME = ".tonepath"
 CONFIG_FILENAME = "config.toml"
 DB_FILENAME = "tonepath.db"
+EXPERIENCE_PRESETS = {"private", "smart", "custom"}
 
 
 def repo_root() -> Path:
@@ -82,6 +83,13 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
+class ExperienceConfig:
+    """Normal-user experience mode from the local config file."""
+
+    mode: str = "private"
+
+
+@dataclass(frozen=True)
 class TonepathConfig:
     """User-editable local Tonepath configuration."""
 
@@ -91,6 +99,7 @@ class TonepathConfig:
     network_mode: str
     privacy: PrivacyConfig
     models: ModelConfig
+    experience: ExperienceConfig
 
     def expanded_music_dirs(self) -> tuple[Path, ...]:
         """Return configured music directories with `~` expanded."""
@@ -129,6 +138,7 @@ def default_config() -> TonepathConfig:
         network_mode="offline",
         privacy=PrivacyConfig(),
         models=ModelConfig(),
+        experience=ExperienceConfig(),
     )
 
 
@@ -143,6 +153,7 @@ def load_config() -> TonepathConfig:
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     privacy_data = data.get("privacy", {})
     models_data = data.get("models", {})
+    experience_data = data.get("experience", {})
     data_dir_override = os.environ.get("TONEPATH_HOME")
     return TonepathConfig(
         music_dirs=tuple(str(item) for item in data.get("music_dirs", defaults.music_dirs)),
@@ -159,6 +170,9 @@ def load_config() -> TonepathConfig:
             allow_online=bool(models_data.get("allow_online", defaults.models.allow_online)),
             preferred_tagger=str(models_data.get("preferred_tagger", defaults.models.preferred_tagger)),
             separator_fallback=str(models_data.get("separator_fallback", defaults.models.separator_fallback)),
+        ),
+        experience=ExperienceConfig(
+            mode=str(experience_data.get("mode", defaults.experience.mode)),
         ),
     )
 
@@ -195,9 +209,70 @@ def add_music_dir(path: Path) -> TonepathConfig:
         network_mode=current.network_mode,
         privacy=current.privacy,
         models=current.models,
+        experience=current.experience,
     )
     write_config(updated)
     return updated
+
+
+def preset_config(
+    preset: str,
+    music_dir: Path | None = None,
+    allow_model_setup: bool | None = None,
+    send_to_llm: bool | None = None,
+) -> TonepathConfig:
+    """Return a config for one normal-user experience preset."""
+
+    mode = preset.strip().lower()
+    if mode not in EXPERIENCE_PRESETS:
+        raise ValueError("preset must be one of: private, smart, custom")
+    current = load_config()
+    music_dirs = current.music_dirs
+    if music_dir is not None:
+        value = str(music_dir.expanduser())
+        music_dirs = (value,)
+    if mode == "private":
+        privacy = PrivacyConfig(send_to_llm=False, store_play_history=current.privacy.store_play_history)
+        models = ModelConfig(
+            mode="balanced",
+            allow_setup=bool(allow_model_setup) if allow_model_setup is not None else False,
+            allow_online=False,
+            preferred_tagger=current.models.preferred_tagger,
+            separator_fallback="off",
+        )
+        network_mode = "offline"
+    elif mode == "smart":
+        privacy = PrivacyConfig(send_to_llm=True if send_to_llm is None else send_to_llm, store_play_history=current.privacy.store_play_history)
+        models = ModelConfig(
+            mode="full",
+            allow_setup=bool(allow_model_setup) if allow_model_setup is not None else False,
+            allow_online=True,
+            preferred_tagger=current.models.preferred_tagger,
+            separator_fallback="off",
+        )
+        network_mode = "online-opt-in"
+    else:
+        privacy = PrivacyConfig(
+            send_to_llm=current.privacy.send_to_llm if send_to_llm is None else send_to_llm,
+            store_play_history=current.privacy.store_play_history,
+        )
+        models = ModelConfig(
+            mode=current.models.mode,
+            allow_setup=current.models.allow_setup if allow_model_setup is None else allow_model_setup,
+            allow_online=current.models.allow_online,
+            preferred_tagger=current.models.preferred_tagger,
+            separator_fallback=current.models.separator_fallback,
+        )
+        network_mode = current.network_mode
+    return TonepathConfig(
+        music_dirs=music_dirs,
+        data_dir=current.data_dir,
+        player=current.player,
+        network_mode=network_mode,
+        privacy=privacy,
+        models=models,
+        experience=ExperienceConfig(mode=mode),
+    )
 
 
 def render_config(config: TonepathConfig) -> str:
@@ -221,6 +296,9 @@ def render_config(config: TonepathConfig) -> str:
             f"allow_online = {toml_bool(config.models.allow_online)}",
             f"preferred_tagger = {quote_string(config.models.preferred_tagger)}",
             f"separator_fallback = {quote_string(config.models.separator_fallback)}",
+            "",
+            "[experience]",
+            f"mode = {quote_string(config.experience.mode)}",
             "",
         ]
     )

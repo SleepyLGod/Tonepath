@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from typing import Any
 
 from rich.text import Text
@@ -9,11 +10,14 @@ from rich.text import Text
 from tonepath import config
 from tonepath.db import TonepathStore
 from tonepath.display import display_artist, fallback_track_label
+from tonepath.experience import smart_plan_session
 from tonepath.evaluation import evaluate_rerank
+from tonepath.llm import provider_config
 from tonepath.model_runtime import model_runtime_status
 from tonepath.models import FeedbackType
 from tonepath.playback_controller import PlaybackController
 from tonepath.profile import profile_learning_hint
+from tonepath.readiness import LibraryStatus, library_status, readiness_blocks_session, readiness_label, status_next_action
 from tonepath.session import SessionRunner
 
 try:
@@ -160,6 +164,10 @@ class TonepathApp(App[None]):
         self.playback_status = "Ready"
         self.playback_timer: Any | None = None
         self.model_runtime_ready = False
+        self.library_status: LibraryStatus | None = None
+        self.readiness = "Needs setup"
+        self.readiness_action = "Run `uv run tonepath setup --preset private`."
+        self.intent_note: str | None = None
 
     def compose(self) -> ComposeResult:
         """Compose the terminal product surface with Textual built-ins."""
@@ -186,14 +194,15 @@ class TonepathApp(App[None]):
         table = self.query_one("#queue", DataTable)
         table.add_columns("#", "Phase", "Track", "Energy", "Conf")
 
+        self.model_runtime_ready = model_runtime_status().ready
+        self.refresh_readiness()
         if not self.store.list_tracks():
             self.show_empty_library()
             return
 
         self.playback = PlaybackController(self.store)
-        self.model_runtime_ready = model_runtime_status().ready
-        if self.missing_feature_count():
-            self.log_event("Some tracks need review. Run `uv run tonepath status`.")
+        if readiness_blocks_session(self.readiness):
+            self.log_event(f"Library is not ready: {self.readiness}. {self.readiness_action}")
         elif not self.model_runtime_ready:
             self.log_event("Better vocalness is available after `uv run tonepath models setup essentia-tf`.")
         if self.initial_prompt is None:
@@ -354,14 +363,28 @@ class TonepathApp(App[None]):
         if self.store is None:
             self.log_event("Local store is unavailable.")
             return
+        self.refresh_readiness()
+        if readiness_blocks_session(self.readiness):
+            self.runner = None
+            self.playback_status = "Needs setup"
+            self.render_intake()
+            self.log_event(f"Not ready for recommendations: {self.readiness}.")
+            self.log_event(self.readiness_action)
+            self.query_one("#prompt-input", Input).focus()
+            return
         if self.playback is not None:
             self.playback.stop_current()
-        self.runner = SessionRunner(self.store, cleaned)
+        settings = config.load_config()
+        plan, note = smart_plan_session(cleaned, settings)
+        self.intent_note = note
+        self.runner = SessionRunner(self.store, cleaned, plan=plan)
         self.playback = self.playback or PlaybackController(self.store)
         self.playback_status = "Ready"
         prompt_input = self.query_one("#prompt-input", Input)
         prompt_input.value = cleaned
         prompt_input.blur()
+        if note:
+            self.log_event(note)
         self.log_event(f"Ready. Press Space to play. Session: {cleaned}")
         self.refresh_session_view()
 
@@ -414,7 +437,7 @@ class TonepathApp(App[None]):
             return
 
         self.query_one("#status-bar", Static).update(
-            f"● {self.playback_status}   Local · {self.library_count()} tracks · offline · / prompt · n new"
+            f"● {self.playback_status}   {self.experience_label()} · {self.library_count()} tracks · / prompt · n new"
         )
         self.query_one("#timeline", Static).update(self.timeline_text())
         self.query_one("#now-playing", Static).update(self.now_playing_renderable())
@@ -551,17 +574,17 @@ class TonepathApp(App[None]):
     def render_intake(self) -> None:
         """Render the no-session intake state."""
 
-        missing = self.missing_feature_count()
-        if missing:
-            guidance = f"Library needs review: {missing} track(s) need analysis. Run `uv run tonepath status`."
+        self.refresh_readiness()
+        if readiness_blocks_session(self.readiness):
+            guidance = f"Library is not ready: {self.readiness}. {self.readiness_action}"
         elif not self.model_runtime_ready:
             guidance = "Ready for playback. Better vocalness is available after `uv run tonepath models setup essentia-tf`."
         else:
-            guidance = "Ready for playback. Use the prompt bar above."
+            guidance = "Ready for playback. How are you feeling? What should music help you become?"
         self.query_one("#status-bar", Static).update(
-            f"● Ready   Local · {self.library_count()} tracks · offline · Enter to plan"
+            f"● Ready   {self.experience_label()} · {self.library_count()} tracks · Enter to plan"
         )
-        self.query_one("#timeline", Static).update("No session yet · type a listening goal and press Enter")
+        self.query_one("#timeline", Static).update("No session yet · feeling → path → feedback → memory")
         self.query_one("#now-playing", Static).update(
             Text.assemble(
                 ("● No session yet\n", f"bold {AMBER}"),
@@ -597,28 +620,56 @@ class TonepathApp(App[None]):
     def missing_feature_count(self) -> int:
         """Return the number of tracks without analyzed features."""
 
-        if self.store is None:
+        self.refresh_readiness()
+        if self.library_status is None:
             return 0
-        row = self.store.conn.execute(
-            """
-            SELECT COUNT(*) AS count
-            FROM tracks t
-            LEFT JOIN track_features f ON f.track_id = t.id
-            WHERE f.track_id IS NULL
-            """
-        ).fetchone()
-        return int(row["count"]) if row is not None else 0
+        return self.library_status.missing_features
+
+    def refresh_readiness(self) -> None:
+        """Refresh cached library readiness state for TUI decisions."""
+
+        if self.store is None:
+            self.library_status = None
+            self.readiness = "Needs setup"
+            self.readiness_action = "Run `uv run tonepath setup --preset private`."
+            return
+        settings = config.load_config()
+        self.library_status = library_status(self.store)
+        self.readiness = readiness_label(self.library_status, self.model_runtime_ready, settings)
+        self.readiness_action = status_next_action(self.library_status, self.model_runtime_ready, settings)
 
     def privacy_text(self) -> str:
         """Return the local privacy badge text."""
 
+        settings = config.load_config()
+        llm_state = self.llm_status_label(settings)
+        model_state = "Model Ready" if self.model_runtime_ready else "Model Missing"
+        codex_state = "Codex Available" if shutil.which("codex") else "Codex Optional"
         return "\n".join(
             [
-                "✓ offline",
-                f"✓ {config.db_path().name}",
-                "✓ audio local",
+                f"✓ {self.experience_label()}",
+                f"✓ {self.readiness}",
+                f"✓ {model_state}",
+                f"✓ {llm_state}",
+                f"✓ {codex_state}",
             ]
         )
+
+    def llm_status_label(self, settings: config.TonepathConfig) -> str:
+        """Return a redacted LLM status for the mode/privacy badge."""
+
+        if not settings.privacy.send_to_llm:
+            return "LLM Off"
+        try:
+            provider = provider_config()
+        except ValueError:
+            return "LLM Missing"
+        return "LLM Configured" if provider.configured else "LLM Missing"
+
+    def experience_label(self) -> str:
+        """Return the active normal-user experience label."""
+
+        return config.load_config().experience.mode.title()
 
     def privacy_renderable(self) -> Text:
         """Return styled local privacy badge content."""
@@ -672,12 +723,12 @@ class TonepathApp(App[None]):
     def show_empty_library(self) -> None:
         """Render setup guidance when no local tracks are available."""
 
-        self.query_one("#timeline", Static).update("Tonepath: local library required")
+        self.query_one("#timeline", Static).update("Tonepath: setup required")
         self.playback_status = "No tracks"
-        self.query_one("#status-bar", Static).update("● No tracks   Local · 0 tracks · offline · setup required")
+        self.query_one("#status-bar", Static).update(f"● No tracks   {self.experience_label()} · 0 tracks · setup required")
         self.query_one("#prompt-input", Input).value = ""
         self.query_one("#now-playing", Static).update(
-            "No scanned tracks.\n\nRun:\nuv run tonepath config add-music-dir /path/to/music\nuv run tonepath prepare"
+            "No scanned tracks.\n\nRun:\nuv run tonepath setup --preset private\nuv run tonepath config add-music-dir /path/to/music\nuv run tonepath prepare"
         )
         self.query_one("#why-panel", Static).update("Why panel appears after a local session starts.")
         self.query_one("#privacy-badge", Static).update(self.privacy_renderable())
@@ -694,7 +745,7 @@ class TonepathApp(App[None]):
         self.query_one("#now-playing", Static).border_title = "Now"
         self.query_one("#queue", DataTable).border_title = "Queue"
         self.query_one("#why-panel", Static).border_title = "Why"
-        self.query_one("#privacy-badge", Static).border_title = "Local Privacy"
+        self.query_one("#privacy-badge", Static).border_title = "Mode / Privacy"
         self.query_one("#event-log", RichLog).border_title = "Events"
         self.query_one("#prompt-input", Input).border_title = "Request"
 

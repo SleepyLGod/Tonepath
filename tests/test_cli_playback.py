@@ -35,6 +35,7 @@ class CliPlaybackTest(unittest.TestCase):
                 self.assertIn("Dry-run mpv command:", result.output)
                 store = TonepathStore()
                 self.assertIsNone(store.get_app_state(CURRENT_MPV_PID_KEY))
+                self.assertIsNone(store.current_session_id())
                 store.close()
 
     def test_start_background_stores_pid(self) -> None:

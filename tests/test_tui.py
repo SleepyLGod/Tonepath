@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tonepath import config
 from tonepath.db import TonepathStore
 from tonepath.models import Track, TrackFeatures
 from tonepath.playback import MpvAdapter
@@ -69,8 +70,8 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
                 store = TonepathStore()
-                self.add_track(store, tmp, "a.mp3")
-                self.add_track(store, tmp, "b.mp3")
+                self.add_ready_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "b.mp3")
                 store.close()
 
                 app = TonepathApp()
@@ -87,8 +88,8 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
                 store = TonepathStore()
-                self.add_track(store, tmp, "a.mp3")
-                self.add_track(store, tmp, "b.mp3")
+                self.add_ready_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "b.mp3")
                 store.close()
 
                 app = TonepathApp()
@@ -100,11 +101,31 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("irritated", app.timeline_text())
                     await pilot.press("q")
 
+    async def test_tui_smart_mode_uses_smart_planner_fallback_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home), "TONEPATH_LLM_PROVIDER": "deepseek"}, clear=True):
+                config.write_config(config.preset_config("smart"))
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    prompt_input = app.query_one("#prompt-input", Input)
+                    prompt_input.value = "focus 30m no vocals"
+                    await pilot.press("enter")
+                    self.assertIsNotNone(app.runner)
+                    self.assertIn("DEEPSEEK_API_KEY missing", app.intent_note or "")
+                    self.assertIn("✓ Smart", app.privacy_text())
+                    self.assertIn("✓ LLM Missing", app.privacy_text())
+                    await pilot.press("q")
+
     async def test_tui_codex_keys_do_not_run_background_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
                 store = TonepathStore()
-                self.add_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "a.mp3")
                 store.close()
 
                 app = TonepathApp("from irritated to focus in 30 minutes")
@@ -161,7 +182,7 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                     encoding="utf-8",
                 )
                 store = TonepathStore()
-                self.add_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "a.mp3")
                 store.close()
 
                 app = TonepathApp("from irritated to focus in 30 minutes")
@@ -197,7 +218,7 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                     encoding="utf-8",
                 )
                 store = TonepathStore()
-                self.add_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "a.mp3")
                 store.close()
 
                 app = TonepathApp("from irritated to focus in 30 minutes")
@@ -216,8 +237,25 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                 app = TonepathApp()
                 async with app.run_test() as pilot:
                     renderable = app.query_one("#now-playing").render()
-                    self.assertIn("tonepath status", renderable.plain)
+                    self.assertIn("tonepath prepare", renderable.plain)
                     self.assertEqual(app.missing_feature_count(), 1)
+                    await pilot.press("q")
+
+    async def test_tui_review_files_blocks_prompt_submit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    prompt_input = app.query_one("#prompt-input", Input)
+                    prompt_input.value = "我现在很烦，想半小时后进入写代码状态，不要人声"
+                    await pilot.press("enter")
+                    self.assertIsNone(app.runner)
+                    renderable = app.query_one("#now-playing").render()
+                    self.assertIn("Library is not ready", renderable.plain)
                     await pilot.press("q")
 
     async def test_tui_intake_guides_model_setup_when_runtime_missing(self) -> None:
@@ -247,8 +285,8 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
                 store = TonepathStore()
-                self.add_track(store, tmp, "a.mp3")
-                self.add_track(store, tmp, "b.mp3")
+                self.add_ready_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "b.mp3")
                 store.close()
 
                 app = TonepathApp("from irritated to focus in 30 minutes")
@@ -263,8 +301,11 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                         self.assertIn("Evidence", app.why_panel_text())
                         self.assertIn("Unknown", app.why_panel_text())
                         self.assertIn("◇", app.timeline_text())
-                        self.assertIn("✓ offline", app.privacy_text())
-                        self.assertEqual(len(app.privacy_text().splitlines()), 3)
+                        self.assertIn("✓ Private", app.privacy_text())
+                        self.assertIn("✓ LLM Off", app.privacy_text())
+                        self.assertIn("✓ Model Missing", app.privacy_text())
+                        self.assertIn("✓ Codex", app.privacy_text())
+                        self.assertEqual(len(app.privacy_text().splitlines()), 5)
                         await pilot.press("w")
                         await pilot.press("s")
                         await pilot.press("q")
@@ -306,7 +347,7 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
                 store = TonepathStore()
-                self.add_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "a.mp3")
                 store.close()
 
                 app = TonepathApp("from irritated to focus in 30 minutes")
@@ -320,7 +361,7 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
                 store = TonepathStore()
-                self.add_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "a.mp3")
                 store.close()
 
                 app = TonepathApp("from irritated to focus in 30 minutes")
@@ -336,8 +377,8 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
                 store = TonepathStore()
-                self.add_track(store, tmp, "a.mp3")
-                self.add_track(store, tmp, "b.mp3")
+                self.add_ready_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "b.mp3")
                 store.close()
 
                 app = TonepathApp("from irritated to focus in 30 minutes")
@@ -355,7 +396,7 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
                 store = TonepathStore()
-                self.add_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "a.mp3")
                 store.close()
 
                 app = TonepathApp("from irritated to focus in 30 minutes")
@@ -373,7 +414,7 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
             home = Path(tmp) / "home"
             with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
                 store = TonepathStore()
-                self.add_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "a.mp3")
                 store.close()
 
                 app = TonepathApp("from irritated to focus in 30 minutes")
@@ -390,6 +431,7 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                 store.close()
 
     def add_track(self, store: TonepathStore, tmp: str, name: str) -> int:
+        self.configure_music_dir(tmp)
         path = Path(tmp) / name
         path.write_bytes(b"not real audio")
         return store.upsert_track(
@@ -404,6 +446,35 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                 genre=None,
                 duration=None,
                 format="mp3",
+            )
+        )
+
+    def add_ready_track(self, store: TonepathStore, tmp: str, name: str) -> int:
+        track_id = self.add_track(store, tmp, name)
+        store.upsert_features(
+            TrackFeatures(
+                track_id=track_id,
+                bpm=100.0,
+                loudness=-14.0,
+                energy=0.5,
+                vocalness=0.2,
+                feature_source="test",
+                confidence="high",
+            )
+        )
+        return track_id
+
+    def configure_music_dir(self, tmp: str) -> None:
+        current = config.load_config()
+        config.write_config(
+            config.TonepathConfig(
+                music_dirs=(str(Path(tmp)),),
+                data_dir=current.data_dir,
+                player=current.player,
+                network_mode=current.network_mode,
+                privacy=current.privacy,
+                models=current.models,
+                experience=current.experience,
             )
         )
 

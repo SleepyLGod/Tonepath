@@ -15,16 +15,20 @@ Start from a project-local environment:
 ```bash
 uv sync
 cp .env.example .env
-uv run tonepath config init
+uv run tonepath setup --preset private
 uv run tonepath config add-music-dir ~/Music
 uv run tonepath prepare
 uv run tonepath status
-uv run tonepath
+uv run tonepath listen "我现在很烦，想写论文，低刺激，不要人声" --dry-run
 ```
+
+`tonepath setup` offers three normal-user experience presets. `Private` is local-first and offline by default. `Smart` enables opt-in LLM/profile reflection when API keys are configured, while still avoiding silent profile-rule changes. `Custom` marks the config for advanced tuning while preserving existing safety defaults.
 
 `tonepath prepare` scans configured music directories, prunes missing tracks, analyzes missing or changed features, and follows the configured model policy. The default `balanced` policy uses the workspace-local Essentia-TF runtime for vocalness/tagging when that runtime is ready. If the tagging runtime is missing, `prepare` prints the setup command and still leaves the local library usable.
 
 `tonepath status` is the readiness dashboard. It shows an overall state such as `Ready for TUI`, `Needs preparation`, `Review files`, or `Model setup available`, plus a concrete next action. If a local file cannot be analyzed, Tonepath lists it under `Missing analysis files`; replace or remove the file if you want full-confidence recommendations, or keep it and Tonepath will treat it as low evidence.
+
+`tonepath listen "..."` is the smart default CLI entrypoint. It checks readiness, reports the active experience mode, uses local deterministic planning by default, uses Smart-mode LLM intent parsing only when configured, and then previews or plays a local state-transition path. Long-term preference changes still require explicit `profile inspect` plus `profile apply` or `profile apply-group`.
 
 Run a short preparation pass for testing:
 
@@ -242,6 +246,9 @@ allow_setup = false
 allow_online = false
 preferred_tagger = "essentia-tf"
 separator_fallback = "off"
+
+[experience]
+mode = "private"
 ```
 
 Useful commands:
