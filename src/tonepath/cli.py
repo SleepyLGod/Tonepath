@@ -46,6 +46,7 @@ from tonepath.profile import (
     apply_suggestion_group,
     apply_suggestion,
     build_profile_evidence,
+    delete_profile_cache,
     delete_profile_markdown,
     deterministic_suggestions,
     list_pending_suggestions,
@@ -964,8 +965,9 @@ def profile_delete(all_data: Annotated[bool, typer.Option("--all", help="Delete 
         delete_profile(store)
     finally:
         store.close()
+    delete_profile_cache()
     delete_profile_markdown()
-    console.print("Deleted local profile, feedback, play, and session data.")
+    console.print("Deleted local profile rules, feedback, sessions, plays, memory, evidence, and pending suggestions.")
 
 
 @privacy_app.command("status")

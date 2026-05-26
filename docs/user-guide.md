@@ -275,11 +275,13 @@ uv run tonepath privacy status
 uv run tonepath profile inspect
 ```
 
-Delete local profile, session, feedback, and play data while keeping scanned tracks:
+Delete local profile rules, pending suggestions, editable profile Markdown, session, feedback, and play data:
 
 ```bash
 uv run tonepath profile delete --all
 ```
+
+This keeps scanned tracks, audio features, model cache, separated audio cache, and music files.
 
 Local test music and secrets belong outside git. The repository ignores `songs/`, `.venv/`, `.env`, caches, and local database files. Commit `.env.example`, never `.env`.
 

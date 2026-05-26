@@ -483,6 +483,39 @@ class ProfileLearningTest(unittest.TestCase):
                 self.assertIn("Applied: none", second_output)
                 self.assertIn("Skipped already active: focus-lower-vocalness, focus-demote-high-bpm", second_output)
 
+    def test_profile_delete_all_clears_pending_suggestions_but_keeps_non_profile_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                store, track_id = populated_store(tmp, loudness=-8.0, bpm=120.0, vocalness=0.2)
+                session_id = store.save_session(plan_session("focus 30m"))
+                store.record_feedback("too-loud", session_id=session_id, track_id=track_id)
+                evidence = build_profile_evidence(store)
+                save_suggestions(evidence, deterministic_suggestions(evidence), "deterministic")
+                store.close()
+                memory_result = CliRunner().invoke(app, ["profile", "memory", "write"])
+                self.assertEqual(memory_result.exit_code, 0, memory_result.output)
+                (home / "cache" / "models").mkdir(parents=True)
+                (home / "cache" / "models" / "keep.txt").write_text("model cache", encoding="utf-8")
+                (home / "cache" / "separated").mkdir(parents=True)
+                (home / "cache" / "separated" / "keep.txt").write_text("separated cache", encoding="utf-8")
+
+                delete_result = CliRunner().invoke(app, ["profile", "delete", "--all"])
+                inspect_result = CliRunner().invoke(app, ["profile", "inspect", "--json"])
+
+                self.assertEqual(delete_result.exit_code, 0, delete_result.output)
+                self.assertIn("pending suggestions", plain_output(delete_result.output))
+                self.assertEqual(inspect_result.exit_code, 0, inspect_result.output)
+                payload = json.loads(inspect_result.output)
+                self.assertEqual(payload["readiness"], "No feedback yet")
+                self.assertEqual(payload["active_rules"], [])
+                self.assertEqual(payload["pending_suggestions"], [])
+                self.assertEqual(payload["suggestion_groups"], [])
+                self.assertFalse((home / "cache" / "profile").exists())
+                self.assertFalse((home / "profile").exists())
+                self.assertTrue((home / "cache" / "models" / "keep.txt").exists())
+                self.assertTrue((home / "cache" / "separated" / "keep.txt").exists())
+
     def test_cli_feedback_points_to_profile_suggest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"

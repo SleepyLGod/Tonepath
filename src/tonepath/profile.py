@@ -680,6 +680,14 @@ def delete_profile_markdown() -> None:
         shutil.rmtree(root)
 
 
+def delete_profile_cache() -> None:
+    """Delete local pending profile suggestion cache files."""
+
+    root = config.ensure_data_dir() / "cache" / "profile"
+    if root.exists():
+        shutil.rmtree(root)
+
+
 def rule_from_suggestion(payload: dict[str, object]) -> ProfileRule:
     """Convert one validated suggestion to a stored profile rule."""
 
