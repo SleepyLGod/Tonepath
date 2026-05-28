@@ -27,6 +27,7 @@ from tonepath.enrichment import EnrichmentProvider, enrich_library
 from tonepath.experience import listen_intelligence_summary, setup_next_step, smart_plan_session
 from tonepath.evaluation import (
     evaluate_audit,
+    evaluate_bakeoff,
     evaluate_intent,
     evaluate_profile_comparison,
     evaluate_rerank,
@@ -36,7 +37,13 @@ from tonepath.evaluation import (
 )
 from tonepath.explanation import explain_candidate
 from tonepath.llm import llm_doctor, parse_prompt_with_llm
-from tonepath.model_runtime import isolation_report, model_runtime_report, model_runtime_status, setup_essentia_tf_runtime
+from tonepath.model_runtime import (
+    isolation_report,
+    model_runtime_report,
+    model_runtime_status,
+    setup_clap_runtime,
+    setup_essentia_tf_runtime,
+)
 from tonepath.models import CandidateScore, SessionPlan, Track
 from tonepath.planner import plan_session, request_constraints
 from tonepath.playback import MpvAdapter
@@ -407,8 +414,8 @@ def current() -> None:
 
 @app.command()
 def analyze(
-    features: Annotated[str, typer.Option(help="Feature tier: basic, vocalness, mir, tags, or affect.")] = "basic",
-    method: Annotated[str, typer.Option(help="Analysis method: spectral, audio-separator, demucs-cli, essentia, or essentia-tf.")] = "spectral",
+    features: Annotated[str, typer.Option(help="Feature tier: basic, vocalness, mir, tags, affect, or embedding.")] = "basic",
+    method: Annotated[str, typer.Option(help="Analysis method: spectral, audio-separator, demucs-cli, essentia, essentia-tf, or clap.")] = "spectral",
     only_missing: Annotated[bool, typer.Option("--only-missing", help="Analyze only tracks missing the requested feature.")] = False,
     changed_only: Annotated[bool, typer.Option("--changed-only", help="Analyze only files changed since the last scan.")] = False,
     force: Annotated[bool, typer.Option("--force", help="Re-analyze tracks even when existing results are present.")] = False,
@@ -416,8 +423,8 @@ def analyze(
 ) -> None:
     """Run local audio feature analysis for scanned tracks."""
 
-    if features not in {"basic", "vocalness", "mir", "tags", "affect"}:
-        raise typer.BadParameter("only basic, vocalness, mir, tags, and affect feature analysis are implemented")
+    if features not in {"basic", "vocalness", "mir", "tags", "affect", "embedding"}:
+        raise typer.BadParameter("only basic, vocalness, mir, tags, affect, and embedding feature analysis are implemented")
     if features == "vocalness" and method not in {"spectral", "audio-separator", "demucs-cli"}:
         raise typer.BadParameter("only spectral, audio-separator, and demucs-cli vocalness methods are implemented")
     if features == "mir" and method != "essentia":
@@ -426,8 +433,10 @@ def analyze(
         raise typer.BadParameter("only essentia and essentia-tf are supported for tags analysis")
     if features == "affect" and method != "essentia-tf":
         raise typer.BadParameter("only essentia-tf is supported for affect analysis")
+    if features == "embedding" and method != "clap":
+        raise typer.BadParameter("only clap is supported for embedding analysis")
     if features == "basic" and method != "spectral":
-        raise typer.BadParameter("--method is only supported with --features vocalness, mir, tags, or affect")
+        raise typer.BadParameter("--method is only supported with --features vocalness, mir, tags, affect, or embedding")
     store = TonepathStore()
     try:
         try:
@@ -577,6 +586,21 @@ def models_setup_essentia_tf() -> None:
     console.print(f"Essentia TensorFlow runtime ready: {status.runtime_dir}")
 
 
+@models_setup_app.command("clap")
+def models_setup_clap() -> None:
+    """Set up the workspace-local CLAP embedding runtime."""
+
+    console.print(isolation_report())
+    try:
+        status = setup_clap_runtime()
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if not status.ready:
+        missing = ", ".join(status.missing)
+        raise typer.BadParameter(f"CLAP runtime setup completed, but doctor still reports missing items: {missing}")
+    console.print(f"CLAP runtime ready: {status.runtime_dir}")
+
+
 @models_app.command("doctor")
 def models_doctor() -> None:
     """Check local model runtime status."""
@@ -708,6 +732,32 @@ def eval_suite(
         print_json_payload(payload)
         return
     render_eval_suite(payload)
+
+
+@eval_app.command("bakeoff")
+def eval_bakeoff(
+    engines: Annotated[list[str] | None, typer.Option("--engine", help="Engine to compare: selector or clap. Repeat for multiple engines.")] = None,
+    limit: Annotated[int, typer.Option("--limit", help="Maximum number of candidates per scenario.")] = 8,
+    json_output: Annotated[bool, typer.Option("--json", help="Print stable JSON for comparison.")] = False,
+) -> None:
+    """Compare selector quality against optional experimental music-text engines."""
+
+    if limit <= 0:
+        raise typer.BadParameter("--limit must be greater than zero")
+    selected_engines = tuple(engines or ["selector", "clap"])
+    store = TonepathStore()
+    try:
+        try:
+            payload = evaluate_bakeoff(store, selected_engines, limit)
+        except RuntimeError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    finally:
+        store.close()
+
+    if json_output:
+        print_json_payload(payload)
+        return
+    render_eval_bakeoff(payload)
 
 
 @eval_app.command("intent")
@@ -1311,6 +1361,41 @@ def render_eval_suite_candidates(rows: list[dict[str, object]]) -> None:
             "\n".join(flags) if flags else "ok",
         )
     console.print(table)
+
+
+def render_eval_bakeoff(payload: list[dict[str, object]]) -> None:
+    """Render music-text bake-off results."""
+
+    for scenario in payload:
+        delta = scenario.get("delta", {})
+        if not isinstance(delta, dict):
+            delta = {}
+        console.print(
+            f"\n[bold]{scenario['scenario_id']}[/bold] · {scenario['prompt']} · "
+            f"verdict: {delta.get('verdict', 'inconclusive')}"
+        )
+        engines = scenario.get("engines")
+        if not isinstance(engines, list):
+            raise TypeError("Bake-off payload engines must be a list.")
+        table = Table("Engine", "Result", "Checks", "Top candidates", box=box.SIMPLE, expand=True)
+        for engine in engines:
+            if not isinstance(engine, dict):
+                raise TypeError("Bake-off engine rows must be objects.")
+            candidates = engine.get("candidates")
+            if not isinstance(candidates, list):
+                raise TypeError("Bake-off engine row must include candidates.")
+            top = "\n".join(
+                f"{index}. {eval_track_label(row['track'])}"
+                for index, row in enumerate(candidates[:3], start=1)
+                if isinstance(row, dict) and isinstance(row.get("track"), dict)
+            )
+            table.add_row(
+                str(engine["engine"]),
+                str(engine["result"]),
+                benchmark_check_summary(engine.get("checks", [])),
+                top or "--",
+            )
+        console.print(table)
 
 
 def benchmark_check_summary(checks: list[object]) -> str:

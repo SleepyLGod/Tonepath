@@ -12,7 +12,7 @@ from pathlib import Path
 
 from tonepath import config
 from tonepath.affect import affect_profile_from_enrichment
-from tonepath.benchmark import evaluate_benchmark_scenario, load_benchmark_scenarios, scenario_from_prompt
+from tonepath.benchmark import aggregate_result, evaluate_benchmark_scenario, load_benchmark_scenarios, scenario_from_prompt
 from tonepath.db import TonepathStore
 from tonepath.display import (
     canonical_track_key,
@@ -22,6 +22,7 @@ from tonepath.display import (
     display_title,
     normalize_key_part,
 )
+from tonepath.embedding import cosine_similarity, read_clap_audio_embedding, read_or_create_clap_text_embedding, read_or_create_clap_text_embeddings
 from tonepath.models import CandidateScore, ProfileRule, SessionPlan, TrackFeatures
 from tonepath.planner import parse_request, plan_session, request_constraints
 from tonepath.selector import select_path
@@ -305,6 +306,202 @@ def evaluate_suite(store: TonepathStore, limit: int, prompts: tuple[str, ...] | 
             }
         )
     return payload
+
+
+BAKEOFF_ENGINES = {"selector", "clap"}
+BAKEOFF_RESULT_ORDER = {"PASS": 0, "WARN": 1, "FAIL": 2}
+
+
+def evaluate_bakeoff(store: TonepathStore, engines: tuple[str, ...], limit: int) -> list[dict[str, object]]:
+    """Compare selector output against optional experimental engines."""
+
+    unsupported = [engine for engine in engines if engine not in BAKEOFF_ENGINES]
+    if unsupported:
+        raise RuntimeError(f"Unsupported bake-off engine(s): {', '.join(unsupported)}")
+    scenarios = load_benchmark_scenarios()
+    if "clap" in engines:
+        read_or_create_clap_text_embeddings(clap_probes_for_scenarios(scenarios))
+    payload: list[dict[str, object]] = []
+    for scenario in scenarios:
+        scenario_results = [evaluate_bakeoff_engine(store, scenario, engine, limit) for engine in engines]
+        payload.append(
+            {
+                "scenario_id": scenario["id"],
+                "lang": scenario["lang"],
+                "prompt": scenario["prompt"],
+                "limit": min(limit, int(scenario["limit"])),
+                "engines": scenario_results,
+                "delta": bakeoff_delta(scenario_results),
+            }
+        )
+    return payload
+
+
+def evaluate_bakeoff_engine(store: TonepathStore, scenario: dict[str, object], engine: str, limit: int) -> dict[str, object]:
+    """Return one engine's benchmark result for a scenario."""
+
+    prompt = str(scenario["prompt"])
+    plan = plan_session(prompt)
+    scenario_limit = min(limit, int(scenario["limit"]))
+    if engine == "selector":
+        candidates = eval_candidates(store, plan, scenario_limit)
+    elif engine == "clap":
+        candidates = clap_candidates(store, plan, scenario_limit)
+    else:
+        raise RuntimeError(f"Unsupported bake-off engine: {engine}")
+    rows = [candidate_to_eval_row(store, candidate) for candidate in candidates]
+    annotate_red_flags(rows, no_vocals=plan.request.no_vocals)
+    annotate_yellow_flags(rows, no_vocals=plan.request.no_vocals)
+    benchmark = evaluate_benchmark_scenario(scenario, request_intent_payload(plan), rows)
+    if engine == "clap" and not rows:
+        checks = list(benchmark["checks"])
+        checks.append(
+            {
+                "type": "engine_candidates",
+                "status": "fail",
+                "message": "CLAP has no cached audio embeddings. Run analyze --features embedding --method clap.",
+                "affected_ranks": [],
+            }
+        )
+        benchmark = {**benchmark, "checks": checks, "result": aggregate_result(checks)}
+    return {
+        "engine": engine,
+        "result": benchmark["result"],
+        "checks": benchmark["checks"],
+        "red_flag_count": sum(len(row["red_flags"]) for row in rows),
+        "yellow_flag_count": sum(len(row["yellow_flags"]) for row in rows),
+        "candidates": rows,
+    }
+
+
+def clap_candidates(store: TonepathStore, plan: SessionPlan, limit: int) -> list[CandidateScore]:
+    """Return a CLAP text-audio reranked path from cached audio embeddings."""
+
+    per_phase = max(1, math.ceil(limit / max(len(plan.phases), 1)))
+    tracks = store.list_tracks()
+    selected: list[CandidateScore] = []
+    used_ids: set[int] = set()
+    used_keys: set[tuple[str, str, int]] = set()
+    for phase in plan.phases:
+        probe = clap_probe_for_phase(plan, phase.label)
+        text_embedding = read_or_create_clap_text_embedding(probe)
+        scored: list[CandidateScore] = []
+        for track in tracks:
+            if track.id is None or track.id in used_ids or canonical_track_key(track) in used_keys:
+                continue
+            audio_embedding = read_clap_audio_embedding(track)
+            if audio_embedding is None:
+                continue
+            score = cosine_similarity(audio_embedding, text_embedding)
+            scored.append(
+                CandidateScore(
+                    track=track,
+                    phase=phase,
+                    score=score,
+                    confidence="medium",
+                    reasons=(f"CLAP text-audio similarity for probe: {probe}",),
+                )
+            )
+        scored.sort(key=lambda candidate: candidate.score, reverse=True)
+        for candidate in scored[:per_phase]:
+            selected.append(candidate)
+            key = canonical_track_key(candidate.track)
+            used_keys.add(key)
+            if candidate.track.id is not None:
+                used_ids.add(candidate.track.id)
+    return selected[:limit]
+
+
+def clap_probes_for_scenarios(scenarios: list[dict[str, object]]) -> list[str]:
+    """Return all deterministic CLAP probes needed by a benchmark run."""
+
+    probes: list[str] = []
+    for scenario in scenarios:
+        plan = plan_session(str(scenario["prompt"]))
+        probes.extend(clap_probe_for_phase(plan, phase.label) for phase in plan.phases)
+    return probes
+
+
+def clap_probe_for_phase(plan: SessionPlan, phase_label: str) -> str:
+    """Return a deterministic English CLAP probe for one parsed intent and phase."""
+
+    request = plan.request
+    constraints = set(request_constraints(request))
+    parts: list[str] = []
+    if request.target_state == "uplift":
+        parts.append("gentle uplifting warm calm music, not loud, not gloomy")
+    elif request.target_state == "calm":
+        if "gentle_uplift" in constraints:
+            parts.append("calm reassuring warm music, not dark, not tense")
+        else:
+            parts.append("calm relaxing low stimulation music")
+    elif request.target_state == "focus":
+        parts.append("low distraction focus music")
+    elif request.target_state == "energized":
+        parts.append("gradually energizing music")
+    elif request.target_state == "steady":
+        parts.append("steady rhythmic music, not too loud")
+    else:
+        parts.append("balanced background music")
+
+    if phase_label == "hold":
+        parts.append("comforting, gentle, low arousal")
+    elif phase_label == "stabilize":
+        parts.append("stable, warm, controlled energy")
+    elif phase_label == "lift":
+        parts.append("hopeful, brighter, gently uplifting")
+    elif phase_label in {"soften", "settle", "calm"}:
+        parts.append("soothing, low tension, not gloomy")
+    elif phase_label in {"decompress", "focus"}:
+        parts.append("quiet, clear, low stimulation")
+
+    if request.no_vocals:
+        parts.append("instrumental, no vocals")
+    if request.quiet:
+        parts.append("low stimulation, not loud")
+    return "; ".join(parts)
+
+
+def bakeoff_delta(results: list[dict[str, object]]) -> dict[str, object]:
+    """Return a compact comparison between selector and the first non-selector engine."""
+
+    baseline = next((row for row in results if row.get("engine") == "selector"), None)
+    compared = next((row for row in results if row.get("engine") != "selector"), None)
+    if baseline is None or compared is None:
+        return {"verdict": "inconclusive"}
+    base_score = bakeoff_result_score(baseline)
+    compared_score = bakeoff_result_score(compared)
+    if compared_score < base_score:
+        verdict = "improved"
+    elif compared_score > base_score:
+        verdict = "regressed"
+    else:
+        verdict = "inconclusive"
+    return {
+        "baseline_engine": baseline["engine"],
+        "baseline_result": baseline["result"],
+        "compared_engine": compared["engine"],
+        "compared_result": compared["result"],
+        "verdict": verdict,
+    }
+
+
+def bakeoff_result_score(result: dict[str, object]) -> tuple[int, int, int]:
+    """Return an ordered score where lower means a better benchmark outcome."""
+
+    checks = result.get("checks", [])
+    warn_count = 0
+    fail_count = 0
+    if isinstance(checks, list):
+        for check in checks:
+            if not isinstance(check, dict):
+                continue
+            status = str(check.get("status", "pass")).lower()
+            if status == "warn":
+                warn_count += 1
+            elif status == "fail":
+                fail_count += 1
+    return (BAKEOFF_RESULT_ORDER.get(str(result.get("result")), 1), fail_count, warn_count)
 
 
 def evaluate_intent() -> dict[str, object]:

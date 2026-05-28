@@ -28,7 +28,7 @@ For detailed usage, model setup, evaluation, profile learning, and privacy notes
 | Selection | Implemented | Explainable deterministic scoring with confidence labels and profile-rule support. |
 | Playback | Implemented | Local `mpv` adapter with foreground, background, stop, and `--dry-run` preview. |
 | TUI | MVP | Textual workbench for prompt intake, playback control, queue, why panel, feedback, and event log. |
-| Audio analysis | Basic + optional models | Default lightweight analysis plus optional MIR, Essentia-TF tagging/affect, and separator fallback paths. |
+| Audio analysis | Basic + optional models | Default lightweight analysis plus optional MIR, Essentia-TF tagging/affect, experimental CLAP bake-off, and separator fallback paths. |
 | Profile learning | Early-stage | Feedback, suggestions, Markdown memory/evidence, rule apply, and profile comparison are available. |
 | LLM/Codex | Opt-in | Used for intent parsing, audit, and profile suggestions only when explicitly invoked. |
 

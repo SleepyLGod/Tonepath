@@ -19,7 +19,14 @@ from typing import Any
 from tonepath.affect import affect_enrichment_records, derive_affect_profile, tags_to_scores
 from tonepath import config
 from tonepath.db import TonepathStore
-from tonepath.model_runtime import ensure_essentia_tf_affect_runtime, ensure_essentia_tf_runtime, run_essentia_tf_affect, run_essentia_tf_tags
+from tonepath.embedding import clap_audio_embedding_missing, create_clap_audio_embedding
+from tonepath.model_runtime import (
+    ensure_clap_runtime,
+    ensure_essentia_tf_affect_runtime,
+    ensure_essentia_tf_runtime,
+    run_essentia_tf_affect,
+    run_essentia_tf_tags,
+)
 from tonepath.models import EnrichmentRecord, Track, TrackFeatures
 from tonepath.scanner import fingerprint, read_track
 
@@ -43,7 +50,8 @@ MEAN_VOLUME_PATTERN = re.compile(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB")
 VOCALNESS_METHODS = {"spectral", "demucs-cli", "audio-separator"}
 TAGGING_METHODS = {"essentia", "essentia-tf"}
 AFFECT_METHODS = {"essentia-tf"}
-ANALYSIS_FEATURES = {"basic", "vocalness", "mir", "tags", "affect"}
+EMBEDDING_METHODS = {"clap"}
+ANALYSIS_FEATURES = {"basic", "vocalness", "mir", "tags", "affect", "embedding"}
 
 
 @dataclass(frozen=True)
@@ -72,7 +80,7 @@ def analyze_library(
     """Analyze scanned local tracks and return analyzed/skipped counts."""
 
     if features not in ANALYSIS_FEATURES:
-        raise ValueError("Only basic, vocalness, mir, tags, and affect feature analysis are implemented.")
+        raise ValueError("Only basic, vocalness, mir, tags, affect, and embedding feature analysis are implemented.")
     if features == "vocalness" and method not in VOCALNESS_METHODS:
         raise ValueError("Only spectral, audio-separator, and demucs-cli vocalness methods are implemented.")
     if features == "mir" and method != "essentia":
@@ -81,8 +89,10 @@ def analyze_library(
         raise ValueError("Only essentia and essentia-tf are supported for tags analysis.")
     if features == "affect" and method not in AFFECT_METHODS:
         raise ValueError("Only essentia-tf is supported for affect analysis.")
+    if features == "embedding" and method not in EMBEDDING_METHODS:
+        raise ValueError("Only clap is supported for embedding analysis.")
     if features == "basic" and method != "spectral":
-        raise ValueError("The --method option is only supported with --features vocalness, mir, tags, or affect.")
+        raise ValueError("The --method option is only supported with --features vocalness, mir, tags, affect, or embedding.")
     if features == "vocalness" and method == "audio-separator" and shutil.which("audio-separator") is None:
         raise RuntimeError("audio-separator vocalness requires the optional models extra. Run: uv sync --extra models")
     if features == "vocalness" and method == "demucs-cli" and shutil.which("demucs") is None:
@@ -95,6 +105,8 @@ def analyze_library(
         ensure_essentia_tf_runtime()
     if features == "affect" and method == "essentia-tf":
         ensure_essentia_tf_affect_runtime()
+    if features == "embedding" and method == "clap":
+        ensure_clap_runtime()
     if limit is not None and limit < 1:
         raise ValueError("Limit must be greater than zero.")
     if force and only_missing:
@@ -131,9 +143,11 @@ def analyze_library(
             elif features == "tags":
                 result, enrichment = analyze_track_tags(track, existing, method=method, force=force)
                 upsert_enrichment_records(store, enrichment)
-            else:
+            elif features == "affect":
                 result, enrichment = analyze_track_affect(track, existing, method=method)
                 upsert_enrichment_records(store, enrichment)
+            else:
+                result = analyze_track_embedding(track, existing, method=method)
         except RuntimeError as exc:
             skipped += 1
             if progress is not None:
@@ -187,6 +201,8 @@ def track_needs_analysis(
 
     if changed_only and track_file_changed(track):
         return True
+    if features == "embedding":
+        return clap_audio_embedding_missing(track)
     missing = requested_feature_missing(existing, features, method)
     if changed_only:
         return missing
@@ -213,6 +229,8 @@ def requested_feature_missing(existing: TrackFeatures | None, features: str, met
         return existing is None or existing.vocalness is None or existing.feature_source != ESSENTIA_VOICE_FEATURE_SOURCE
     if features == "affect":
         return existing is None or existing.arousal_estimate is None or existing.valence_estimate is None
+    if features == "embedding":
+        return False
 
     source = feature_source_for_method(method)
     if method in {"audio-separator", "demucs-cli"}:
@@ -286,6 +304,8 @@ def feature_changed(existing: TrackFeatures | None, result: TrackFeatures) -> bo
 def should_persist_result(existing: TrackFeatures | None, result: TrackFeatures, features: str, method: str) -> bool:
     """Return whether an analysis result should be stored."""
 
+    if features == "embedding":
+        return False
     if features == "vocalness" and method in {"audio-separator", "demucs-cli"}:
         if result.vocalness is None and existing is None:
             return False
@@ -609,6 +629,21 @@ def analyze_track_affect(
             )
         )
     return features, records
+
+
+def analyze_track_embedding(
+    track: Track,
+    existing: TrackFeatures | None = None,
+    method: str = "clap",
+) -> TrackFeatures:
+    """Analyze one track for optional music-text embedding cache."""
+
+    if track.id is None:
+        raise ValueError("Track must be persisted before analysis.")
+    if method not in EMBEDDING_METHODS:
+        raise ValueError("Only clap embedding analysis is implemented.")
+    create_clap_audio_embedding(track)
+    return existing or TrackFeatures(track_id=track.id, feature_source="model-clap-embedding", confidence="medium")
 
 
 def affect_feature_source(existing: TrackFeatures | None) -> str:

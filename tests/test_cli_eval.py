@@ -12,16 +12,19 @@ from tonepath.cli import app
 from tonepath.db import TonepathStore
 from tonepath.evaluation import (
     annotate_red_flags,
+    clap_probe_for_phase,
     codex_audit_schema_path,
     codex_prompt,
     codex_skill_path,
     evaluate_audit,
+    evaluate_bakeoff,
     evaluate_intent,
     evaluate_rerank,
     evaluate_suite,
     profile_movements,
 )
 from tonepath.models import ProfileRule, Track, TrackFeatures
+from tonepath.planner import plan_session
 
 
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -81,6 +84,76 @@ class CliEvalTest(unittest.TestCase):
                 after = store.profile_summary()
                 store.close()
                 self.assertEqual(before, after)
+
+    def test_eval_bakeoff_json_outputs_engine_results(self) -> None:
+        scenario = {
+            "id": "sad_test",
+            "lang": "zh",
+            "prompt": "我有点难过，想慢慢开心一点，但不要太吵",
+            "limit": 2,
+            "expected_intent": {"source_state": "low", "target_state": "uplift", "duration_min": 30, "constraints": ["low_stimulation", "gentle_uplift"]},
+            "checks": [{"type": "no_duplicate_candidates", "level": "fail"}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                warm_id = store.upsert_track(track_for(Path(tmp) / "warm.mp3", title="warm", genre="ambient"))
+                dark_id = store.upsert_track(track_for(Path(tmp) / "dark.mp3", title="dark", genre="soundtrack"))
+                store.upsert_features(TrackFeatures(warm_id, energy=0.3, loudness=-14.0, bpm=90.0, valence_estimate=0.7, feature_source="test", confidence="high"))
+                store.upsert_features(TrackFeatures(dark_id, energy=0.4, loudness=-12.0, bpm=100.0, valence_estimate=0.4, feature_source="test", confidence="high"))
+                store.close()
+
+                def audio_embedding(track: Track) -> list[float] | None:
+                    return [1.0, 0.0] if track.title == "warm" else [0.0, 1.0]
+
+                with patch("tonepath.evaluation.load_benchmark_scenarios", return_value=[scenario]), patch(
+                    "tonepath.evaluation.read_or_create_clap_text_embeddings", return_value={}
+                ), patch(
+                    "tonepath.evaluation.read_or_create_clap_text_embedding", return_value=[1.0, 0.0]
+                ), patch("tonepath.evaluation.read_clap_audio_embedding", side_effect=audio_embedding):
+                    result = CliRunner().invoke(app, ["eval", "bakeoff", "--engine", "selector", "--engine", "clap", "--limit", "2", "--json"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output)
+                self.assertEqual(payload[0]["scenario_id"], "sad_test")
+                self.assertEqual([engine["engine"] for engine in payload[0]["engines"]], ["selector", "clap"])
+                self.assertEqual(payload[0]["engines"][1]["candidates"][0]["track"]["title"], "warm")
+
+    def test_eval_bakeoff_marks_missing_clap_embeddings_as_fail(self) -> None:
+        scenario = {
+            "id": "sad_test",
+            "lang": "zh",
+            "prompt": "我有点难过，想慢慢开心一点，但不要太吵",
+            "limit": 1,
+            "expected_intent": {},
+            "checks": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                store.upsert_track(track_for(Path(tmp) / "warm.mp3", title="warm", genre="ambient"))
+                before = store.profile_summary()
+                with patch("tonepath.evaluation.load_benchmark_scenarios", return_value=[scenario]), patch(
+                    "tonepath.evaluation.read_or_create_clap_text_embeddings", return_value={}
+                ), patch(
+                    "tonepath.evaluation.read_or_create_clap_text_embedding", return_value=[1.0]
+                ), patch("tonepath.evaluation.read_clap_audio_embedding", return_value=None):
+                    payload = evaluate_bakeoff(store, ("selector", "clap"), 1)
+                after = store.profile_summary()
+                store.close()
+
+                clap = payload[0]["engines"][1]
+                self.assertEqual(clap["result"], "FAIL")
+                self.assertEqual(before, after)
+
+    def test_chinese_bakeoff_prompt_uses_english_canonical_probe(self) -> None:
+        plan = plan_session("我有点难过，想慢慢开心一点，但不要太吵")
+
+        probe = clap_probe_for_phase(plan, "lift")
+
+        self.assertIn("gentle uplifting warm calm music", probe)
+        self.assertIn("hopeful, brighter", probe)
+        self.assertIn("low stimulation", probe)
 
     def test_eval_selection_unknown_features_stay_null(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

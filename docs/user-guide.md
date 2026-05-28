@@ -142,7 +142,15 @@ The setup command creates a separate Python 3.11 runtime under `TONEPATH_HOME/ru
 
 The `affect` tier stores arousal and valence in `track_features`, then derives a readable affect profile such as `sadness`, `uplift`, `calmness`, `tension`, `warmth`, `darkness`, and `brightness` from Essentia mood/theme tags plus arousal/valence. These axes are evidence for selector and benchmark logic; they do not replace the raw model tags. Essentia model files are suitable for a local prototype, but their upstream models may carry non-commercial license terms, so do not treat this path as a commercial-ready default without reviewing the upstream licenses.
 
-Music-text embedding models such as CLAP or MuQ-MuLan are not part of the default flow. They should be added only after `eval suite` shows a measured failure mode that Essentia mood/theme plus arousal/valence cannot address.
+Experimental music-text bake-off:
+
+```bash
+uv run tonepath models setup clap
+uv run tonepath analyze --features embedding --method clap --changed-only
+uv run tonepath eval bakeoff --engine selector --engine clap --limit 8
+```
+
+The CLAP path is evaluation-only. It creates a separate runtime under `TONEPATH_HOME/runtimes/clap-py311/`, stores model/cache files under `TONEPATH_HOME/cache/models/clap/`, and stores per-track embeddings under `TONEPATH_HOME/cache/embeddings/clap/`. It does not change `listen`, TUI playback, selector weights, profile rules, or the SQLite schema. MuQ-MuLan remains a later candidate if CLAP does not improve Chinese or emotion-transition benchmark cases.
 
 Model analysis is resumable and incremental:
 
@@ -165,6 +173,7 @@ uv run tonepath eval selection "我现在很烦，想半小时后进入写代码
 uv run tonepath eval selection "我现在很烦，想半小时后进入写代码状态，不要人声" --json
 uv run tonepath eval suite --limit 5
 uv run tonepath eval suite --json
+uv run tonepath eval bakeoff --engine selector --engine clap --limit 8
 uv run tonepath eval profile "我要写论文，四十五分钟，低刺激，最好不要人声" --limit 8
 uv run tonepath eval audit "我现在很烦，想半小时后进入写代码状态，不要人声" --json
 uv run tonepath eval audit "我现在很烦，想半小时后进入写代码状态，不要人声" --codex --web --limit 12
@@ -174,6 +183,8 @@ uv run tonepath eval rerank "我现在很烦，想半小时后进入写代码状
 `eval intent` checks the packaged Chinese/English prompt-intent fixture corpus. Tonepath uses a deterministic bilingual parser as its local baseline; public corpora such as MASSIVE, GoEmotions, Chinese emotion lexicons, MusicCaps, and MTG-Jamendo are useful references for vocabulary and test design, but Tonepath does not download or vendor those datasets at runtime.
 
 `eval suite` runs a small built-in set of product prompts and flags likely quality problems such as high vocalness in no-vocals results, high stimulation in focus/decompress phases, or low-evidence top candidates. It is read-only: it does not create sessions, playback rows, feedback, or profile rules.
+
+`eval bakeoff` compares the normal selector against optional experimental engines. The first experimental engine is CLAP, which uses deterministic English text probes derived from parsed intent so Chinese prompts are evaluated through the same structured intent layer. Bake-off output is advisory only.
 
 `eval profile` compares selection with and without active profile rules. It is the main way to check whether personalization is helping before changing normal listening behavior.
 

@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 from tonepath import config
 from tonepath.cli import app
 from tonepath.llm import llm_doctor, parse_prompt_with_llm
-from tonepath.model_runtime import model_runtime_status, setup_essentia_tf_runtime
+from tonepath.model_runtime import clap_runtime_status, model_runtime_status, setup_clap_runtime, setup_essentia_tf_runtime
 
 
 class RuntimeAndLlmTest(unittest.TestCase):
@@ -42,6 +42,18 @@ class RuntimeAndLlmTest(unittest.TestCase):
                 setup_essentia_tf_runtime()
 
                 status = model_runtime_status()
+                self.assertTrue(str(status.runtime_dir).startswith(tmp))
+                self.assertTrue(status.runner.exists())
+                self.assertTrue(run.called)
+
+    def test_clap_model_setup_uses_workspace_local_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": tmp}, clear=True), patch(
+                "tonepath.model_runtime.ensure_isolated_python311", return_value=Path("/isolated/python3.11")
+            ), patch("tonepath.model_runtime.subprocess.run") as run, patch("tonepath.model_runtime.download_clap_checkpoint"):
+                setup_clap_runtime()
+
+                status = clap_runtime_status()
                 self.assertTrue(str(status.runtime_dir).startswith(tmp))
                 self.assertTrue(status.runner.exists())
                 self.assertTrue(run.called)

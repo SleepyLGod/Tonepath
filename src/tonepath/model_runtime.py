@@ -17,6 +17,11 @@ from tonepath import config
 ESSENTIA_TF_RUNTIME = "essentia-tf-py311"
 ESSENTIA_TF_PACKAGE = "essentia-tensorflow==2.1b6.dev1389"
 ESSENTIA_MODEL_BASE_URL = "https://essentia.upf.edu/models"
+CLAP_RUNTIME = "clap-py311"
+CLAP_PACKAGES = ("torch", "torchvision", "torchaudio", "laion-clap")
+CLAP_MODEL_ID = "laion-clap-default"
+CLAP_CHECKPOINT_NAME = "630k-audioset-best.pt"
+CLAP_CHECKPOINT_URL = f"https://huggingface.co/lukewys/laion_clap/resolve/main/{CLAP_CHECKPOINT_NAME}"
 
 ESSENTIA_MODEL_FILES = (
     (
@@ -130,7 +135,16 @@ def isolated_runtime_env() -> dict[str, str]:
 def ensure_isolation_dirs() -> None:
     """Create all local runtime/cache directories before setup."""
 
-    for path in (uv_python_install_dir(), uv_cache_dir(), pip_cache_dir(), python_userbase_dir(), runtime_dir(), essentia_model_dir()):
+    for path in (
+        uv_python_install_dir(),
+        uv_cache_dir(),
+        pip_cache_dir(),
+        python_userbase_dir(),
+        runtime_dir(),
+        clap_runtime_dir(),
+        essentia_model_dir(),
+        clap_model_dir(),
+    ):
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -149,6 +163,24 @@ def isolation_report() -> str:
     )
 
 
+def clap_runtime_env() -> dict[str, str]:
+    """Return environment variables that keep CLAP downloads local."""
+
+    env = isolated_runtime_env()
+    model_dir = clap_model_dir()
+    env.update(
+        {
+            "HOME": str(config.ensure_data_dir()),
+            "XDG_CACHE_HOME": str(model_dir),
+            "HF_HOME": str(model_dir / "huggingface"),
+            "TORCH_HOME": str(model_dir / "torch"),
+            "TRANSFORMERS_CACHE": str(model_dir / "transformers"),
+            "TONEPATH_CLAP_CHECKPOINT": str(clap_checkpoint_path()),
+        }
+    )
+    return env
+
+
 @dataclass(frozen=True)
 class RuntimeStatus:
     """Status for one local model runtime."""
@@ -163,10 +195,28 @@ class RuntimeStatus:
     missing_affect: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ClapRuntimeStatus:
+    """Status for the optional CLAP music-text embedding runtime."""
+
+    runtime_dir: Path
+    python: Path
+    runner: Path
+    model_dir: Path
+    ready: bool
+    missing: tuple[str, ...]
+
+
 def runtime_dir() -> Path:
     """Return the workspace-local Essentia TensorFlow runtime directory."""
 
     return config.ensure_data_dir() / "runtimes" / ESSENTIA_TF_RUNTIME
+
+
+def clap_runtime_dir() -> Path:
+    """Return the workspace-local CLAP runtime directory."""
+
+    return config.ensure_data_dir() / "runtimes" / CLAP_RUNTIME
 
 
 def runtime_python() -> Path:
@@ -178,16 +228,43 @@ def runtime_python() -> Path:
     return root / "bin" / "python"
 
 
+def clap_runtime_python() -> Path:
+    """Return the CLAP runtime Python executable path."""
+
+    root = clap_runtime_dir()
+    if sys.platform == "win32":
+        return root / "Scripts" / "python.exe"
+    return root / "bin" / "python"
+
+
 def runner_path() -> Path:
     """Return the generated worker script path."""
 
     return runtime_dir() / "tonepath_essentia_tf_worker.py"
 
 
+def clap_runner_path() -> Path:
+    """Return the generated CLAP worker script path."""
+
+    return clap_runtime_dir() / "tonepath_clap_worker.py"
+
+
 def essentia_model_dir() -> Path:
     """Return the workspace-local Essentia model directory."""
 
     return config.ensure_data_dir() / "cache" / "models" / "essentia"
+
+
+def clap_model_dir() -> Path:
+    """Return the workspace-local CLAP model/cache directory."""
+
+    return config.ensure_data_dir() / "cache" / "models" / "clap"
+
+
+def clap_checkpoint_path() -> Path:
+    """Return the workspace-local CLAP checkpoint path."""
+
+    return clap_model_dir() / CLAP_CHECKPOINT_NAME
 
 
 def setup_essentia_tf_runtime() -> RuntimeStatus:
@@ -204,6 +281,21 @@ def setup_essentia_tf_runtime() -> RuntimeStatus:
     write_runner()
     download_essentia_models()
     return model_runtime_status()
+
+
+def setup_clap_runtime() -> ClapRuntimeStatus:
+    """Create the local CLAP music-text embedding runtime."""
+
+    ensure_isolation_dirs()
+    python311 = ensure_isolated_python311()
+    root = clap_runtime_dir()
+    if not clap_runtime_python().exists():
+        subprocess.run([str(python311), "-m", "venv", str(root)], check=True, env=isolated_runtime_env())
+    subprocess.run([str(clap_runtime_python()), "-m", "pip", "install", "--upgrade", "pip"], check=True, env=clap_runtime_env())
+    subprocess.run([str(clap_runtime_python()), "-m", "pip", "install", *CLAP_PACKAGES], check=True, env=clap_runtime_env())
+    write_clap_runner()
+    download_clap_checkpoint()
+    return clap_runtime_status()
 
 
 def ensure_isolated_python311() -> Path:
@@ -251,6 +343,15 @@ def write_runner() -> Path:
     return path
 
 
+def write_clap_runner() -> Path:
+    """Write the CLAP embedding worker script into the model runtime."""
+
+    path = clap_runner_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(CLAP_WORKER, encoding="utf-8")
+    return path
+
+
 def download_essentia_models() -> None:
     """Download missing Essentia model files into the local model cache."""
 
@@ -261,6 +362,16 @@ def download_essentia_models() -> None:
         if target.exists() and target.stat().st_size > 0:
             continue
         urllib.request.urlretrieve(url, target)
+
+
+def download_clap_checkpoint() -> None:
+    """Download the CLAP checkpoint into Tonepath's local model cache."""
+
+    target = clap_checkpoint_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and target.stat().st_size > 0:
+        return
+    urllib.request.urlretrieve(CLAP_CHECKPOINT_URL, target)
 
 
 def model_runtime_status() -> RuntimeStatus:
@@ -290,10 +401,46 @@ def model_runtime_status() -> RuntimeStatus:
     )
 
 
+def clap_runtime_status() -> ClapRuntimeStatus:
+    """Return current CLAP runtime readiness."""
+
+    missing: list[str] = []
+    python = clap_runtime_python()
+    runner = clap_runner_path()
+    model_dir = clap_model_dir()
+    if not python.exists():
+        missing.append("runtime python")
+    if not runner.exists():
+        missing.append("worker script")
+    if not (model_dir / CLAP_CHECKPOINT_NAME).exists():
+        missing.append(CLAP_CHECKPOINT_NAME)
+    if python.exists():
+        completed = subprocess.run(
+            [str(python), "-c", "import laion_clap"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=clap_runtime_env(),
+        )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout).strip().splitlines()
+            suffix = f": {detail[-1]}" if detail else ""
+            missing.append(f"laion_clap package{suffix}")
+    return ClapRuntimeStatus(
+        runtime_dir=clap_runtime_dir(),
+        python=python,
+        runner=runner,
+        model_dir=model_dir,
+        ready=not missing,
+        missing=tuple(missing),
+    )
+
+
 def model_runtime_report() -> str:
     """Return a user-facing report for local model runtime status."""
 
     status = model_runtime_status()
+    clap_status = clap_runtime_status()
     lines = [
         "Tonepath model runtime doctor",
         f"Data directory: {config.ensure_data_dir()}",
@@ -307,6 +454,13 @@ def model_runtime_report() -> str:
         f"Model directory: {status.model_dir}",
         f"Ready: {status.ready}",
         f"Affect ready: {status.affect_ready}",
+        "",
+        "CLAP runtime",
+        f"Runtime directory: {clap_status.runtime_dir}",
+        f"Runtime python: {clap_status.python} ({'ok' if clap_status.python.exists() else 'missing'})",
+        f"Worker script: {clap_status.runner} ({'ok' if clap_status.runner.exists() else 'missing'})",
+        f"Model/cache directory: {clap_status.model_dir}",
+        f"Ready: {clap_status.ready}",
     ]
     if status.missing:
         lines.append("Missing:")
@@ -316,6 +470,10 @@ def model_runtime_report() -> str:
         lines.append("Missing affect models:")
         lines.extend(f"  {item}" for item in status.missing_affect)
         lines.append("Run: uv run tonepath models setup essentia-tf")
+    if clap_status.missing:
+        lines.append("Missing CLAP runtime:")
+        lines.extend(f"  {item}" for item in clap_status.missing)
+        lines.append("Run: uv run tonepath models setup clap")
     return "\n".join(lines)
 
 
@@ -337,6 +495,15 @@ def ensure_essentia_tf_affect_runtime() -> RuntimeStatus:
     return status
 
 
+def ensure_clap_runtime() -> ClapRuntimeStatus:
+    """Return CLAP runtime status or raise a setup hint when unavailable."""
+
+    status = clap_runtime_status()
+    if not status.ready:
+        raise RuntimeError("CLAP embedding runtime is not ready. Run: uv run tonepath models setup clap")
+    return status
+
+
 def run_essentia_tf_tags(path: Path) -> dict[str, object]:
     """Run the local Essentia TensorFlow worker for one audio file."""
 
@@ -349,6 +516,27 @@ def run_essentia_tf_affect(path: Path) -> dict[str, object]:
 
     status = ensure_essentia_tf_affect_runtime()
     return run_essentia_worker(path, status, "affect")
+
+
+def run_clap_audio_embedding(path: Path) -> dict[str, object]:
+    """Run the local CLAP worker for one audio file embedding."""
+
+    status = ensure_clap_runtime()
+    return run_clap_worker(status, "audio", str(path))
+
+
+def run_clap_text_embedding(text: str) -> dict[str, object]:
+    """Run the local CLAP worker for one text embedding."""
+
+    status = ensure_clap_runtime()
+    return run_clap_worker(status, "text", text)
+
+
+def run_clap_text_embeddings(texts: list[str]) -> dict[str, object]:
+    """Run the local CLAP worker for multiple text embeddings."""
+
+    status = ensure_clap_runtime()
+    return run_clap_worker(status, "texts", json.dumps(texts, ensure_ascii=False))
 
 
 def run_essentia_worker(path: Path, status: RuntimeStatus, mode: str) -> dict[str, object]:
@@ -371,6 +559,108 @@ def run_essentia_worker(path: Path, status: RuntimeStatus, mode: str) -> dict[st
     if not isinstance(payload, dict):
         raise RuntimeError("Essentia TensorFlow worker returned an invalid payload.")
     return payload
+
+
+def run_clap_worker(status: ClapRuntimeStatus, mode: str, value: str) -> dict[str, object]:
+    """Run the local CLAP worker in the requested mode."""
+
+    completed = subprocess.run(
+        [str(status.python), str(status.runner), mode, value],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=900,
+        env=clap_runtime_env(),
+    )
+    if completed.returncode != 0:
+        message = completed.stderr.strip() or completed.stdout.strip() or "CLAP embedding failed."
+        raise RuntimeError(message)
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("CLAP worker returned invalid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("CLAP worker returned an invalid payload.")
+    return payload
+
+
+CLAP_WORKER = r'''
+"""Tonepath CLAP embedding worker."""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import sys
+
+import numpy as np
+import laion_clap
+
+
+MODEL_ID = "laion-clap-default"
+
+
+def main() -> None:
+    if len(sys.argv) != 3:
+        raise SystemExit("usage: tonepath_clap_worker.py audio|text value")
+    mode = sys.argv[1]
+    value = sys.argv[2]
+    checkpoint = os.environ.get("TONEPATH_CLAP_CHECKPOINT")
+    if not checkpoint:
+        raise RuntimeError("TONEPATH_CLAP_CHECKPOINT is not set.")
+    with contextlib.redirect_stdout(sys.stderr):
+        model = laion_clap.CLAP_Module(enable_fusion=False)
+        model.load_ckpt(ckpt=checkpoint)
+        if mode == "audio":
+            raw = model.get_audio_embedding_from_filelist(x=[value], use_tensor=False)
+        elif mode == "text":
+            raw = model.get_text_embedding([value], use_tensor=False)
+        elif mode == "texts":
+            texts = json.loads(value)
+            if not isinstance(texts, list) or not all(isinstance(text, str) for text in texts):
+                raise RuntimeError("texts mode expects a JSON list of strings.")
+            raw = model.get_text_embedding(texts, use_tensor=False)
+        else:
+            raise SystemExit(f"unsupported mode: {mode}")
+    if mode == "texts":
+        vectors = normalize_many(raw)
+        print(json.dumps({"model_id": MODEL_ID, "dimension": len(vectors[0]) if vectors else 0, "embeddings": vectors}, ensure_ascii=False))
+        return
+    vector = normalize_one(raw)
+    print(json.dumps({"model_id": MODEL_ID, "dimension": len(vector), "embedding": vector}, ensure_ascii=False))
+
+
+def normalize_one(raw: object) -> list[float]:
+    array = np.asarray(raw, dtype=np.float32)
+    if array.ndim == 0:
+        raise RuntimeError("CLAP returned a scalar embedding.")
+    if array.ndim > 1:
+        array = array[0]
+    norm = float(np.linalg.norm(array))
+    if norm <= 0.0:
+        raise RuntimeError("CLAP returned an empty embedding.")
+    return (array / norm).astype(float).tolist()
+
+
+def normalize_many(raw: object) -> list[list[float]]:
+    array = np.asarray(raw, dtype=np.float32)
+    if array.ndim == 1:
+        array = array.reshape(1, -1)
+    if array.ndim != 2:
+        raise RuntimeError("CLAP returned invalid batched embeddings.")
+    vectors = []
+    for row in array:
+        norm = float(np.linalg.norm(row))
+        if norm <= 0.0:
+            raise RuntimeError("CLAP returned an empty embedding.")
+        vectors.append((row / norm).astype(float).tolist())
+    return vectors
+
+
+if __name__ == "__main__":
+    main()
+'''
 
 
 ESSENTIA_TF_WORKER = r'''

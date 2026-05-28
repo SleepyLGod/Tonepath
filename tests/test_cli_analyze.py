@@ -307,6 +307,37 @@ class CliAnalyzeTest(unittest.TestCase):
         self.assertIn("rerun with --only-missing", result.output)
         self.assertIn("resume", result.output)
 
+    def test_analyze_embedding_clap_command_is_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                path = Path(tmp) / "song.mp3"
+                path.write_bytes(b"not decoded as audio")
+                store.upsert_track(
+                    Track(
+                        id=None,
+                        path=path,
+                        file_hash="hash",
+                        mtime=1.0,
+                        title="song",
+                        artist="artist",
+                        album=None,
+                        genre=None,
+                        duration=None,
+                        format="mp3",
+                    )
+                )
+                store.close()
+
+                with patch("tonepath.analysis.ensure_clap_runtime", return_value=None), patch(
+                    "tonepath.analysis.create_clap_audio_embedding"
+                ) as create_embedding:
+                    result = CliRunner().invoke(app, ["analyze", "--features", "embedding", "--method", "clap"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertTrue(create_embedding.called)
+                self.assertIn("Analyzed 1 track(s); skipped 0 track(s).", result.output)
+
 
 if __name__ == "__main__":
     unittest.main()
