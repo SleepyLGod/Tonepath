@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from tonepath.affect import affect_phase_fit, affect_profile_from_enrichment
 from tonepath.analysis import (
     AUDIO_SEPARATOR_FEATURE_SOURCE,
     DEMUCS_FEATURE_SOURCE,
@@ -17,7 +18,7 @@ from tonepath.models import CandidateScore, ProfileRule, SessionPlan, SessionPha
 
 QUIET_GENRES = ("ambient", "classical", "instrumental", "lofi", "lo-fi", "downtempo")
 VOCAL_HEAVY_GENRES = ("pop", "rap", "hip-hop", "r&b")
-LOW_STIM_PHASES = {"focus", "decompress", "soften", "settle", "calm"}
+LOW_STIM_PHASES = {"focus", "decompress", "soften", "settle", "calm", "hold"}
 
 
 def select_path(
@@ -97,11 +98,21 @@ def score_track(
             reasons.append("BPM feature contributes to phase fit")
         if stimulation_penalty:
             reasons.append("phase stimulation penalty adjusted the score")
+        if phase.target_energy <= 0.45 and features.vocalness is not None and features.vocalness >= 0.75:
+            score -= 1.6 if phase.target_energy <= 0.35 else 1.0
+            reasons.append("vocal-heavy track is risky for low-stimulation phase")
     else:
         reasons.append("audio features unavailable; selection uses metadata and feedback")
         if track.duration is None:
             score -= 4.0
             reasons.append("low-evidence/unverified audio candidate")
+
+    enrichment = store.list_enrichment(track.id)
+    affect_profile = affect_profile_from_enrichment(enrichment)
+    affect_delta, affect_reasons = affect_phase_fit(affect_profile, phase)
+    if affect_delta:
+        score += affect_delta
+    reasons.extend(affect_reasons)
 
     if phase.vocal_policy == "avoid":
         if features and features.vocalness is not None:
@@ -193,7 +204,7 @@ def stimulation_risk_count(features: TrackFeatures, phase: SessionPhase) -> int:
     """Return count of high-stimulation feature risks for the current phase."""
 
     count = 0
-    low_stim = phase.label in LOW_STIM_PHASES
+    low_stim = phase.label in LOW_STIM_PHASES or phase.target_energy <= 0.45
     if features.bpm is not None:
         if low_stim and features.bpm >= 140.0:
             count += 1
@@ -215,7 +226,13 @@ def phase_stimulation_penalty(features: TrackFeatures, phase: SessionPhase) -> f
 
     penalty = 0.0
     if features.bpm is not None:
-        if phase.label in {"decompress", "soften", "settle", "calm"} and phase.target_energy <= 0.25 and features.bpm > 125.0:
+        if phase.target_energy <= 0.35 and features.bpm > 125.0:
+            penalty += min((features.bpm - 125.0) / 30.0, 1.0) * 4.2
+        elif phase.label == "lift" and phase.target_energy <= 0.45 and features.bpm > 130.0:
+            penalty += min((features.bpm - 130.0) / 25.0, 1.0) * 3.5
+        elif phase.target_energy <= 0.45 and features.bpm > 135.0:
+            penalty += min((features.bpm - 135.0) / 35.0, 1.0) * 2.2
+        elif phase.label in {"decompress", "soften", "settle", "calm"} and phase.target_energy <= 0.25 and features.bpm > 125.0:
             penalty += min((features.bpm - 125.0) / 30.0, 1.0) * 4.2
         elif phase.label == "focus" and features.bpm > 110.0:
             penalty += min((features.bpm - 110.0) / 35.0, 1.0) * 2.8
@@ -227,16 +244,30 @@ def phase_stimulation_penalty(features: TrackFeatures, phase: SessionPhase) -> f
             penalty += min((features.bpm - 130.0) / 35.0, 1.0) * 3.0
 
     if features.energy is not None:
-        if phase.label == "focus" and features.energy > 0.58:
+        if phase.target_energy <= 0.35 and features.energy > phase.target_energy + 0.15:
+            penalty += min((features.energy - phase.target_energy - 0.15) / 0.3, 1.0) * 2.0
+        elif phase.target_energy <= 0.45 and features.energy > phase.target_energy + 0.2:
+            penalty += min((features.energy - phase.target_energy - 0.2) / 0.3, 1.0) * 2.4
+        elif phase.label == "focus" and features.energy > 0.58:
             penalty += min((features.energy - 0.58) / 0.28, 1.0) * 1.4
         elif phase.target_energy <= 0.4 and features.energy > phase.target_energy + 0.2:
             penalty += min((features.energy - phase.target_energy - 0.2) / 0.3, 1.0) * 1.1
         elif phase.label == "stabilize" and features.energy > 0.7:
             penalty += min((features.energy - 0.7) / 0.25, 1.0) * 0.8
 
+    if features.arousal_estimate is not None:
+        if phase.target_arousal <= 0.35 and features.arousal_estimate > phase.target_arousal + 0.2:
+            penalty += min((features.arousal_estimate - phase.target_arousal - 0.2) / 0.35, 1.0) * 2.2
+        elif phase.target_arousal <= 0.45 and features.arousal_estimate > phase.target_arousal + 0.2:
+            penalty += min((features.arousal_estimate - phase.target_arousal - 0.2) / 0.35, 1.0) * 1.6
+
     if features.loudness is not None:
         loudness_unit = loudness_to_unit(features.loudness)
-        if phase.label == "focus" and loudness_unit > 0.6:
+        if phase.target_energy <= 0.35 and loudness_unit > phase.target_energy + 0.2:
+            penalty += min((loudness_unit - phase.target_energy - 0.2) / 0.3, 1.0) * 1.4
+        elif phase.target_energy <= 0.45 and loudness_unit > phase.target_energy + 0.25:
+            penalty += min((loudness_unit - phase.target_energy - 0.25) / 0.3, 1.0) * 1.6
+        elif phase.label == "focus" and loudness_unit > 0.6:
             penalty += min((loudness_unit - 0.6) / 0.25, 1.0) * 1.0
         elif phase.target_energy <= 0.4 and loudness_unit > phase.target_energy + 0.25:
             penalty += min((loudness_unit - phase.target_energy - 0.25) / 0.3, 1.0) * 0.9

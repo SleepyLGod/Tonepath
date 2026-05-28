@@ -237,6 +237,38 @@ class CliAnalyzeTest(unittest.TestCase):
                 self.assertEqual(result.exit_code, 0, result.output)
                 self.assertIn("vocalness=0.20", result.output)
 
+    def test_analyze_affect_essentia_tf_command_is_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                path = Path(tmp) / "song.mp3"
+                path.write_bytes(b"not decoded as audio")
+                store.upsert_track(
+                    Track(
+                        id=None,
+                        path=path,
+                        file_hash="hash",
+                        mtime=1.0,
+                        title="song",
+                        artist="artist",
+                        album=None,
+                        genre=None,
+                        duration=None,
+                        format="mp3",
+                    )
+                )
+                store.close()
+
+                with patch("tonepath.analysis.ensure_essentia_tf_affect_runtime", return_value=None), patch(
+                    "tonepath.analysis.run_essentia_tf_affect",
+                    return_value={"arousal": 0.2, "valence": 0.7, "tags": [["uplifting", 0.8]]},
+                ):
+                    result = CliRunner().invoke(app, ["analyze", "--features", "affect", "--method", "essentia-tf"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertIn("arousal=0.20", result.output)
+                self.assertIn("valence=0.70", result.output)
+
     def test_analyze_limit_prints_progress(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):

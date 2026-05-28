@@ -16,9 +16,10 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from tonepath.affect import affect_enrichment_records, derive_affect_profile, tags_to_scores
 from tonepath import config
 from tonepath.db import TonepathStore
-from tonepath.model_runtime import ensure_essentia_tf_runtime, run_essentia_tf_tags
+from tonepath.model_runtime import ensure_essentia_tf_affect_runtime, ensure_essentia_tf_runtime, run_essentia_tf_affect, run_essentia_tf_tags
 from tonepath.models import EnrichmentRecord, Track, TrackFeatures
 from tonepath.scanner import fingerprint, read_track
 
@@ -28,6 +29,7 @@ ESSENTIA_MIR_FEATURE_SOURCE = "model-essentia-mir"
 ESSENTIA_VOICE_FEATURE_SOURCE = "model-essentia-voice-instrumental"
 ESSENTIA_TAGS_FEATURE_SOURCE = "model-essentia-tags"
 ESSENTIA_TF_TAGS_FEATURE_SOURCE = "model-essentia-tf-tags"
+ESSENTIA_AFFECT_FEATURE_SOURCE = "model-essentia-affect-deam"
 DEMUCS_FEATURE_SOURCE = "model-demucs-cli"
 AUDIO_SEPARATOR_FEATURE_SOURCE = "model-audio-separator"
 FFMPEG_TIMEOUT_SEC = 30.0
@@ -40,7 +42,8 @@ VOCALNESS_SECONDS = 45
 MEAN_VOLUME_PATTERN = re.compile(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB")
 VOCALNESS_METHODS = {"spectral", "demucs-cli", "audio-separator"}
 TAGGING_METHODS = {"essentia", "essentia-tf"}
-ANALYSIS_FEATURES = {"basic", "vocalness", "mir", "tags"}
+AFFECT_METHODS = {"essentia-tf"}
+ANALYSIS_FEATURES = {"basic", "vocalness", "mir", "tags", "affect"}
 
 
 @dataclass(frozen=True)
@@ -69,15 +72,17 @@ def analyze_library(
     """Analyze scanned local tracks and return analyzed/skipped counts."""
 
     if features not in ANALYSIS_FEATURES:
-        raise ValueError("Only basic, vocalness, mir, and tags feature analysis are implemented.")
+        raise ValueError("Only basic, vocalness, mir, tags, and affect feature analysis are implemented.")
     if features == "vocalness" and method not in VOCALNESS_METHODS:
         raise ValueError("Only spectral, audio-separator, and demucs-cli vocalness methods are implemented.")
     if features == "mir" and method != "essentia":
         raise ValueError("Only essentia is supported for mir analysis.")
     if features == "tags" and method not in TAGGING_METHODS:
         raise ValueError("Only essentia and essentia-tf are supported for tags analysis.")
+    if features == "affect" and method not in AFFECT_METHODS:
+        raise ValueError("Only essentia-tf is supported for affect analysis.")
     if features == "basic" and method != "spectral":
-        raise ValueError("The --method option is only supported with --features vocalness, mir, or tags.")
+        raise ValueError("The --method option is only supported with --features vocalness, mir, tags, or affect.")
     if features == "vocalness" and method == "audio-separator" and shutil.which("audio-separator") is None:
         raise RuntimeError("audio-separator vocalness requires the optional models extra. Run: uv sync --extra models")
     if features == "vocalness" and method == "demucs-cli" and shutil.which("demucs") is None:
@@ -88,6 +93,8 @@ def analyze_library(
         ensure_essentia_tagging_available()
     if features == "tags" and method == "essentia-tf":
         ensure_essentia_tf_runtime()
+    if features == "affect" and method == "essentia-tf":
+        ensure_essentia_tf_affect_runtime()
     if limit is not None and limit < 1:
         raise ValueError("Limit must be greater than zero.")
     if force and only_missing:
@@ -121,8 +128,11 @@ def analyze_library(
             elif features == "mir":
                 result, enrichment = analyze_track_mir(track, existing, method=method)
                 upsert_enrichment_records(store, enrichment)
-            else:
+            elif features == "tags":
                 result, enrichment = analyze_track_tags(track, existing, method=method, force=force)
+                upsert_enrichment_records(store, enrichment)
+            else:
+                result, enrichment = analyze_track_affect(track, existing, method=method)
                 upsert_enrichment_records(store, enrichment)
         except RuntimeError as exc:
             skipped += 1
@@ -201,6 +211,8 @@ def requested_feature_missing(existing: TrackFeatures | None, features: str, met
         return existing is None or existing.energy is None or existing.loudness is None or existing.bpm is None
     if features == "tags":
         return existing is None or existing.vocalness is None or existing.feature_source != ESSENTIA_VOICE_FEATURE_SOURCE
+    if features == "affect":
+        return existing is None or existing.arousal_estimate is None or existing.valence_estimate is None
 
     source = feature_source_for_method(method)
     if method in {"audio-separator", "demucs-cli"}:
@@ -545,6 +557,68 @@ def analyze_track_tags(
     return features, tag_enrichment_records(track.id, values, source=source)
 
 
+def analyze_track_affect(
+    track: Track,
+    existing: TrackFeatures | None = None,
+    method: str = "essentia-tf",
+) -> tuple[TrackFeatures, list[EnrichmentRecord]]:
+    """Analyze one track for affect evidence using local music emotion models."""
+
+    if track.id is None:
+        raise ValueError("Track must be persisted before analysis.")
+    if method not in AFFECT_METHODS:
+        raise ValueError("Only essentia-tf affect analysis is implemented.")
+    values = extract_affect_with_essentia_tf(track.path)
+    arousal = number_or_none(values.get("arousal"))
+    valence = number_or_none(values.get("valence"))
+    tag_scores = tags_to_scores(values.get("tags"))
+    profile = derive_affect_profile(tag_scores, arousal=arousal, valence=valence)
+    features = TrackFeatures(
+        track_id=track.id,
+        bpm=existing.bpm if existing else None,
+        loudness=existing.loudness if existing else None,
+        energy=existing.energy if existing else None,
+        vocalness=existing.vocalness if existing else None,
+        arousal_estimate=arousal if arousal is not None else (existing.arousal_estimate if existing else None),
+        valence_estimate=valence if valence is not None else (existing.valence_estimate if existing else None),
+        feature_source=affect_feature_source(existing),
+        confidence="high" if arousal is not None and valence is not None else (existing.confidence if existing else "medium"),
+    )
+    records = tag_enrichment_records(track.id, values, source=ESSENTIA_TF_TAGS_FEATURE_SOURCE)
+    records.extend(affect_enrichment_records(track.id, profile))
+    if arousal is not None:
+        records.append(
+            EnrichmentRecord(
+                track_id=track.id,
+                field="affect:arousal",
+                value=stringify_descriptor(arousal),
+                tier="features",
+                source=ESSENTIA_AFFECT_FEATURE_SOURCE,
+                confidence="high",
+            )
+        )
+    if valence is not None:
+        records.append(
+            EnrichmentRecord(
+                track_id=track.id,
+                field="affect:valence",
+                value=stringify_descriptor(valence),
+                tier="features",
+                source=ESSENTIA_AFFECT_FEATURE_SOURCE,
+                confidence="high",
+            )
+        )
+    return features, records
+
+
+def affect_feature_source(existing: TrackFeatures | None) -> str:
+    """Return the feature source to store after affect analysis without weakening vocalness trust."""
+
+    if existing is not None and existing.feature_source == ESSENTIA_VOICE_FEATURE_SOURCE:
+        return existing.feature_source
+    return ESSENTIA_AFFECT_FEATURE_SOURCE
+
+
 def extract_tags_with_essentia(path: Path) -> dict[str, object]:
     """Extract local music tags with Essentia TensorFlow models when installed."""
 
@@ -556,6 +630,12 @@ def extract_tags_with_essentia_tf(path: Path) -> dict[str, object]:
     """Extract local music tags through the isolated Essentia TensorFlow runtime."""
 
     return run_essentia_tf_tags(path)
+
+
+def extract_affect_with_essentia_tf(path: Path) -> dict[str, object]:
+    """Extract local arousal/valence and mood-theme tags through the isolated runtime."""
+
+    return run_essentia_tf_affect(path)
 
 
 def ensure_essentia_tagging_available() -> None:

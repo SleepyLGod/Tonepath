@@ -17,6 +17,9 @@ CHECK_TYPES = {
     "no_duplicate_candidates",
     "required_confidence_top_k",
     "metadata_hygiene_warning",
+    "required_affect_top_k",
+    "min_valence_phase",
+    "max_affect_axis_phase",
 }
 STATUS_ORDER = {"pass": 0, "warn": 1, "fail": 2}
 CONFIDENCE_ORDER = {"low": 0, "medium": 1, "high": 2}
@@ -138,6 +141,12 @@ def run_check(check: dict[str, object], candidates: list[dict[str, object]]) -> 
         return required_confidence_top_k(check, candidates)
     if check_type == "metadata_hygiene_warning":
         return metadata_hygiene_warning(check, candidates)
+    if check_type == "required_affect_top_k":
+        return required_affect_top_k(check, candidates)
+    if check_type == "min_valence_phase":
+        return min_valence_phase(check, candidates)
+    if check_type == "max_affect_axis_phase":
+        return max_affect_axis_phase(check, candidates)
     raise RuntimeError(f"Unsupported benchmark check type: {check_type}")
 
 
@@ -242,6 +251,53 @@ def metadata_hygiene_warning(check: dict[str, object], candidates: list[dict[str
     return check_result(str(check["type"]), "pass", "Candidate metadata is clean.", [])
 
 
+def required_affect_top_k(check: dict[str, object], candidates: list[dict[str, object]]) -> dict[str, object]:
+    """Check that top-k candidates expose affect evidence."""
+
+    k = check_int(check, "k", default=3)
+    affected: list[int] = []
+    for rank, row in top_k(candidates, k):
+        if feature_float(row, "arousal") is None or feature_float(row, "valence") is None:
+            affected.append(rank)
+            continue
+        features = row.get("features")
+        profile = features.get("affect_profile") if isinstance(features, dict) else None
+        if not isinstance(profile, dict) or not profile:
+            affected.append(rank)
+    return violation_result(check, affected, f"Top {k} lacks affect evidence.")
+
+
+def min_valence_phase(check: dict[str, object], candidates: list[dict[str, object]]) -> dict[str, object]:
+    """Check that a named phase reaches a minimum valence value."""
+
+    phase = str(check["phase"])
+    min_valence = check_float(check, "min_valence", default=0.55)
+    affected = [
+        rank
+        for rank, row in enumerate(candidates, start=1)
+        if row.get("phase") == phase
+        and (value := feature_float(row, "valence")) is not None
+        and value < min_valence
+    ]
+    return violation_result(check, affected, f"{phase} phase valence is below {min_valence}.")
+
+
+def max_affect_axis_phase(check: dict[str, object], candidates: list[dict[str, object]]) -> dict[str, object]:
+    """Check that a named phase does not exceed an affect-axis threshold."""
+
+    phase = str(check["phase"])
+    axis = str(check["axis"])
+    max_value = check_float(check, "max_value", default=0.6)
+    affected: list[int] = []
+    for rank, row in enumerate(candidates, start=1):
+        if row.get("phase") != phase:
+            continue
+        value = affect_axis_float(row, axis)
+        if value is not None and value >= max_value:
+            affected.append(rank)
+    return violation_result(check, affected, f"{phase} phase {axis} is >= {max_value}.")
+
+
 def violation_result(check: dict[str, object], affected_ranks: list[int], message: str) -> dict[str, object]:
     """Return pass or configured violation status for affected ranks."""
 
@@ -286,6 +342,21 @@ def feature_float(row: dict[str, object], field: str) -> float | None:
     if not isinstance(features, dict):
         return None
     value = features.get(field)
+    if value is None:
+        return None
+    return float(value)
+
+
+def affect_axis_float(row: dict[str, object], axis: str) -> float | None:
+    """Return a numeric affect-axis value from a candidate row."""
+
+    features = row.get("features")
+    if not isinstance(features, dict):
+        return None
+    profile = features.get("affect_profile")
+    if not isinstance(profile, dict):
+        return None
+    value = profile.get(axis)
     if value is None:
         return None
     return float(value)

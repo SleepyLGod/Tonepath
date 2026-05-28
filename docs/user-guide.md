@@ -135,9 +135,14 @@ Workspace-local TensorFlow tagging runtime:
 uv run tonepath models doctor
 uv run tonepath models setup essentia-tf
 uv run tonepath analyze --features tags --method essentia-tf --limit 20
+uv run tonepath analyze --features affect --method essentia-tf --limit 20
 ```
 
-The setup command creates a separate Python 3.11 runtime under `TONEPATH_HOME/runtimes/essentia-tf-py311/` and downloads Essentia model files under `TONEPATH_HOME/cache/models/essentia/`. This keeps the main Tonepath environment clean. Playback and TUI never run tagging models in real time; they only read stored SQLite evidence.
+The setup command creates a separate Python 3.11 runtime under `TONEPATH_HOME/runtimes/essentia-tf-py311/` and downloads Essentia model files under `TONEPATH_HOME/cache/models/essentia/`. This keeps the main Tonepath environment clean. Playback and TUI never run tagging or affect models in real time; they only read stored SQLite evidence.
+
+The `affect` tier stores arousal and valence in `track_features`, then derives a readable affect profile such as `sadness`, `uplift`, `calmness`, `tension`, `warmth`, `darkness`, and `brightness` from Essentia mood/theme tags plus arousal/valence. These axes are evidence for selector and benchmark logic; they do not replace the raw model tags. Essentia model files are suitable for a local prototype, but their upstream models may carry non-commercial license terms, so do not treat this path as a commercial-ready default without reviewing the upstream licenses.
+
+Music-text embedding models such as CLAP or MuQ-MuLan are not part of the default flow. They should be added only after `eval suite` shows a measured failure mode that Essentia mood/theme plus arousal/valence cannot address.
 
 Model analysis is resumable and incremental:
 
@@ -299,7 +304,7 @@ Tonepath separates music understanding into explicit tiers:
 | Tier | Status | Behavior |
 | --- | --- | --- |
 | `local` | Implemented | Stores existing local metadata as source-attributed enrichment records. |
-| `features` | Basic + optional MIR | Stores local analysis rows. WAV, MP3, FLAC, and M4A can get approximate loudness, energy, conservative BPM, and spectral vocalness when decodable. Optional Essentia MIR can add stronger BPM/loudness/key/danceability descriptors. |
+| `features` | Basic + optional MIR/affect | Stores local analysis rows. WAV, MP3, FLAC, and M4A can get approximate loudness, energy, conservative BPM, and spectral vocalness when decodable. Optional Essentia MIR can add stronger BPM/loudness/key/danceability descriptors. Optional Essentia-TF affect adds arousal/valence and derived mood axes. |
 | `online` | Planned | Will require explicit opt-in, cache results, cite sources, and avoid sending local file paths. |
 
 Optional model-backed analysis remains local:
@@ -308,7 +313,7 @@ Optional model-backed analysis remains local:
 | --- | --- | --- |
 | `spectral` | Default | Lightweight local vocalness proxy. No model download and no network access. |
 | `essentia` | Optional MIR | Uses the `mir` extra for offline rhythm, loudness, tonal, and danceability descriptors. |
-| `essentia-tf` | Workspace-local tagging runtime | Uses a separate Python 3.11 runtime for Essentia TensorFlow music tagging models. Results are stored as local source-attributed evidence. |
+| `essentia-tf` | Workspace-local tagging and affect runtime | Uses a separate Python 3.11 runtime for Essentia TensorFlow music tagging and affect models. Results are stored as local source-attributed evidence. |
 | `audio-separator` | Slow fallback | Uses the `models` extra to run local offline stem separation. Outputs are cached under Tonepath data as `model-audio-separator`, but this is not a fast music-tagging model. |
 | `demucs-cli` | Compatibility adapter | Uses a separately installed Demucs CLI to estimate vocalness from the vocal stem. Results are stored as `model-demucs-cli`; this path is for advanced users who already have Demucs installed. |
 

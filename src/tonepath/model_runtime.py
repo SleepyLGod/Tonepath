@@ -57,6 +57,25 @@ ESSENTIA_MODEL_FILES = (
     ),
 )
 
+ESSENTIA_AFFECT_MODEL_FILES = (
+    (
+        "msd-musicnn-1.pb",
+        f"{ESSENTIA_MODEL_BASE_URL}/feature-extractors/musicnn/msd-musicnn-1.pb",
+    ),
+    (
+        "msd-musicnn-1.json",
+        f"{ESSENTIA_MODEL_BASE_URL}/feature-extractors/musicnn/msd-musicnn-1.json",
+    ),
+    (
+        "deam-msd-musicnn-2.pb",
+        f"{ESSENTIA_MODEL_BASE_URL}/classification-heads/deam/deam-msd-musicnn-2.pb",
+    ),
+    (
+        "deam-msd-musicnn-2.json",
+        f"{ESSENTIA_MODEL_BASE_URL}/classification-heads/deam/deam-msd-musicnn-2.json",
+    ),
+)
+
 
 def runtime_root() -> Path:
     """Return the root directory for all isolated runtime assets."""
@@ -140,6 +159,8 @@ class RuntimeStatus:
     model_dir: Path
     ready: bool
     missing: tuple[str, ...]
+    affect_ready: bool
+    missing_affect: tuple[str, ...]
 
 
 def runtime_dir() -> Path:
@@ -235,7 +256,7 @@ def download_essentia_models() -> None:
 
     model_dir = essentia_model_dir()
     model_dir.mkdir(parents=True, exist_ok=True)
-    for filename, url in ESSENTIA_MODEL_FILES:
+    for filename, url in ESSENTIA_MODEL_FILES + ESSENTIA_AFFECT_MODEL_FILES:
         target = model_dir / filename
         if target.exists() and target.stat().st_size > 0:
             continue
@@ -256,6 +277,7 @@ def model_runtime_status() -> RuntimeStatus:
     for filename, _url in ESSENTIA_MODEL_FILES:
         if not (model_dir / filename).exists():
             missing.append(filename)
+    missing_affect = [filename for filename, _url in ESSENTIA_AFFECT_MODEL_FILES if not (model_dir / filename).exists()]
     return RuntimeStatus(
         runtime_dir=runtime_dir(),
         python=python,
@@ -263,6 +285,8 @@ def model_runtime_status() -> RuntimeStatus:
         model_dir=model_dir,
         ready=not missing,
         missing=tuple(missing),
+        affect_ready=not missing and not missing_affect,
+        missing_affect=tuple(missing_affect),
     )
 
 
@@ -282,10 +306,15 @@ def model_runtime_report() -> str:
         f"Worker script: {status.runner} ({'ok' if status.runner.exists() else 'missing'})",
         f"Model directory: {status.model_dir}",
         f"Ready: {status.ready}",
+        f"Affect ready: {status.affect_ready}",
     ]
     if status.missing:
         lines.append("Missing:")
         lines.extend(f"  {item}" for item in status.missing)
+        lines.append("Run: uv run tonepath models setup essentia-tf")
+    if status.missing_affect:
+        lines.append("Missing affect models:")
+        lines.extend(f"  {item}" for item in status.missing_affect)
         lines.append("Run: uv run tonepath models setup essentia-tf")
     return "\n".join(lines)
 
@@ -299,12 +328,34 @@ def ensure_essentia_tf_runtime() -> RuntimeStatus:
     return status
 
 
+def ensure_essentia_tf_affect_runtime() -> RuntimeStatus:
+    """Return runtime status or raise a setup hint when affect models are unavailable."""
+
+    status = ensure_essentia_tf_runtime()
+    if not status.affect_ready:
+        raise RuntimeError("Essentia TensorFlow affect runtime is not ready. Run: uv run tonepath models setup essentia-tf")
+    return status
+
+
 def run_essentia_tf_tags(path: Path) -> dict[str, object]:
     """Run the local Essentia TensorFlow worker for one audio file."""
 
     status = ensure_essentia_tf_runtime()
+    return run_essentia_worker(path, status, "tags")
+
+
+def run_essentia_tf_affect(path: Path) -> dict[str, object]:
+    """Run the local Essentia TensorFlow affect worker for one audio file."""
+
+    status = ensure_essentia_tf_affect_runtime()
+    return run_essentia_worker(path, status, "affect")
+
+
+def run_essentia_worker(path: Path, status: RuntimeStatus, mode: str) -> dict[str, object]:
+    """Run the local Essentia TensorFlow worker in the requested mode."""
+
     completed = subprocess.run(
-        [str(status.python), str(status.runner), str(path), str(status.model_dir)],
+        [str(status.python), str(status.runner), str(path), str(status.model_dir), mode],
         check=False,
         capture_output=True,
         text=True,
@@ -340,12 +391,22 @@ EFFNET_HEADS = (
     "mtg_jamendo_moodtheme-discogs-effnet-1",
     "mtg_jamendo_instrument-discogs-effnet-1",
 )
+MOODTHEME_HEAD = "mtg_jamendo_moodtheme-discogs-effnet-1"
 
 
 def main() -> None:
     audio_path = Path(sys.argv[1])
     model_dir = Path(sys.argv[2])
+    mode = sys.argv[3] if len(sys.argv) > 3 else "tags"
     audio = MonoLoader(filename=str(audio_path), sampleRate=16000, resampleQuality=4)()
+    if mode == "affect":
+        print(json.dumps(analyze_affect(audio, model_dir), ensure_ascii=False))
+        return
+
+    print(json.dumps(analyze_tags(audio, model_dir), ensure_ascii=False))
+
+
+def analyze_tags(audio: np.ndarray, model_dir: Path) -> dict:
     embeddings = TensorflowPredictEffnetDiscogs(
         graphFilename=str(model_dir / "discogs-effnet-bs64-1.pb"),
         output="PartitionedCall:1",
@@ -384,7 +445,39 @@ def main() -> None:
     elif voice_score is not None:
         vocalness = voice_score
 
-    print(json.dumps({"vocalness": vocalness, "tags": tags}, ensure_ascii=False))
+    return {"vocalness": vocalness, "tags": tags}
+
+
+def analyze_affect(audio: np.ndarray, model_dir: Path) -> dict:
+    tags = []
+    discogs_embeddings = TensorflowPredictEffnetDiscogs(
+        graphFilename=str(model_dir / "discogs-effnet-bs64-1.pb"),
+        output="PartitionedCall:1",
+    )(audio)
+    mood_metadata = metadata_for(model_dir / f"{MOODTHEME_HEAD}.json")
+    mood_predictions = TensorflowPredict2D(
+        graphFilename=str(model_dir / f"{MOODTHEME_HEAD}.pb"),
+        output=prediction_output(mood_metadata),
+    )(discogs_embeddings)
+    mood_scores = np.asarray(mood_predictions).mean(axis=0)
+    mood_labels = labels_from_metadata(mood_metadata)
+    for index, score in top_scores(mood_scores, mood_labels, 8):
+        tags.append([mood_labels[index], float(score)])
+
+    musicnn_embeddings = TensorflowPredictMusiCNN(
+        graphFilename=str(model_dir / "msd-musicnn-1.pb"),
+        output="model/dense/BiasAdd",
+    )(audio)
+    deam_metadata = metadata_for(model_dir / "deam-msd-musicnn-2.json")
+    deam_predictions = TensorflowPredict2D(
+        graphFilename=str(model_dir / "deam-msd-musicnn-2.pb"),
+        output=prediction_output(deam_metadata),
+    )(musicnn_embeddings)
+    deam_scores = np.asarray(deam_predictions).mean(axis=0)
+    deam_labels = labels_from_metadata(deam_metadata)
+    valence = normalized_deam_score(score_for_label(deam_scores, deam_labels, "valence"))
+    arousal = normalized_deam_score(score_for_label(deam_scores, deam_labels, "arousal"))
+    return {"arousal": arousal, "valence": valence, "tags": tags}
 
 
 def metadata_for(path: Path) -> dict:
@@ -412,6 +505,12 @@ def score_for_label(scores: np.ndarray, labels: list[str], wanted: str) -> float
         if label.lower() == wanted:
             return float(scores[index])
     return None
+
+
+def normalized_deam_score(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return max(0.0, min((float(value) - 1.0) / 8.0, 1.0))
 
 
 def top_scores(scores: np.ndarray, labels: list[str], limit: int) -> list[tuple[int, float]]:

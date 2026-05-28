@@ -7,11 +7,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tonepath.analysis import (
+    ESSENTIA_AFFECT_FEATURE_SOURCE,
     ESSENTIA_MIR_FEATURE_SOURCE,
     ESSENTIA_TF_TAGS_FEATURE_SOURCE,
     ESSENTIA_TAGS_FEATURE_SOURCE,
     ESSENTIA_VOICE_FEATURE_SOURCE,
     analyze_library,
+    analyze_track_affect,
     analyze_track_mir,
     analyze_track_tags,
     analyze_track_basic,
@@ -381,6 +383,65 @@ class AnalysisTest(unittest.TestCase):
             self.assertTrue(any(record.source == ESSENTIA_TF_TAGS_FEATURE_SOURCE for record in enrichment))
             store.close()
 
+    def test_affect_analysis_writes_arousal_valence_and_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            path = Path(tmp) / "song.mp3"
+            path.write_bytes(b"fake")
+            track_id = store.upsert_track(read_track(path))
+            store.upsert_features(
+                TrackFeatures(
+                    track_id=track_id,
+                    bpm=90.0,
+                    loudness=-18.0,
+                    energy=0.3,
+                    vocalness=0.15,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            with patch("tonepath.analysis.ensure_essentia_tf_affect_runtime", return_value=None), patch(
+                "tonepath.analysis.run_essentia_tf_affect",
+                return_value={
+                    "arousal": 0.28,
+                    "valence": 0.72,
+                    "tags": [["uplifting", 0.8], ["soft", 0.6], ["dark", 0.1]],
+                },
+            ):
+                analyzed, skipped = analyze_library(store, features="affect", method="essentia-tf", changed_only=True)
+
+            features = store.get_features(track_id)
+            self.assertEqual(analyzed, 1)
+            self.assertEqual(skipped, 0)
+            self.assertIsNotNone(features)
+            self.assertEqual(features.feature_source, ESSENTIA_VOICE_FEATURE_SOURCE)
+            self.assertEqual(features.arousal_estimate, 0.28)
+            self.assertEqual(features.valence_estimate, 0.72)
+            enrichment = store.list_enrichment(track_id)
+            fields = {record.field: record.value for record in enrichment}
+            self.assertIn("affect:uplift", fields)
+            self.assertIn("affect:calmness", fields)
+            self.assertEqual(fields["affect:arousal"], "0.28")
+            self.assertEqual(fields["affect:valence"], "0.72")
+            store.close()
+
+    def test_affect_analysis_uses_affect_source_without_existing_voice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "song.mp3"
+            path.write_bytes(b"fake")
+
+            with patch(
+                "tonepath.analysis.extract_affect_with_essentia_tf",
+                return_value={"arousal": 0.4, "valence": 0.6, "tags": [["happy", 0.8]]},
+            ):
+                features, enrichment = analyze_track_affect(track_for(path, "song.mp3", track_id=1))
+
+            self.assertEqual(features.feature_source, ESSENTIA_AFFECT_FEATURE_SOURCE)
+            self.assertEqual(features.arousal_estimate, 0.4)
+            self.assertEqual(features.valence_estimate, 0.6)
+            self.assertTrue(any(record.field == "affect:uplift" for record in enrichment))
+
     def test_separator_does_not_overwrite_essentia_voice_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = TonepathStore(Path(tmp) / "tonepath.db")
@@ -635,6 +696,53 @@ class AnalysisTest(unittest.TestCase):
             self.assertEqual(analyzed, 0)
             self.assertEqual(skipped, 1)
             run_tags.assert_not_called()
+            store.close()
+
+    def test_changed_only_processes_missing_affect_features(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            path = Path(tmp) / "song.mp3"
+            path.write_bytes(b"fake audio")
+            track_id = store.upsert_track(read_track(path))
+
+            with patch("tonepath.analysis.ensure_essentia_tf_affect_runtime", return_value=None), patch(
+                "tonepath.analysis.run_essentia_tf_affect",
+                return_value={"arousal": 0.22, "valence": 0.65, "tags": [["calm", 0.9]]},
+            ):
+                analyzed, skipped = analyze_library(store, features="affect", method="essentia-tf", changed_only=True)
+
+            features = store.get_features(track_id)
+            self.assertEqual(analyzed, 1)
+            self.assertEqual(skipped, 0)
+            self.assertIsNotNone(features)
+            self.assertEqual(features.arousal_estimate, 0.22)
+            self.assertEqual(features.valence_estimate, 0.65)
+            store.close()
+
+    def test_changed_only_skips_complete_unchanged_affect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            path = Path(tmp) / "song.mp3"
+            path.write_bytes(b"fake audio")
+            track_id = store.upsert_track(read_track(path))
+            store.upsert_features(
+                TrackFeatures(
+                    track_id=track_id,
+                    arousal_estimate=0.2,
+                    valence_estimate=0.7,
+                    feature_source=ESSENTIA_AFFECT_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            with patch("tonepath.analysis.ensure_essentia_tf_affect_runtime", return_value=None), patch(
+                "tonepath.analysis.run_essentia_tf_affect",
+            ) as run_affect:
+                analyzed, skipped = analyze_library(store, features="affect", method="essentia-tf", changed_only=True)
+
+            self.assertEqual(analyzed, 0)
+            self.assertEqual(skipped, 1)
+            run_affect.assert_not_called()
             store.close()
 
     def test_model_failure_skips_track_and_continues(self) -> None:

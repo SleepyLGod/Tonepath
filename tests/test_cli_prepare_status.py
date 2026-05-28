@@ -46,9 +46,9 @@ class CliPrepareStatusTest(unittest.TestCase):
                 runner = CliRunner()
                 self.assertEqual(runner.invoke(app, ["config", "init"]).exit_code, 0)
                 self.assertEqual(runner.invoke(app, ["config", "add-music-dir", str(music)]).exit_code, 0)
-                with patch("tonepath.cli.model_runtime_status", return_value=SimpleNamespace(ready=True)), patch(
+                with patch("tonepath.cli.model_runtime_status", return_value=SimpleNamespace(ready=True, affect_ready=True)), patch(
                     "tonepath.cli.analyze_library",
-                    side_effect=[(1, 0), (1, 0)],
+                    side_effect=[(1, 0), (1, 0), (1, 0)],
                 ) as analyze:
                     result = runner.invoke(app, ["prepare", "--limit", "5"])
 
@@ -56,12 +56,15 @@ class CliPrepareStatusTest(unittest.TestCase):
             self.assertIn("Prepare: scan", result.output)
             self.assertIn("Prepare: MIR analyzed 1 track(s); skipped 0 track(s).", result.output)
             self.assertIn("Prepare: tags analyzed 1 track(s); skipped 0 track(s).", result.output)
-            self.assertEqual(analyze.call_count, 2)
+            self.assertIn("Prepare: affect analyzed 1 track(s); skipped 0 track(s).", result.output)
+            self.assertEqual(analyze.call_count, 3)
             self.assertEqual(analyze.call_args_list[0].kwargs["features"], "mir")
             self.assertEqual(analyze.call_args_list[0].kwargs["changed_only"], True)
             self.assertEqual(analyze.call_args_list[0].kwargs["limit"], 5)
             self.assertEqual(analyze.call_args_list[1].kwargs["features"], "tags")
             self.assertEqual(analyze.call_args_list[1].kwargs["method"], "essentia-tf")
+            self.assertEqual(analyze.call_args_list[2].kwargs["features"], "affect")
+            self.assertEqual(analyze.call_args_list[2].kwargs["method"], "essentia-tf")
 
     def test_prepare_skips_tags_when_runtime_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -117,18 +120,19 @@ class CliPrepareStatusTest(unittest.TestCase):
                 self.assertEqual(runner.invoke(app, ["config", "add-music-dir", str(music)]).exit_code, 0)
                 with patch("tonepath.cli.model_runtime_status", return_value=SimpleNamespace(ready=False)), patch(
                     "tonepath.cli.setup_essentia_tf_runtime",
-                    return_value=SimpleNamespace(ready=True),
+                    return_value=SimpleNamespace(ready=True, affect_ready=True),
                 ) as setup, patch(
                     "tonepath.cli.analyze_library",
-                    side_effect=[(1, 0), (1, 0)],
+                    side_effect=[(1, 0), (1, 0), (1, 0)],
                 ) as analyze:
                     result = runner.invoke(app, ["prepare", "--full", "--setup-models"])
 
             self.assertEqual(result.exit_code, 0, result.output)
             self.assertIn("setting up workspace-local Essentia-TF runtime", result.output)
             setup.assert_called_once()
-            self.assertEqual(analyze.call_count, 2)
+            self.assertEqual(analyze.call_count, 3)
             self.assertEqual(analyze.call_args_list[1].kwargs["features"], "tags")
+            self.assertEqual(analyze.call_args_list[2].kwargs["features"], "affect")
 
     def test_prepare_fast_skips_tags_even_when_runtime_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -206,6 +210,7 @@ class CliPrepareStatusTest(unittest.TestCase):
             self.assertIn("Tracks", result.output)
             self.assertIn("Vocalness coverage", result.output)
             self.assertIn("Tag coverage", result.output)
+            self.assertIn("Affect coverage", result.output)
             self.assertIn("Dirty metadata", result.output)
             self.assertIn("Duplicate candidates", result.output)
             self.assertIn("Tracks outside music dirs", result.output)

@@ -15,6 +15,26 @@ SOURCE_STATE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "low": ("难过", "孤独", "emo", "低落", "feel low", "feeling low", "lonely", "sad"),
 }
 TARGET_STATE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "uplift": (
+        "开心一点",
+        "快乐一点",
+        "高兴一点",
+        "温暖一点",
+        "托起来",
+        "被安慰",
+        "安慰",
+        "不要压抑",
+        "不压抑",
+        "cheer up",
+        "gently uplifting",
+        "uplifting",
+        "lift my mood",
+        "feel warmer",
+        "warm",
+        "not gloomy",
+        "gloomy",
+        "less sad",
+    ),
     "energized": (
         "提神",
         "醒脑",
@@ -24,7 +44,6 @@ TARGET_STATE_KEYWORDS: dict[str, tuple[str, ...]] = {
         "energize",
         "energizing",
         "wake up",
-        "lift",
         "alert",
         "motivation",
         "start a task",
@@ -96,6 +115,7 @@ QUIET_KEYWORDS = (
     "quiet",
     "low stimulation",
     "low-stimulation",
+    "not loud",
     "not too loud",
 )
 CHINESE_DIGITS: dict[str, int] = {
@@ -178,6 +198,8 @@ def request_constraints(request: SessionRequest) -> list[str]:
         constraints.append("avoid_vocals")
     if request.quiet:
         constraints.append("low_stimulation")
+    if request.target_state == "uplift" or contains_any(request.prompt, TARGET_STATE_KEYWORDS["uplift"]):
+        constraints.append("gentle_uplift")
     return constraints
 
 
@@ -221,7 +243,10 @@ def infer_source_state(prompt: str) -> str:
 def infer_target_state(prompt: str) -> str:
     """Infer the user's target state from the prompt."""
 
-    for state in ("energized", "calm", "steady", "focus"):
+    normalized = prompt.lower()
+    if "lift" in normalized and "uplift" not in normalized and "lift my mood" not in normalized and infer_source_state(prompt) != "low":
+        return "energized"
+    for state in ("energized", "calm", "steady", "focus", "uplift"):
         if contains_any(prompt, TARGET_STATE_KEYWORDS[state]):
             return state
     return "steady"
@@ -283,6 +308,12 @@ def build_phases(request: SessionRequest) -> list[SessionPhase]:
             SessionPhase("settle", first, second, 0.25, 0.55, 0.25, vocal_policy),
             SessionPhase("calm", second, total, 0.2, 0.6, 0.2, vocal_policy),
         ])
+    if request.target_state == "uplift":
+        return quiet_adjusted_phases(request, [
+            SessionPhase("hold", 0, first, 0.28, 0.48, 0.3, vocal_policy),
+            SessionPhase("stabilize", first, second, 0.35, 0.58, 0.38, vocal_policy),
+            SessionPhase("lift", second, total, 0.42, 0.68, 0.45, vocal_policy),
+        ])
     if request.target_state == "energized":
         return [
             SessionPhase("warmup", 0, first, 0.45, 0.5, 0.45, vocal_policy),
@@ -308,7 +339,7 @@ def quiet_adjusted_phases(request: SessionRequest, phases: list[SessionPhase]) -
             adjusted.append(lower_phase_targets(phase, amount=0.08))
         elif phase.label == "stabilize":
             adjusted.append(lower_phase_targets(phase, amount=0.06))
-        elif phase.label in {"orient", "steady"}:
+        elif phase.label in {"orient", "steady", "hold", "lift"}:
             adjusted.append(lower_phase_targets(phase, amount=0.06))
         else:
             adjusted.append(phase)

@@ -40,6 +40,24 @@ class PlannerTest(unittest.TestCase):
 
         self.assertEqual(request_constraints(request), ["avoid_vocals", "low_stimulation"])
 
+    def test_sad_to_gently_uplift_uses_hold_stabilize_lift(self) -> None:
+        request = parse_request("我有点难过，想慢慢开心一点，但不要太吵")
+        plan = plan_session(request.prompt)
+
+        self.assertEqual(request.source_state, "low")
+        self.assertEqual(request.target_state, "uplift")
+        self.assertTrue(request.quiet)
+        self.assertEqual(request_constraints(request), ["low_stimulation", "gentle_uplift"])
+        self.assertEqual([phase.label for phase in plan.phases], ["hold", "stabilize", "lift"])
+        self.assertLess(plan.phases[0].target_valence, plan.phases[-1].target_valence)
+        self.assertLess(plan.phases[0].target_arousal, plan.phases[-1].target_arousal)
+
+    def test_not_gloomy_is_modifier_when_calm_target_is_explicit(self) -> None:
+        request = parse_request("我很焦虑，想二十分钟后平静下来，不要压抑")
+
+        self.assertEqual(request.target_state, "calm")
+        self.assertEqual(request_constraints(request), ["gentle_uplift"])
+
     def test_quiet_focus_keeps_phase_labels_but_lowers_targets(self) -> None:
         normal = plan_session("我要写论文，四十五分钟").phases
         quiet = plan_session("我要写论文，四十五分钟，低刺激").phases

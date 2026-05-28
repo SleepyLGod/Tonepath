@@ -265,10 +265,12 @@ def prepare(
 
         runtime_status = model_runtime_status()
         runtime_ready = runtime_status.ready
-        if mode != "fast" and not runtime_ready and (setup_models or settings.models.allow_setup):
+        affect_ready = bool(getattr(runtime_status, "affect_ready", runtime_ready))
+        if mode != "fast" and (not runtime_ready or not affect_ready) and (setup_models or settings.models.allow_setup):
             console.print("Prepare: setting up workspace-local Essentia-TF runtime.")
             runtime_status = setup_essentia_tf_runtime()
             runtime_ready = runtime_status.ready
+            affect_ready = bool(getattr(runtime_status, "affect_ready", runtime_ready))
 
         if mode == "fast":
             console.print("Prepare: skipped TensorFlow tags (--fast).")
@@ -282,6 +284,18 @@ def prepare(
                 progress=collect_analysis_failures("tags", failures),
             )
             console.print(f"Prepare: tags analyzed {tag_analyzed} track(s); skipped {tag_skipped} track(s).")
+            if affect_ready:
+                affect_analyzed, affect_skipped = analyze_library(
+                    store,
+                    features="affect",
+                    method="essentia-tf",
+                    changed_only=True,
+                    limit=limit,
+                    progress=collect_analysis_failures("affect", failures),
+                )
+                console.print(f"Prepare: affect analyzed {affect_analyzed} track(s); skipped {affect_skipped} track(s).")
+            else:
+                console.print("Prepare: affect skipped. Run `uv run tonepath models setup essentia-tf` for emotion models.")
         elif mode == "full":
             console.print(
                 "Prepare: full tagging requires Essentia-TF. "
@@ -393,7 +407,7 @@ def current() -> None:
 
 @app.command()
 def analyze(
-    features: Annotated[str, typer.Option(help="Feature tier: basic, vocalness, mir, or tags.")] = "basic",
+    features: Annotated[str, typer.Option(help="Feature tier: basic, vocalness, mir, tags, or affect.")] = "basic",
     method: Annotated[str, typer.Option(help="Analysis method: spectral, audio-separator, demucs-cli, essentia, or essentia-tf.")] = "spectral",
     only_missing: Annotated[bool, typer.Option("--only-missing", help="Analyze only tracks missing the requested feature.")] = False,
     changed_only: Annotated[bool, typer.Option("--changed-only", help="Analyze only files changed since the last scan.")] = False,
@@ -402,16 +416,18 @@ def analyze(
 ) -> None:
     """Run local audio feature analysis for scanned tracks."""
 
-    if features not in {"basic", "vocalness", "mir", "tags"}:
-        raise typer.BadParameter("only basic, vocalness, mir, and tags feature analysis are implemented")
+    if features not in {"basic", "vocalness", "mir", "tags", "affect"}:
+        raise typer.BadParameter("only basic, vocalness, mir, tags, and affect feature analysis are implemented")
     if features == "vocalness" and method not in {"spectral", "audio-separator", "demucs-cli"}:
         raise typer.BadParameter("only spectral, audio-separator, and demucs-cli vocalness methods are implemented")
     if features == "mir" and method != "essentia":
         raise typer.BadParameter("only essentia is supported for mir analysis")
     if features == "tags" and method not in {"essentia", "essentia-tf"}:
         raise typer.BadParameter("only essentia and essentia-tf are supported for tags analysis")
+    if features == "affect" and method != "essentia-tf":
+        raise typer.BadParameter("only essentia-tf is supported for affect analysis")
     if features == "basic" and method != "spectral":
-        raise typer.BadParameter("--method is only supported with --features vocalness, mir, or tags")
+        raise typer.BadParameter("--method is only supported with --features vocalness, mir, tags, or affect")
     store = TonepathStore()
     try:
         try:
@@ -451,9 +467,12 @@ def print_analysis_progress(event: AnalysisProgress) -> None:
     energy = "unknown" if event.result.energy is None else f"{event.result.energy:.2f}"
     bpm = "unknown" if event.result.bpm is None else f"{event.result.bpm:.1f}"
     vocalness = "unknown" if event.result.vocalness is None else f"{event.result.vocalness:.2f}"
+    arousal = "unknown" if event.result.arousal_estimate is None else f"{event.result.arousal_estimate:.2f}"
+    valence = "unknown" if event.result.valence_estimate is None else f"{event.result.valence_estimate:.2f}"
     runtime = 0.0 if event.runtime_sec is None else event.runtime_sec
     console.print(
-        f"result: energy={energy} bpm={bpm} vocalness={vocalness} source={event.result.feature_source} "
+        f"result: energy={energy} bpm={bpm} vocalness={vocalness} arousal={arousal} valence={valence} "
+        f"source={event.result.feature_source} "
         f"confidence={event.result.confidence} runtime={runtime:.1f}s"
     )
 
@@ -1130,6 +1149,7 @@ def print_status_summary(status: LibraryStatus, runtime_ready: bool) -> None:
     table.add_row("Vocalness coverage", f"{status.vocalness}/{status.tracks}")
     table.add_row("MIR coverage", f"{status.mir}/{status.tracks}")
     table.add_row("Tag coverage", f"{status.tags}/{status.tracks}")
+    table.add_row("Affect coverage", f"{status.affect}/{status.tracks}")
     table.add_row("Dirty metadata", str(status.dirty_metadata))
     table.add_row("Duplicate candidates", str(status.duplicate_tracks))
     table.add_row("Tracks outside music dirs", str(status.tracks_outside_music_dirs))
@@ -1470,10 +1490,16 @@ def eval_cell(value: object) -> str:
 def eval_feature_summary(features: dict[str, object]) -> str:
     """Return compact feature details for selection review."""
 
+    affect = features.get("affect_profile")
+    affect_text = "--"
+    if isinstance(affect, dict) and affect:
+        affect_text = ", ".join(f"{key}={value}" for key, value in sorted(affect.items()) if key in {"sadness", "uplift", "calmness", "tension"})
     return (
         f"src={eval_cell(features['source'])}\n"
         f"energy={eval_cell(features['energy'])} loud={eval_cell(features['loudness'])}\n"
-        f"bpm={eval_cell(features['bpm'])} vocal={eval_cell(features['vocalness'])}"
+        f"bpm={eval_cell(features['bpm'])} vocal={eval_cell(features['vocalness'])}\n"
+        f"aro={eval_cell(features.get('arousal'))} val={eval_cell(features.get('valence'))}\n"
+        f"affect={affect_text}"
     )
 
 
@@ -1496,6 +1522,10 @@ def summarize_eval_reasons(reasons: Iterable[str]) -> list[str]:
             labels.append("loudness fit")
         elif "BPM feature" in reason:
             labels.append("BPM fit")
+        elif "affect profile" in reason:
+            labels.append("affect fit")
+        elif "sad/dark/tension" in reason:
+            labels.append("affect risk")
         elif "feedback" in reason:
             labels.append("feedback adjusted")
         elif "genre" in reason:

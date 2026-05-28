@@ -48,3 +48,8 @@
 {"lang":"en","prompt":"I need motivation to start a task for 20 minutes","source_state":"unspecified","target_state":"energized","duration_min":20,"no_vocals":false,"quiet":false}
 {"lang":"zh","prompt":"今晚收尾工作，三十分钟稳定一点","source_state":"unspecified","target_state":"steady","duration_min":30,"no_vocals":false,"quiet":false}
 {"lang":"en","prompt":"Wrap up work tonight with a steady 30 minute path","source_state":"unspecified","target_state":"steady","duration_min":30,"no_vocals":false,"quiet":false}
+{"lang":"zh","prompt":"我有点难过，想慢慢开心一点，但不要太吵","source_state":"low","target_state":"uplift","duration_min":30,"no_vocals":false,"quiet":true}
+{"lang":"zh","prompt":"我很焦虑，想二十分钟后平静下来，不要压抑","source_state":"irritated","target_state":"calm","duration_min":20,"no_vocals":false,"quiet":false}
+{"lang":"zh","prompt":"我心情低落，想要温暖一点的纯音乐","source_state":"low","target_state":"uplift","duration_min":30,"no_vocals":true,"quiet":false}
+{"lang":"en","prompt":"I feel sad and want something gently uplifting, not loud","source_state":"low","target_state":"uplift","duration_min":30,"no_vocals":false,"quiet":true}
+{"lang":"en","prompt":"I feel anxious; help me calm down without making it gloomy","source_state":"irritated","target_state":"calm","duration_min":30,"no_vocals":false,"quiet":false}

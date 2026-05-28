@@ -24,6 +24,7 @@ class LibraryStatus:
     vocalness: int
     mir: int
     tags: int
+    affect: int
     dirty_metadata: int = 0
     duplicate_tracks: int = 0
     tracks_outside_music_dirs: int = 0
@@ -44,6 +45,7 @@ def library_status(store: TonepathStore) -> LibraryStatus:
           SUM(CASE WHEN f.track_id IS NULL THEN 1 ELSE 0 END) AS missing_features,
           SUM(CASE WHEN f.vocalness IS NOT NULL THEN 1 ELSE 0 END) AS vocalness,
           SUM(CASE WHEN f.energy IS NOT NULL AND f.loudness IS NOT NULL AND f.bpm IS NOT NULL THEN 1 ELSE 0 END) AS mir,
+          SUM(CASE WHEN f.arousal_estimate IS NOT NULL AND f.valence_estimate IS NOT NULL THEN 1 ELSE 0 END) AS affect,
           (
             SELECT COUNT(DISTINCT track_id)
             FROM track_enrichment
@@ -54,7 +56,7 @@ def library_status(store: TonepathStore) -> LibraryStatus:
         """
     ).fetchone()
     if row is None:
-        return LibraryStatus(0, 0, 0, 0, 0, 0)
+        return LibraryStatus(0, 0, 0, 0, 0, 0, 0)
     return LibraryStatus(
         tracks=int(row["tracks"] or 0),
         features=int(row["features"] or 0),
@@ -62,6 +64,7 @@ def library_status(store: TonepathStore) -> LibraryStatus:
         vocalness=int(row["vocalness"] or 0),
         mir=int(row["mir"] or 0),
         tags=int(row["tags"] or 0),
+        affect=int(row["affect"] or 0),
         dirty_metadata=sum(1 for track in tracks if dirty_metadata_issues(track)),
         duplicate_tracks=duplicate_track_count(tracks),
         tracks_outside_music_dirs=len(outside_tracks),

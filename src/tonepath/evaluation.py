@@ -11,6 +11,7 @@ from importlib import resources
 from pathlib import Path
 
 from tonepath import config
+from tonepath.affect import affect_profile_from_enrichment
 from tonepath.benchmark import evaluate_benchmark_scenario, load_benchmark_scenarios, scenario_from_prompt
 from tonepath.db import TonepathStore
 from tonepath.display import (
@@ -488,6 +489,8 @@ def candidate_to_eval_row(store: TonepathStore, candidate: CandidateScore) -> di
     """Convert one candidate into a stable read-only evaluation row."""
 
     features = store.get_features(candidate.track.id) if candidate.track.id is not None else None
+    enrichment = store.list_enrichment(candidate.track.id) if candidate.track.id is not None else []
+    affect_profile = affect_profile_from_enrichment(enrichment)
     return {
         "phase": candidate.phase.label,
         "track": {
@@ -505,16 +508,17 @@ def candidate_to_eval_row(store: TonepathStore, candidate: CandidateScore) -> di
         },
         "score": round(candidate.score, 3),
         "confidence": candidate.confidence,
-        "features": features_to_eval_row(features),
+        "features": features_to_eval_row(features, affect_profile),
         "reasons": list(candidate.reasons),
         "red_flags": [],
         "yellow_flags": [],
     }
 
 
-def features_to_eval_row(features: TrackFeatures | None) -> dict[str, object]:
+def features_to_eval_row(features: TrackFeatures | None, affect_profile: dict[str, float] | None = None) -> dict[str, object]:
     """Convert stored feature values into JSON-safe evaluation fields."""
 
+    affect = affect_profile or {}
     if features is None:
         return {
             "source": None,
@@ -523,6 +527,9 @@ def features_to_eval_row(features: TrackFeatures | None) -> dict[str, object]:
             "loudness": None,
             "bpm": None,
             "vocalness": None,
+            "arousal": None,
+            "valence": None,
+            "affect_profile": affect,
         }
     return {
         "source": features.feature_source,
@@ -531,6 +538,9 @@ def features_to_eval_row(features: TrackFeatures | None) -> dict[str, object]:
         "loudness": round(features.loudness, 2) if features.loudness is not None else None,
         "bpm": round(features.bpm, 1) if features.bpm is not None else None,
         "vocalness": round(features.vocalness, 3) if features.vocalness is not None else None,
+        "arousal": round(features.arousal_estimate, 3) if features.arousal_estimate is not None else None,
+        "valence": round(features.valence_estimate, 3) if features.valence_estimate is not None else None,
+        "affect_profile": affect,
     }
 
 
@@ -601,6 +611,7 @@ def candidate_red_flags(row: dict[str, object], no_vocals: bool) -> list[str]:
     energy = float_or_none(features.get("energy"))
     loudness = float_or_none(features.get("loudness"))
     bpm = float_or_none(features.get("bpm"))
+    affect_profile = features.get("affect_profile")
     confidence = row.get("confidence")
     phase = str(row.get("phase") or "")
 
@@ -615,6 +626,13 @@ def candidate_red_flags(row: dict[str, object], no_vocals: bool) -> list[str]:
             flags.append("high loudness in calm/focus candidate")
         if bpm is not None and bpm >= 150.0:
             flags.append("high BPM in calm/focus candidate")
+    if phase == "lift" and isinstance(affect_profile, dict):
+        if affect_float(affect_profile, "sadness") >= 0.6:
+            flags.append("high sadness in lift candidate")
+        if affect_float(affect_profile, "darkness") >= 0.6:
+            flags.append("high darkness in lift candidate")
+        if affect_float(affect_profile, "tension") >= 0.6:
+            flags.append("high tension in lift candidate")
     return flags
 
 
@@ -629,6 +647,7 @@ def candidate_yellow_flags(row: dict[str, object], no_vocals: bool) -> list[str]
     energy = float_or_none(features.get("energy"))
     loudness = float_or_none(features.get("loudness"))
     bpm = float_or_none(features.get("bpm"))
+    affect_profile = features.get("affect_profile")
     phase = str(row.get("phase") or "")
     calm_phase = phase in {"decompress", "focus", "soften", "settle", "calm"}
 
@@ -645,6 +664,11 @@ def candidate_yellow_flags(row: dict[str, object], no_vocals: bool) -> list[str]
         flags.append("high loudness for calm/focus")
     if calm_phase and vocalness is not None and vocalness >= 0.65:
         flags.append("vocal-heavy in low-stim prompt")
+    if phase in {"hold", "stabilize", "lift"}:
+        if not isinstance(affect_profile, dict) or not affect_profile:
+            flags.append("affect evidence unknown")
+        elif phase == "lift" and affect_float(affect_profile, "uplift") < 0.25:
+            flags.append("low uplift evidence for lift phase")
     return flags
 
 
@@ -655,6 +679,14 @@ def float_or_none(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def affect_float(profile: dict[object, object], axis: str) -> float:
+    """Return a numeric affect-axis value from a candidate profile."""
+
+    value = profile.get(axis)
+    number = float_or_none(value)
+    return 0.0 if number is None else number
 
 
 def audit_cache_dir(run_id: str) -> Path:

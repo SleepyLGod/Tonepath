@@ -4,7 +4,7 @@ from pathlib import Path
 
 from tonepath.analysis import AUDIO_SEPARATOR_FEATURE_SOURCE, ESSENTIA_VOICE_FEATURE_SOURCE
 from tonepath.db import TonepathStore
-from tonepath.models import SessionPhase, SessionPlan, SessionRequest, Track, TrackFeatures
+from tonepath.models import EnrichmentRecord, SessionPhase, SessionPlan, SessionRequest, Track, TrackFeatures
 from tonepath.selector import score_track, select_path
 
 
@@ -499,6 +499,66 @@ class SelectorFeaturesTest(unittest.TestCase):
             self.assertEqual(sum(1 for title in titles if title and "A Serene Garden" in title), 1)
             store.close()
 
+    def test_lift_phase_demotes_sad_dark_affect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            warm_id = store.upsert_track(track_for(tmp, "warm-uplift.wav"))
+            dark_id = store.upsert_track(track_for(tmp, "dark-sad.wav"))
+            for track_id, valence in ((warm_id, 0.72), (dark_id, 0.42)):
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id,
+                        bpm=92.0,
+                        loudness=-18.0,
+                        energy=0.35,
+                        vocalness=0.2,
+                        arousal_estimate=0.35,
+                        valence_estimate=valence,
+                        feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                        confidence="high",
+                    )
+                )
+            upsert_affect(store, warm_id, uplift=0.7, warmth=0.7, brightness=0.5, sadness=0.1, darkness=0.1, tension=0.1)
+            upsert_affect(store, dark_id, uplift=0.1, warmth=0.2, brightness=0.1, sadness=0.8, darkness=0.7, tension=0.4)
+
+            phase = SessionPhase("lift", 0, 600, 0.42, 0.68, 0.45, "avoid")
+            warm = score_track(store, store.get_track(warm_id), phase)
+            dark = score_track(store, store.get_track(dark_id), phase)
+
+            self.assertGreater(warm.score, dark.score)
+            self.assertIn("affect profile contributes to phase fit", warm.reasons)
+            self.assertIn("sad/dark/tension affect is risky for the lift phase", dark.reasons)
+            store.close()
+
+    def test_hold_phase_demotes_high_bpm_low_stimulation_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            steady_id = store.upsert_track(track_for(tmp, "steady-warm.wav"))
+            frantic_id = store.upsert_track(track_for(tmp, "frantic-warm.wav"))
+            for track_id, bpm in ((steady_id, 92.0), (frantic_id, 148.0)):
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id,
+                        bpm=bpm,
+                        loudness=-15.0,
+                        energy=0.42,
+                        vocalness=0.15,
+                        arousal_estimate=0.38,
+                        valence_estimate=0.56,
+                        feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                        confidence="high",
+                    )
+                )
+                upsert_affect(store, track_id, uplift=0.45, warmth=0.5, calmness=0.45, sadness=0.2, darkness=0.1, tension=0.1)
+
+            phase = SessionPhase("hold", 0, 600, 0.22, 0.48, 0.24, "allow")
+            steady = score_track(store, store.get_track(steady_id), phase)
+            frantic = score_track(store, store.get_track(frantic_id), phase)
+
+            self.assertGreater(steady.score, frantic.score)
+            self.assertIn("phase stimulation penalty adjusted the score", frantic.reasons)
+            store.close()
+
     def test_unverified_audio_without_duration_or_features_is_demoted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = TonepathStore(Path(tmp) / "tonepath.db")
@@ -539,6 +599,22 @@ def track_for(tmp: str, name: str, title: str | None = None, artist: str | None 
         duration=None,
         format="wav",
     )
+
+
+def upsert_affect(store: TonepathStore, track_id: int, **values: float) -> None:
+    """Store derived affect profile values for selector tests."""
+
+    for axis, value in values.items():
+        store.upsert_enrichment(
+            EnrichmentRecord(
+                track_id=track_id,
+                field=f"affect:{axis}",
+                value=str(value),
+                tier="features",
+                source="test",
+                confidence="medium",
+            )
+        )
 
 
 if __name__ == "__main__":
