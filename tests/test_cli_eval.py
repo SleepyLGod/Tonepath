@@ -21,9 +21,10 @@ from tonepath.evaluation import (
     evaluate_intent,
     evaluate_rerank,
     evaluate_suite,
+    hybrid_candidates,
     profile_movements,
 )
-from tonepath.models import ProfileRule, Track, TrackFeatures
+from tonepath.models import ProfileRule, SessionPhase, SessionPlan, SessionRequest, Track, TrackFeatures
 from tonepath.planner import plan_session
 
 
@@ -111,15 +112,16 @@ class CliEvalTest(unittest.TestCase):
                 ), patch(
                     "tonepath.evaluation.read_or_create_clap_text_embedding", return_value=[1.0, 0.0]
                 ), patch("tonepath.evaluation.read_clap_audio_embedding", side_effect=audio_embedding):
-                    result = CliRunner().invoke(app, ["eval", "bakeoff", "--engine", "selector", "--engine", "clap", "--limit", "2", "--json"])
+                    result = CliRunner().invoke(app, ["eval", "bakeoff", "--engine", "selector", "--engine", "clap", "--engine", "hybrid", "--limit", "2", "--json"])
 
                 self.assertEqual(result.exit_code, 0, result.output)
                 payload = json.loads(result.output)
                 self.assertEqual(payload[0]["scenario_id"], "sad_test")
-                self.assertEqual([engine["engine"] for engine in payload[0]["engines"]], ["selector", "clap"])
+                self.assertEqual([engine["engine"] for engine in payload[0]["engines"]], ["selector", "clap", "hybrid"])
+                self.assertEqual([row["compared_engine"] for row in payload[0]["deltas"]], ["clap", "hybrid"])
                 self.assertEqual(payload[0]["engines"][1]["candidates"][0]["track"]["title"], "warm")
 
-    def test_eval_bakeoff_marks_missing_clap_embeddings_as_fail(self) -> None:
+    def test_eval_bakeoff_marks_missing_clap_embeddings_as_fail_or_warning(self) -> None:
         scenario = {
             "id": "sad_test",
             "lang": "zh",
@@ -138,13 +140,106 @@ class CliEvalTest(unittest.TestCase):
                 ), patch(
                     "tonepath.evaluation.read_or_create_clap_text_embedding", return_value=[1.0]
                 ), patch("tonepath.evaluation.read_clap_audio_embedding", return_value=None):
-                    payload = evaluate_bakeoff(store, ("selector", "clap"), 1)
+                    payload = evaluate_bakeoff(store, ("selector", "clap", "hybrid"), 1)
                 after = store.profile_summary()
                 store.close()
 
                 clap = payload[0]["engines"][1]
+                hybrid = payload[0]["engines"][2]
                 self.assertEqual(clap["result"], "FAIL")
+                self.assertEqual(hybrid["result"], "WARN")
+                self.assertEqual(hybrid["candidates"][0]["track"]["title"], "warm")
                 self.assertEqual(before, after)
+
+    def test_eval_bakeoff_rejects_unknown_engine(self) -> None:
+        result = CliRunner().invoke(app, ["eval", "bakeoff", "--engine", "selector", "--engine", "bogus"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Unsupported bake-off engine", result.output)
+
+    def test_hybrid_keeps_clap_inside_selector_safe_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                safe_id = store.upsert_track(track_for(Path(tmp) / "safe.mp3", title="safe", genre="instrumental"))
+                risky_id = store.upsert_track(track_for(Path(tmp) / "risky.mp3", title="risky", genre="pop"))
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id=safe_id,
+                        energy=0.32,
+                        loudness=-18.0,
+                        bpm=84.0,
+                        vocalness=0.1,
+                        feature_source="model-essentia-voice-instrumental",
+                        confidence="high",
+                    )
+                )
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id=risky_id,
+                        energy=0.9,
+                        loudness=-5.0,
+                        bpm=168.0,
+                        vocalness=0.92,
+                        feature_source="model-essentia-voice-instrumental",
+                        confidence="high",
+                    )
+                )
+                plan = one_phase_plan(no_vocals=True)
+
+                def audio_embedding(track: Track) -> list[float] | None:
+                    return [1.0, 0.0] if track.title == "risky" else [0.0, 1.0]
+
+                with patch("tonepath.evaluation.read_or_create_clap_text_embedding", return_value=[1.0, 0.0]), patch(
+                    "tonepath.evaluation.read_clap_audio_embedding", side_effect=audio_embedding
+                ):
+                    candidates = hybrid_candidates(store, plan, 1)
+                store.close()
+
+                self.assertEqual(candidates[0].track.title, "safe")
+                self.assertTrue(any("CLAP semantic bonus" in reason for reason in candidates[0].reasons))
+
+    def test_hybrid_does_not_pull_tracks_outside_selector_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                for index in range(12):
+                    track_id = store.upsert_track(track_for(Path(tmp) / f"pool-{index}.mp3", title=f"pool {index}", genre="ambient"))
+                    store.upsert_features(
+                        TrackFeatures(
+                            track_id=track_id,
+                            energy=0.28,
+                            loudness=-18.0,
+                            bpm=80.0 + index,
+                            vocalness=0.1,
+                            feature_source="model-essentia-voice-instrumental",
+                            confidence="high",
+                        )
+                    )
+                outsider_id = store.upsert_track(track_for(Path(tmp) / "outsider.mp3", title="outsider", genre="pop"))
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id=outsider_id,
+                        energy=0.95,
+                        loudness=-4.0,
+                        bpm=180.0,
+                        vocalness=0.95,
+                        feature_source="model-essentia-voice-instrumental",
+                        confidence="high",
+                    )
+                )
+                plan = one_phase_plan(no_vocals=True)
+
+                def audio_embedding(track: Track) -> list[float] | None:
+                    return [1.0, 0.0] if track.title == "outsider" else [0.0, 1.0]
+
+                with patch("tonepath.evaluation.read_or_create_clap_text_embedding", return_value=[1.0, 0.0]), patch(
+                    "tonepath.evaluation.read_clap_audio_embedding", side_effect=audio_embedding
+                ):
+                    candidates = hybrid_candidates(store, plan, 3)
+                store.close()
+
+                self.assertNotIn("outsider", [candidate.track.title for candidate in candidates])
 
     def test_chinese_bakeoff_prompt_uses_english_canonical_probe(self) -> None:
         plan = plan_session("我有点难过，想慢慢开心一点，但不要太吵")
@@ -920,6 +1015,32 @@ def track_for(path: Path, title: str, genre: str | None) -> Track:
         genre=genre,
         duration=180.0,
         format="mp3",
+    )
+
+
+def one_phase_plan(no_vocals: bool = False) -> SessionPlan:
+    """Return a one-phase plan for focused bake-off tests."""
+
+    return SessionPlan(
+        request=SessionRequest(
+            prompt="focus",
+            source_state="unspecified",
+            target_state="focus",
+            duration_sec=1800,
+            no_vocals=no_vocals,
+            quiet=True,
+        ),
+        phases=(
+            SessionPhase(
+                label="focus",
+                start_sec=0,
+                end_sec=1800,
+                target_arousal=0.35,
+                target_valence=0.55,
+                target_energy=0.35,
+                vocal_policy="avoid" if no_vocals else "allow",
+            ),
+        ),
     )
 
 

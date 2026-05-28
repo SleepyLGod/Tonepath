@@ -147,10 +147,10 @@ Experimental music-text bake-off:
 ```bash
 uv run tonepath models setup clap
 uv run tonepath analyze --features embedding --method clap --changed-only
-uv run tonepath eval bakeoff --engine selector --engine clap --limit 8
+uv run tonepath eval bakeoff --engine selector --engine clap --engine hybrid --limit 8
 ```
 
-The CLAP path is evaluation-only. It creates a separate runtime under `TONEPATH_HOME/runtimes/clap-py311/`, stores model/cache files under `TONEPATH_HOME/cache/models/clap/`, and stores per-track embeddings under `TONEPATH_HOME/cache/embeddings/clap/`. It does not change `listen`, TUI playback, selector weights, profile rules, or the SQLite schema. MuQ-MuLan remains a later candidate if CLAP does not improve Chinese or emotion-transition benchmark cases.
+The CLAP path is evaluation-only. It creates a separate runtime under `TONEPATH_HOME/runtimes/clap-py311/`, stores model/cache files under `TONEPATH_HOME/cache/models/clap/`, and stores per-track embeddings under `TONEPATH_HOME/cache/embeddings/clap/`. The `hybrid` bake-off engine uses selector-safe candidates first, then adds a bounded CLAP semantic bonus inside that safe pool. It does not change `listen`, TUI playback, selector weights, profile rules, or the SQLite schema. MuQ-MuLan remains a later candidate if CLAP does not improve Chinese or emotion-transition benchmark cases.
 
 Model analysis is resumable and incremental:
 
@@ -173,7 +173,7 @@ uv run tonepath eval selection "我现在很烦，想半小时后进入写代码
 uv run tonepath eval selection "我现在很烦，想半小时后进入写代码状态，不要人声" --json
 uv run tonepath eval suite --limit 5
 uv run tonepath eval suite --json
-uv run tonepath eval bakeoff --engine selector --engine clap --limit 8
+uv run tonepath eval bakeoff --engine selector --engine clap --engine hybrid --limit 8
 uv run tonepath eval profile "我要写论文，四十五分钟，低刺激，最好不要人声" --limit 8
 uv run tonepath eval audit "我现在很烦，想半小时后进入写代码状态，不要人声" --json
 uv run tonepath eval audit "我现在很烦，想半小时后进入写代码状态，不要人声" --codex --web --limit 12
@@ -184,7 +184,7 @@ uv run tonepath eval rerank "我现在很烦，想半小时后进入写代码状
 
 `eval suite` runs a small built-in set of product prompts and flags likely quality problems such as high vocalness in no-vocals results, high stimulation in focus/decompress phases, or low-evidence top candidates. It is read-only: it does not create sessions, playback rows, feedback, or profile rules.
 
-`eval bakeoff` compares the normal selector against optional experimental engines. The first experimental engine is CLAP, which uses deterministic English text probes derived from parsed intent so Chinese prompts are evaluated through the same structured intent layer. Bake-off output is advisory only.
+`eval bakeoff` compares the normal selector against optional experimental engines. CLAP uses deterministic English text probes derived from parsed intent so Chinese prompts are evaluated through the same structured intent layer. The `hybrid` engine keeps the selector as the safety layer and only uses CLAP as a small semantic reranker. Bake-off output is advisory only.
 
 `eval profile` compares selection with and without active profile rules. It is the main way to check whether personalization is helping before changing normal listening behavior.
 

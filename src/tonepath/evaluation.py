@@ -25,7 +25,7 @@ from tonepath.display import (
 from tonepath.embedding import cosine_similarity, read_clap_audio_embedding, read_or_create_clap_text_embedding, read_or_create_clap_text_embeddings
 from tonepath.models import CandidateScore, ProfileRule, SessionPlan, TrackFeatures
 from tonepath.planner import parse_request, plan_session, request_constraints
-from tonepath.selector import select_path
+from tonepath.selector import score_track, select_path
 
 
 def evaluate_selection(store: TonepathStore, prompt: str, limit: int, profile_enabled: bool = True) -> dict[str, object]:
@@ -308,8 +308,11 @@ def evaluate_suite(store: TonepathStore, limit: int, prompts: tuple[str, ...] | 
     return payload
 
 
-BAKEOFF_ENGINES = {"selector", "clap"}
+BAKEOFF_ENGINES = {"selector", "clap", "hybrid"}
 BAKEOFF_RESULT_ORDER = {"PASS": 0, "WARN": 1, "FAIL": 2}
+HYBRID_CLAP_BONUS_CAP = 0.8
+HYBRID_RED_FLAG_PENALTY = 8.0
+HYBRID_YELLOW_FLAG_PENALTY = 0.35
 
 
 def evaluate_bakeoff(store: TonepathStore, engines: tuple[str, ...], limit: int) -> list[dict[str, object]]:
@@ -319,7 +322,7 @@ def evaluate_bakeoff(store: TonepathStore, engines: tuple[str, ...], limit: int)
     if unsupported:
         raise RuntimeError(f"Unsupported bake-off engine(s): {', '.join(unsupported)}")
     scenarios = load_benchmark_scenarios()
-    if "clap" in engines:
+    if "clap" in engines or "hybrid" in engines:
         read_or_create_clap_text_embeddings(clap_probes_for_scenarios(scenarios))
     payload: list[dict[str, object]] = []
     for scenario in scenarios:
@@ -332,6 +335,7 @@ def evaluate_bakeoff(store: TonepathStore, engines: tuple[str, ...], limit: int)
                 "limit": min(limit, int(scenario["limit"])),
                 "engines": scenario_results,
                 "delta": bakeoff_delta(scenario_results),
+                "deltas": bakeoff_deltas(scenario_results),
             }
         )
     return payload
@@ -347,6 +351,8 @@ def evaluate_bakeoff_engine(store: TonepathStore, scenario: dict[str, object], e
         candidates = eval_candidates(store, plan, scenario_limit)
     elif engine == "clap":
         candidates = clap_candidates(store, plan, scenario_limit)
+    elif engine == "hybrid":
+        candidates = hybrid_candidates(store, plan, scenario_limit)
     else:
         raise RuntimeError(f"Unsupported bake-off engine: {engine}")
     rows = [candidate_to_eval_row(store, candidate) for candidate in candidates]
@@ -360,6 +366,17 @@ def evaluate_bakeoff_engine(store: TonepathStore, scenario: dict[str, object], e
                 "type": "engine_candidates",
                 "status": "fail",
                 "message": "CLAP has no cached audio embeddings. Run analyze --features embedding --method clap.",
+                "affected_ranks": [],
+            }
+        )
+        benchmark = {**benchmark, "checks": checks, "result": aggregate_result(checks)}
+    if engine == "hybrid" and not hybrid_has_clap_evidence(rows):
+        checks = list(benchmark["checks"])
+        checks.append(
+            {
+                "type": "engine_candidates",
+                "status": "warn" if rows else "fail",
+                "message": "Hybrid has no cached CLAP evidence in the selector-safe pool. Run analyze --features embedding --method clap.",
                 "affected_ranks": [],
             }
         )
@@ -410,6 +427,91 @@ def clap_candidates(store: TonepathStore, plan: SessionPlan, limit: int) -> list
             if candidate.track.id is not None:
                 used_ids.add(candidate.track.id)
     return selected[:limit]
+
+
+def hybrid_candidates(store: TonepathStore, plan: SessionPlan, limit: int) -> list[CandidateScore]:
+    """Return selector-safe candidates with bounded CLAP semantic reranking."""
+
+    per_phase = max(1, math.ceil(limit / max(len(plan.phases), 1)))
+    pool_size = max(per_phase * 4, 12)
+    tracks = store.list_tracks()
+    selected: list[CandidateScore] = []
+    used_ids: set[int] = set()
+    used_keys: set[tuple[str, str, int]] = set()
+    for phase in plan.phases:
+        probe = clap_probe_for_phase(plan, phase.label)
+        text_embedding = read_or_create_clap_text_embedding(probe)
+        selector_pool: list[CandidateScore] = []
+        for track in tracks:
+            if track.id is None or track.id in used_ids or canonical_track_key(track) in used_keys:
+                continue
+            selector_pool.append(score_track(store, track, phase))
+        selector_pool.sort(key=lambda candidate: candidate.score, reverse=True)
+
+        hybrid_pool = [
+            hybrid_candidate(store, candidate, text_embedding=text_embedding, probe=probe, no_vocals=plan.request.no_vocals)
+            for candidate in selector_pool[:pool_size]
+        ]
+        hybrid_pool.sort(key=lambda candidate: candidate.score, reverse=True)
+        added = 0
+        for candidate in hybrid_pool:
+            if added >= per_phase:
+                break
+            key = canonical_track_key(candidate.track)
+            if key in used_keys:
+                continue
+            selected.append(candidate)
+            used_keys.add(key)
+            if candidate.track.id is not None:
+                used_ids.add(candidate.track.id)
+            added += 1
+    return selected[:limit]
+
+
+def hybrid_candidate(
+    store: TonepathStore,
+    candidate: CandidateScore,
+    text_embedding: list[float],
+    probe: str,
+    no_vocals: bool,
+) -> CandidateScore:
+    """Return one hybrid-scored candidate from one selector candidate."""
+
+    row = candidate_to_eval_row(store, candidate)
+    red_flags = candidate_red_flags(row, no_vocals=no_vocals)
+    yellow_flags = candidate_yellow_flags(row, no_vocals=no_vocals)
+    audio_embedding = read_clap_audio_embedding(candidate.track)
+    clap_bonus = 0.0
+    reasons = list(candidate.reasons)
+    if audio_embedding is not None and not red_flags:
+        similarity = cosine_similarity(audio_embedding, text_embedding)
+        clap_bonus = max(0.0, min(HYBRID_CLAP_BONUS_CAP, ((similarity + 1.0) / 2.0) * HYBRID_CLAP_BONUS_CAP))
+        reasons.append(f"CLAP semantic bonus for probe: {probe}")
+    elif audio_embedding is None:
+        reasons.append("CLAP semantic evidence unavailable for hybrid rerank")
+
+    safety_penalty = len(red_flags) * HYBRID_RED_FLAG_PENALTY + len(yellow_flags) * HYBRID_YELLOW_FLAG_PENALTY
+    if safety_penalty:
+        reasons.append("hybrid safety penalty from local evidence")
+    return CandidateScore(
+        track=candidate.track,
+        phase=candidate.phase,
+        score=candidate.score + clap_bonus - safety_penalty,
+        confidence=candidate.confidence,
+        reasons=tuple(reasons),
+    )
+
+
+def hybrid_has_clap_evidence(rows: list[dict[str, object]]) -> bool:
+    """Return whether a hybrid result includes at least one CLAP semantic reason."""
+
+    for row in rows:
+        reasons = row.get("reasons")
+        if not isinstance(reasons, list):
+            continue
+        if any(str(reason).startswith("CLAP semantic bonus for probe:") for reason in reasons):
+            return True
+    return False
 
 
 def clap_probes_for_scenarios(scenarios: list[dict[str, object]]) -> list[str]:
@@ -484,6 +586,20 @@ def bakeoff_delta(results: list[dict[str, object]]) -> dict[str, object]:
         "compared_result": compared["result"],
         "verdict": verdict,
     }
+
+
+def bakeoff_deltas(results: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Return comparisons from selector to every non-selector engine."""
+
+    baseline = next((row for row in results if row.get("engine") == "selector"), None)
+    if baseline is None:
+        return []
+    deltas: list[dict[str, object]] = []
+    for compared in results:
+        if compared.get("engine") == "selector":
+            continue
+        deltas.append(bakeoff_delta([baseline, compared]))
+    return deltas
 
 
 def bakeoff_result_score(result: dict[str, object]) -> tuple[int, int, int]:

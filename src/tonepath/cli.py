@@ -736,7 +736,7 @@ def eval_suite(
 
 @eval_app.command("bakeoff")
 def eval_bakeoff(
-    engines: Annotated[list[str] | None, typer.Option("--engine", help="Engine to compare: selector or clap. Repeat for multiple engines.")] = None,
+    engines: Annotated[list[str] | None, typer.Option("--engine", help="Engine to compare: selector, clap, or hybrid. Repeat for multiple engines.")] = None,
     limit: Annotated[int, typer.Option("--limit", help="Maximum number of candidates per scenario.")] = 8,
     json_output: Annotated[bool, typer.Option("--json", help="Print stable JSON for comparison.")] = False,
 ) -> None:
@@ -1374,6 +1374,15 @@ def render_eval_bakeoff(payload: list[dict[str, object]]) -> None:
             f"\n[bold]{scenario['scenario_id']}[/bold] · {scenario['prompt']} · "
             f"verdict: {delta.get('verdict', 'inconclusive')}"
         )
+        deltas = scenario.get("deltas")
+        if isinstance(deltas, list):
+            for row in deltas:
+                if not isinstance(row, dict):
+                    continue
+                console.print(
+                    f"  {row.get('baseline_engine', 'selector')} -> {row.get('compared_engine', '--')}: "
+                    f"{row.get('verdict', 'inconclusive')}"
+                )
         engines = scenario.get("engines")
         if not isinstance(engines, list):
             raise TypeError("Bake-off payload engines must be a list.")
