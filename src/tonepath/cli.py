@@ -28,6 +28,7 @@ from tonepath.experience import listen_intelligence_summary, setup_next_step, sm
 from tonepath.evaluation import (
     evaluate_audit,
     evaluate_bakeoff,
+    evaluate_diagnose,
     evaluate_intent,
     evaluate_profile_comparison,
     evaluate_rerank,
@@ -760,6 +761,30 @@ def eval_bakeoff(
     render_eval_bakeoff(payload)
 
 
+@eval_app.command("diagnose")
+def eval_diagnose(
+    limit: Annotated[int, typer.Option("--limit", help="Maximum number of candidates per scenario.")] = 8,
+    json_output: Annotated[bool, typer.Option("--json", help="Print stable JSON for diagnostics.")] = False,
+) -> None:
+    """Summarize why selection benchmark scenarios fail or warn."""
+
+    if limit <= 0:
+        raise typer.BadParameter("--limit must be greater than zero")
+    store = TonepathStore()
+    try:
+        try:
+            payload = evaluate_diagnose(store, limit)
+        except RuntimeError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    finally:
+        store.close()
+
+    if json_output:
+        print_json_payload(payload)
+        return
+    render_eval_diagnose(payload)
+
+
 @eval_app.command("intent")
 def eval_intent(
     json_output: Annotated[bool, typer.Option("--json", help="Print stable JSON for comparison.")] = False,
@@ -1405,6 +1430,47 @@ def render_eval_bakeoff(payload: list[dict[str, object]]) -> None:
                 top or "--",
             )
         console.print(table)
+
+
+def render_eval_diagnose(payload: dict[str, object]) -> None:
+    """Render compact evaluation diagnostics."""
+
+    summary = payload.get("summary")
+    if not isinstance(summary, dict):
+        raise TypeError("Diagnose payload summary must be an object.")
+    counts = summary.get("result_counts", {})
+    if not isinstance(counts, dict):
+        counts = {}
+    console.print(
+        "[bold]Evaluation diagnosis[/bold] · "
+        f"PASS {counts.get('PASS', 0)} · WARN {counts.get('WARN', 0)} · FAIL {counts.get('FAIL', 0)}"
+    )
+    top_causes = summary.get("top_root_causes", [])
+    if isinstance(top_causes, list) and top_causes:
+        cause_text = ", ".join(
+            f"{row.get('cause')} ({row.get('count')})"
+            for row in top_causes
+            if isinstance(row, dict)
+        )
+        console.print(f"Top root causes: {cause_text}")
+    console.print(f"Recommended next action: {summary.get('recommended_next_action', 'No blocking diagnosis found.')}")
+
+    scenarios = payload.get("scenarios", [])
+    if not isinstance(scenarios, list):
+        raise TypeError("Diagnose payload scenarios must be a list.")
+    table = Table("Scenario", "Result", "Root causes", "Next action", box=box.SIMPLE, expand=True)
+    for scenario in scenarios:
+        if not isinstance(scenario, dict):
+            continue
+        if scenario.get("overall_result") == "PASS" and not scenario.get("root_causes"):
+            continue
+        table.add_row(
+            str(scenario.get("scenario_id", "--")),
+            str(scenario.get("overall_result", "--")),
+            ", ".join(str(cause) for cause in scenario.get("root_causes", [])) or "--",
+            str(scenario.get("next_action", "--")),
+        )
+    console.print(table)
 
 
 def benchmark_check_summary(checks: list[object]) -> str:

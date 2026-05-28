@@ -16,8 +16,10 @@ from tonepath.evaluation import (
     codex_audit_schema_path,
     codex_prompt,
     codex_skill_path,
+    diagnose_bakeoff_payload,
     evaluate_audit,
     evaluate_bakeoff,
+    evaluate_diagnose,
     evaluate_intent,
     evaluate_rerank,
     evaluate_suite,
@@ -156,6 +158,142 @@ class CliEvalTest(unittest.TestCase):
 
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("Unsupported bake-off engine", result.output)
+
+    def test_eval_diagnose_json_outputs_root_causes(self) -> None:
+        payload = {
+            "summary": {
+                "scenario_count": 1,
+                "result_counts": {"PASS": 0, "WARN": 1, "FAIL": 0},
+                "root_cause_counts": {"metadata_hygiene": 1},
+                "top_root_causes": [{"cause": "metadata_hygiene", "count": 1}],
+                "recommended_next_action": "Clean track metadata so recommendation output is more trustworthy.",
+            },
+            "scenarios": [
+                {
+                    "scenario_id": "metadata",
+                    "prompt": "focus",
+                    "overall_result": "WARN",
+                    "engines": [],
+                    "issues": [],
+                    "root_causes": ["metadata_hygiene"],
+                    "next_action": "Clean track metadata so recommendation output is more trustworthy.",
+                }
+            ],
+        }
+        with patch("tonepath.cli.evaluate_diagnose", return_value=payload):
+            result = CliRunner().invoke(app, ["eval", "diagnose", "--json", "--limit", "1"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        parsed = json.loads(result.output)
+        self.assertEqual(parsed["scenarios"][0]["root_causes"], ["metadata_hygiene"])
+
+    def test_eval_diagnose_does_not_write_profile_state(self) -> None:
+        scenario = {
+            "id": "metadata",
+            "lang": "en",
+            "prompt": "focus 30m",
+            "limit": 1,
+            "expected_intent": {},
+            "checks": [{"type": "metadata_hygiene_warning", "level": "warn"}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                track_id = store.upsert_track(track_for(Path(tmp) / "song.mp3", title="Song(null)", genre="ambient"))
+                store.upsert_features(TrackFeatures(track_id=track_id, energy=0.2, loudness=-18.0, bpm=80.0, feature_source="test", confidence="high"))
+                before = store.profile_summary()
+                with patch("tonepath.evaluation.load_benchmark_scenarios", return_value=[scenario]), patch(
+                    "tonepath.evaluation.read_or_create_clap_text_embeddings", return_value={}
+                ), patch("tonepath.evaluation.read_or_create_clap_text_embedding", return_value=[1.0]), patch(
+                    "tonepath.evaluation.read_clap_audio_embedding", return_value=None
+                ):
+                    payload = evaluate_diagnose(store, limit=1)
+                after = store.profile_summary()
+                store.close()
+
+                self.assertEqual(before, after)
+                self.assertIn("metadata_hygiene", payload["scenarios"][0]["root_causes"])
+
+    def test_diagnose_classifies_clap_regression(self) -> None:
+        payload = diagnose_bakeoff_payload(
+            [
+                diagnose_scenario_payload(
+                    [
+                        diagnose_engine("selector", "PASS", []),
+                        diagnose_engine("clap", "FAIL", []),
+                        diagnose_engine("hybrid", "PASS", []),
+                    ],
+                    deltas=[
+                        {"baseline_engine": "selector", "compared_engine": "clap", "verdict": "regressed"},
+                        {"baseline_engine": "selector", "compared_engine": "hybrid", "verdict": "inconclusive"},
+                    ],
+                )
+            ]
+        )
+
+        causes = payload["scenarios"][0]["root_causes"]
+        self.assertIn("clap_regression", causes)
+        self.assertIn("hybrid_inconclusive", causes)
+
+    def test_diagnose_classifies_selector_tuning_with_available_features(self) -> None:
+        payload = diagnose_bakeoff_payload(
+            [
+                diagnose_scenario_payload(
+                    [
+                        diagnose_engine(
+                            "selector",
+                            "FAIL",
+                            [diagnose_check("max_stimulation_top_k", "fail", [1])],
+                            candidates=[diagnose_candidate("loud", energy=0.8, loudness=-6.0, bpm=150.0, vocalness=0.2)],
+                        ),
+                        diagnose_engine("clap", "FAIL", []),
+                        diagnose_engine("hybrid", "FAIL", []),
+                    ]
+                )
+            ]
+        )
+
+        self.assertIn("selector_tuning", payload["scenarios"][0]["root_causes"])
+
+    def test_diagnose_classifies_missing_model_evidence(self) -> None:
+        payload = diagnose_bakeoff_payload(
+            [
+                diagnose_scenario_payload(
+                    [
+                        diagnose_engine(
+                            "selector",
+                            "FAIL",
+                            [diagnose_check("required_affect_top_k", "fail", [1])],
+                            candidates=[diagnose_candidate("unknown", source=None, valence=None, affect_profile={})],
+                        ),
+                        diagnose_engine("clap", "FAIL", []),
+                        diagnose_engine("hybrid", "FAIL", []),
+                    ]
+                )
+            ]
+        )
+
+        self.assertIn("model_evidence_weak", payload["scenarios"][0]["root_causes"])
+
+    def test_diagnose_classifies_benchmark_threshold_when_all_engines_fail_cleanly(self) -> None:
+        payload = diagnose_bakeoff_payload(
+            [
+                diagnose_scenario_payload(
+                    [
+                        diagnose_engine(
+                            "selector",
+                            "FAIL",
+                            [diagnose_check("custom_threshold", "fail", [1])],
+                            candidates=[diagnose_candidate("clean")],
+                        ),
+                        diagnose_engine("clap", "FAIL", []),
+                        diagnose_engine("hybrid", "FAIL", []),
+                    ]
+                )
+            ]
+        )
+
+        self.assertIn("benchmark_threshold", payload["scenarios"][0]["root_causes"])
 
     def test_hybrid_keeps_clap_inside_selector_safe_pool(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1042,6 +1180,82 @@ def one_phase_plan(no_vocals: bool = False) -> SessionPlan:
             ),
         ),
     )
+
+
+def diagnose_scenario_payload(
+    engines: list[dict[str, object]],
+    deltas: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    """Return a minimal bake-off scenario payload for diagnosis tests."""
+
+    return {
+        "scenario_id": "scenario",
+        "lang": "en",
+        "prompt": "prompt",
+        "limit": 1,
+        "engines": engines,
+        "deltas": deltas or [],
+    }
+
+
+def diagnose_engine(
+    name: str,
+    result: str,
+    checks: list[dict[str, object]],
+    candidates: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    """Return a minimal bake-off engine payload for diagnosis tests."""
+
+    return {
+        "engine": name,
+        "result": result,
+        "checks": checks,
+        "red_flag_count": 0,
+        "yellow_flag_count": 0,
+        "candidates": candidates or [],
+    }
+
+
+def diagnose_check(check_type: str, status: str, affected_ranks: list[int]) -> dict[str, object]:
+    """Return a minimal benchmark check payload for diagnosis tests."""
+
+    return {
+        "type": check_type,
+        "status": status,
+        "message": f"{check_type} {status}",
+        "affected_ranks": affected_ranks,
+    }
+
+
+def diagnose_candidate(
+    title: str,
+    source: str | None = "test",
+    energy: float | None = 0.3,
+    loudness: float | None = -14.0,
+    bpm: float | None = 90.0,
+    vocalness: float | None = 0.2,
+    valence: float | None = 0.6,
+    affect_profile: dict[str, float] | None = None,
+) -> dict[str, object]:
+    """Return a minimal evaluation candidate payload for diagnosis tests."""
+
+    return {
+        "phase": "focus",
+        "track": {"display_label": f"{title} - artist", "title": title},
+        "confidence": "high" if source else "low",
+        "features": {
+            "source": source,
+            "confidence": "high" if source else "low",
+            "energy": energy,
+            "loudness": loudness,
+            "bpm": bpm,
+            "vocalness": vocalness,
+            "valence": valence,
+            "affect_profile": {"uplift": 0.4} if affect_profile is None else affect_profile,
+        },
+        "red_flags": [],
+        "yellow_flags": [],
+    }
 
 
 def write_audit_cache(

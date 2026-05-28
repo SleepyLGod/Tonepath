@@ -313,6 +313,17 @@ BAKEOFF_RESULT_ORDER = {"PASS": 0, "WARN": 1, "FAIL": 2}
 HYBRID_CLAP_BONUS_CAP = 0.8
 HYBRID_RED_FLAG_PENALTY = 8.0
 HYBRID_YELLOW_FLAG_PENALTY = 0.35
+DIAGNOSE_ENGINES = ("selector", "clap", "hybrid")
+ROOT_CAUSE_ACTIONS = {
+    "intent_parser": "Fix the prompt parser before tuning selection.",
+    "selector_tuning": "Tune selector phase weights or safety penalties for the failing checks.",
+    "model_evidence_weak": "Run prepare/analyze to fill missing affect, vocalness, confidence, or CLAP evidence.",
+    "library_gap": "Add or replace tracks that match the scenario before tuning more code.",
+    "metadata_hygiene": "Clean track metadata so recommendation output is more trustworthy.",
+    "benchmark_threshold": "Review whether the benchmark threshold is too strict for the current library.",
+    "clap_regression": "Keep CLAP evaluation-only; tune probes or hybrid before using it in listen.",
+    "hybrid_inconclusive": "Keep hybrid evaluation-only and inspect the scenario before promotion.",
+}
 
 
 def evaluate_bakeoff(store: TonepathStore, engines: tuple[str, ...], limit: int) -> list[dict[str, object]]:
@@ -339,6 +350,329 @@ def evaluate_bakeoff(store: TonepathStore, engines: tuple[str, ...], limit: int)
             }
         )
     return payload
+
+
+def evaluate_diagnose(store: TonepathStore, limit: int) -> dict[str, object]:
+    """Return compact root-cause diagnostics over the built-in bake-off."""
+
+    return diagnose_bakeoff_payload(evaluate_bakeoff(store, DIAGNOSE_ENGINES, limit))
+
+
+def diagnose_bakeoff_payload(payload: list[dict[str, object]]) -> dict[str, object]:
+    """Return product diagnosis rows from bake-off output."""
+
+    scenarios = [diagnose_scenario(row) for row in payload]
+    result_counts = {"PASS": 0, "WARN": 0, "FAIL": 0}
+    root_cause_counts: dict[str, int] = {}
+    for scenario in scenarios:
+        result = str(scenario["overall_result"])
+        if result in result_counts:
+            result_counts[result] += 1
+        for cause in scenario["root_causes"]:
+            root_cause_counts[str(cause)] = root_cause_counts.get(str(cause), 0) + 1
+    ordered_causes = sorted(root_cause_counts.items(), key=lambda item: (-item[1], item[0]))
+    return {
+        "summary": {
+            "scenario_count": len(scenarios),
+            "result_counts": result_counts,
+            "root_cause_counts": root_cause_counts,
+            "top_root_causes": [{"cause": cause, "count": count} for cause, count in ordered_causes[:5]],
+            "recommended_next_action": next_action_for_root_causes([cause for cause, _count in ordered_causes]),
+        },
+        "scenarios": scenarios,
+    }
+
+
+def diagnose_scenario(scenario: dict[str, object]) -> dict[str, object]:
+    """Return one scenario-level diagnosis."""
+
+    engines = scenario_engines(scenario)
+    selector = engines.get("selector") or {}
+    selector_result = str(selector.get("result", "WARN"))
+    issues = diagnose_issues(engines)
+    root_causes = scenario_root_causes(engines, scenario_deltas(scenario), issues)
+    return {
+        "scenario_id": scenario.get("scenario_id"),
+        "prompt": scenario.get("prompt"),
+        "overall_result": selector_result,
+        "engines": [diagnose_engine_summary(engine) for engine in engines.values()],
+        "issues": issues,
+        "root_causes": root_causes,
+        "next_action": next_action_for_root_causes(root_causes),
+    }
+
+
+def scenario_engines(scenario: dict[str, object]) -> dict[str, dict[str, object]]:
+    """Return bake-off engines keyed by name."""
+
+    engines: dict[str, dict[str, object]] = {}
+    raw = scenario.get("engines", [])
+    if not isinstance(raw, list):
+        return engines
+    for row in raw:
+        if isinstance(row, dict):
+            engines[str(row.get("engine", ""))] = row
+    return engines
+
+
+def scenario_deltas(scenario: dict[str, object]) -> list[dict[str, object]]:
+    """Return valid bake-off deltas."""
+
+    raw = scenario.get("deltas", [])
+    return [row for row in raw if isinstance(row, dict)] if isinstance(raw, list) else []
+
+
+def diagnose_engine_summary(engine: dict[str, object]) -> dict[str, object]:
+    """Return compact engine status for diagnosis output."""
+
+    counts = check_status_counts(engine.get("checks", []))
+    return {
+        "engine": engine.get("engine"),
+        "result": engine.get("result"),
+        "checks": counts,
+        "red_flags": engine.get("red_flag_count", 0),
+        "yellow_flags": engine.get("yellow_flag_count", 0),
+    }
+
+
+def diagnose_issues(engines: dict[str, dict[str, object]]) -> list[dict[str, object]]:
+    """Return non-passing checks with affected candidate labels."""
+
+    issues: list[dict[str, object]] = []
+    for engine_name, engine in engines.items():
+        checks = engine.get("checks", [])
+        if not isinstance(checks, list):
+            continue
+        candidates = engine.get("candidates", [])
+        candidate_rows = candidates if isinstance(candidates, list) else []
+        for check in checks:
+            if not isinstance(check, dict):
+                continue
+            status = str(check.get("status", "pass")).lower()
+            if status == "pass":
+                continue
+            affected = [int(rank) for rank in check.get("affected_ranks", []) if isinstance(rank, int)]
+            issues.append(
+                {
+                    "engine": engine_name,
+                    "check_type": check.get("type"),
+                    "status": status,
+                    "message": check.get("message"),
+                    "affected_ranks": affected,
+                    "affected_candidates": affected_candidate_labels(candidate_rows, affected),
+                }
+            )
+    return issues
+
+
+def affected_candidate_labels(candidates: list[object], ranks: list[int]) -> list[str]:
+    """Return labels for affected candidate ranks."""
+
+    labels: list[str] = []
+    for rank in ranks:
+        index = rank - 1
+        if index < 0 or index >= len(candidates):
+            continue
+        row = candidates[index]
+        if not isinstance(row, dict):
+            continue
+        track = row.get("track")
+        if isinstance(track, dict):
+            labels.append(str(track.get("display_label") or track.get("title") or f"rank {rank}"))
+    return labels
+
+
+def scenario_root_causes(
+    engines: dict[str, dict[str, object]],
+    deltas: list[dict[str, object]],
+    issues: list[dict[str, object]],
+) -> list[str]:
+    """Classify root causes for a diagnosed scenario."""
+
+    causes: set[str] = set()
+    selector = engines.get("selector") or {}
+    clap = engines.get("clap") or {}
+    hybrid = engines.get("hybrid") or {}
+    selector_checks = selector.get("checks", [])
+    selector_candidates = selector.get("candidates", [])
+    if not isinstance(selector_checks, list):
+        selector_checks = []
+    if not isinstance(selector_candidates, list):
+        selector_candidates = []
+
+    if any(issue.get("check_type") == "expected_intent" and issue.get("status") == "fail" for issue in issues):
+        causes.add("intent_parser")
+    if any(issue.get("check_type") == "metadata_hygiene_warning" for issue in issues):
+        causes.add("metadata_hygiene")
+    if has_model_evidence_gap(selector_checks, selector_candidates) or any(
+        "cached CLAP evidence" in str(issue.get("message", "")) or "cached audio embeddings" in str(issue.get("message", ""))
+        for issue in issues
+    ):
+        causes.add("model_evidence_weak")
+    if has_selector_tuning_issue(selector_checks, selector_candidates):
+        causes.add("selector_tuning")
+    if str(selector.get("result")) == "PASS" and str(clap.get("result")) == "FAIL":
+        causes.add("clap_regression")
+    for delta in deltas:
+        if delta.get("compared_engine") == "clap" and delta.get("verdict") == "regressed":
+            causes.add("clap_regression")
+        if delta.get("compared_engine") == "hybrid" and delta.get("verdict") == "inconclusive":
+            if any(row.get("compared_engine") == "clap" and row.get("verdict") == "regressed" for row in deltas):
+                causes.add("hybrid_inconclusive")
+    if all(str(engine.get("result")) == "FAIL" for engine in (selector, clap, hybrid) if engine):
+        if not causes.intersection({"model_evidence_weak", "selector_tuning", "metadata_hygiene"}):
+            causes.add("benchmark_threshold" if selector_candidates_have_clean_evidence(selector_candidates) else "library_gap")
+        elif causes == {"clap_regression"}:
+            causes.add("library_gap")
+    if not causes and str(selector.get("result")) != "PASS":
+        causes.add("benchmark_threshold")
+    return sorted(causes)
+
+
+def has_model_evidence_gap(checks: list[object], candidates: list[object]) -> bool:
+    """Return whether failing checks appear caused by missing evidence."""
+
+    for check in checks:
+        if not isinstance(check, dict) or str(check.get("status", "pass")).lower() == "pass":
+            continue
+        check_type = str(check.get("type", ""))
+        if check_type == "required_confidence_top_k":
+            return True
+        affected = [int(rank) for rank in check.get("affected_ranks", []) if isinstance(rank, int)]
+        if check_type in {"no_high_vocalness_top_k", "prefer_low_vocalness_top_k"} and affected_have_missing_feature(candidates, affected, "vocalness"):
+            return True
+        if check_type in {"required_affect_top_k", "min_valence_phase", "max_affect_axis_phase"} and affected_have_missing_affect(candidates, affected):
+            return True
+    return False
+
+
+def has_selector_tuning_issue(checks: list[object], candidates: list[object]) -> bool:
+    """Return whether failures point at selector scoring with available evidence."""
+
+    selector_check_types = {
+        "no_high_vocalness_top_k",
+        "max_stimulation_top_k",
+        "prefer_low_vocalness_top_k",
+        "required_affect_top_k",
+        "min_valence_phase",
+        "max_affect_axis_phase",
+    }
+    for check in checks:
+        if not isinstance(check, dict) or str(check.get("status", "pass")).lower() == "pass":
+            continue
+        check_type = str(check.get("type", ""))
+        if check_type not in selector_check_types:
+            continue
+        affected = [int(rank) for rank in check.get("affected_ranks", []) if isinstance(rank, int)]
+        if check_type in {"required_affect_top_k", "min_valence_phase", "max_affect_axis_phase"}:
+            if not affected_have_missing_affect(candidates, affected):
+                return True
+        elif not affected_have_missing_core_evidence(candidates, affected):
+            return True
+    return False
+
+
+def affected_have_missing_core_evidence(candidates: list[object], ranks: list[int]) -> bool:
+    """Return whether affected candidates lack core audio evidence."""
+
+    if not ranks:
+        return False
+    for row in candidates_for_ranks(candidates, ranks):
+        features = row.get("features")
+        if not isinstance(features, dict) or features.get("source") is None:
+            return True
+    return False
+
+
+def affected_have_missing_feature(candidates: list[object], ranks: list[int], field: str) -> bool:
+    """Return whether affected candidates lack one feature field."""
+
+    if not ranks:
+        return False
+    for row in candidates_for_ranks(candidates, ranks):
+        features = row.get("features")
+        if not isinstance(features, dict) or features.get(field) is None:
+            return True
+    return False
+
+
+def affected_have_missing_affect(candidates: list[object], ranks: list[int]) -> bool:
+    """Return whether affected candidates lack affect evidence."""
+
+    if not ranks:
+        return False
+    for row in candidates_for_ranks(candidates, ranks):
+        features = row.get("features")
+        if not isinstance(features, dict):
+            return True
+        profile = features.get("affect_profile")
+        if features.get("valence") is None or not isinstance(profile, dict) or not profile:
+            return True
+    return False
+
+
+def candidates_for_ranks(candidates: list[object], ranks: list[int]) -> list[dict[str, object]]:
+    """Return candidate rows for one-based ranks."""
+
+    rows: list[dict[str, object]] = []
+    for rank in ranks:
+        index = rank - 1
+        if index < 0 or index >= len(candidates):
+            continue
+        row = candidates[index]
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def selector_candidates_have_clean_evidence(candidates: list[object]) -> bool:
+    """Return whether selector candidates look evidenced enough for threshold review."""
+
+    if not candidates:
+        return False
+    for row in candidates[:3]:
+        if not isinstance(row, dict):
+            return False
+        features = row.get("features")
+        if not isinstance(features, dict) or features.get("source") is None:
+            return False
+        if row.get("red_flags") or row.get("yellow_flags"):
+            return False
+    return True
+
+
+def check_status_counts(checks: object) -> dict[str, int]:
+    """Return pass/warn/fail counts for a check list."""
+
+    counts = {"pass": 0, "warn": 0, "fail": 0}
+    if not isinstance(checks, list):
+        return counts
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        status = str(check.get("status", "pass")).lower()
+        if status in counts:
+            counts[status] += 1
+    return counts
+
+
+def next_action_for_root_causes(root_causes: list[str]) -> str:
+    """Return the highest-priority action for root causes."""
+
+    priority = [
+        "intent_parser",
+        "model_evidence_weak",
+        "selector_tuning",
+        "clap_regression",
+        "library_gap",
+        "benchmark_threshold",
+        "metadata_hygiene",
+        "hybrid_inconclusive",
+    ]
+    for cause in priority:
+        if cause in root_causes:
+            return ROOT_CAUSE_ACTIONS[cause]
+    return "No blocking diagnosis found."
 
 
 def evaluate_bakeoff_engine(store: TonepathStore, scenario: dict[str, object], engine: str, limit: int) -> dict[str, object]:

@@ -174,6 +174,7 @@ uv run tonepath eval selection "我现在很烦，想半小时后进入写代码
 uv run tonepath eval suite --limit 5
 uv run tonepath eval suite --json
 uv run tonepath eval bakeoff --engine selector --engine clap --engine hybrid --limit 8
+uv run tonepath eval diagnose --limit 8
 uv run tonepath eval profile "我要写论文，四十五分钟，低刺激，最好不要人声" --limit 8
 uv run tonepath eval audit "我现在很烦，想半小时后进入写代码状态，不要人声" --json
 uv run tonepath eval audit "我现在很烦，想半小时后进入写代码状态，不要人声" --codex --web --limit 12
@@ -185,6 +186,8 @@ uv run tonepath eval rerank "我现在很烦，想半小时后进入写代码状
 `eval suite` runs a small built-in set of product prompts and flags likely quality problems such as high vocalness in no-vocals results, high stimulation in focus/decompress phases, or low-evidence top candidates. It is read-only: it does not create sessions, playback rows, feedback, or profile rules.
 
 `eval bakeoff` compares the normal selector against optional experimental engines. CLAP uses deterministic English text probes derived from parsed intent so Chinese prompts are evaluated through the same structured intent layer. The `hybrid` engine keeps the selector as the safety layer and only uses CLAP as a small semantic reranker. Bake-off output is advisory only.
+
+`eval diagnose` summarizes why benchmark or bake-off scenarios are failing. It reports root causes such as selector tuning, weak model evidence, library gaps, dirty metadata, benchmark thresholds, or CLAP regressions without printing the full candidate table.
 
 `eval profile` compares selection with and without active profile rules. It is the main way to check whether personalization is helping before changing normal listening behavior.
 
