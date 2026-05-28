@@ -292,6 +292,118 @@ class SelectorFeaturesTest(unittest.TestCase):
             self.assertIn("phase stimulation penalty adjusted the score", rush.reasons)
             store.close()
 
+    def test_low_stimulation_soften_demotes_loud_high_energy_track(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            gentle_id = store.upsert_track(track_for(tmp, "gentle.wav"))
+            loud_id = store.upsert_track(track_for(tmp, "loud.wav"))
+            store.upsert_features(
+                TrackFeatures(
+                    gentle_id,
+                    bpm=100.0,
+                    loudness=-13.0,
+                    energy=0.56,
+                    vocalness=0.42,
+                    arousal_estimate=0.38,
+                    valence_estimate=0.52,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+            store.upsert_features(
+                TrackFeatures(
+                    loud_id,
+                    bpm=100.0,
+                    loudness=-8.8,
+                    energy=0.69,
+                    vocalness=0.62,
+                    arousal_estimate=0.48,
+                    valence_estimate=0.52,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            phase = SessionPhase("soften", 0, 600, 0.3, 0.45, 0.3)
+            gentle = score_track(store, store.get_track(gentle_id), phase)
+            loud = score_track(store, store.get_track(loud_id), phase)
+
+            self.assertGreater(gentle.score, loud.score)
+            self.assertIn("low-stimulation safety penalty adjusted the score", loud.reasons)
+            store.close()
+
+    def test_low_stimulation_soften_demotes_vocal_heavy_track(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            gentle_id = store.upsert_track(track_for(tmp, "gentle.wav"))
+            vocal_id = store.upsert_track(track_for(tmp, "vocal.wav"))
+            store.upsert_features(
+                TrackFeatures(
+                    gentle_id,
+                    bpm=112.0,
+                    loudness=-13.0,
+                    energy=0.56,
+                    vocalness=0.28,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+            store.upsert_features(
+                TrackFeatures(
+                    vocal_id,
+                    bpm=112.0,
+                    loudness=-13.0,
+                    energy=0.56,
+                    vocalness=0.8,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            phase = SessionPhase("soften", 0, 600, 0.22, 0.45, 0.22)
+            gentle = score_track(store, store.get_track(gentle_id), phase)
+            vocal = score_track(store, store.get_track(vocal_id), phase)
+
+            self.assertGreater(gentle.score, vocal.score)
+            self.assertIn("vocal-heavy track is risky for low-stimulation phase", vocal.reasons)
+            store.close()
+
+    def test_low_stimulation_hold_demotes_fast_low_vocalness_track(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            gentle_id = store.upsert_track(track_for(tmp, "gentle.wav"))
+            fast_id = store.upsert_track(track_for(tmp, "fast.wav"))
+            store.upsert_features(
+                TrackFeatures(
+                    gentle_id,
+                    bpm=96.0,
+                    loudness=-14.0,
+                    energy=0.56,
+                    vocalness=0.35,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+            store.upsert_features(
+                TrackFeatures(
+                    fast_id,
+                    bpm=144.0,
+                    loudness=-22.0,
+                    energy=0.28,
+                    vocalness=0.12,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            phase = SessionPhase("hold", 0, 600, 0.24, 0.48, 0.24)
+            gentle = score_track(store, store.get_track(gentle_id), phase)
+            fast = score_track(store, store.get_track(fast_id), phase)
+
+            self.assertGreater(gentle.score, fast.score)
+            self.assertIn("low-stimulation safety penalty adjusted the score", fast.reasons)
+            store.close()
+
     def test_inconclusive_vocalness_does_not_outrank_low_vocalness_in_strict_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = TonepathStore(Path(tmp) / "tonepath.db")
@@ -326,6 +438,7 @@ class SelectorFeaturesTest(unittest.TestCase):
 
             self.assertGreater(low_vocal.score, inconclusive.score)
             self.assertIn("vocalness feature is inconclusive for no-vocals constraint", inconclusive.reasons)
+            self.assertIn("inconclusive vocalness is risky for strict no-vocals constraint", inconclusive.reasons)
             store.close()
 
     def test_low_vocalness_scores_higher_for_no_vocals_phase(self) -> None:
