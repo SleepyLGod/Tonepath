@@ -255,6 +255,28 @@ class CliEvalTest(unittest.TestCase):
 
         self.assertIn("selector_tuning", payload["scenarios"][0]["root_causes"])
 
+    def test_diagnose_no_fail_does_not_make_selector_tuning_main_action(self) -> None:
+        payload = diagnose_bakeoff_payload(
+            [
+                diagnose_scenario_payload(
+                    [
+                        diagnose_engine(
+                            "selector",
+                            "WARN",
+                            [diagnose_check("max_stimulation_top_k", "warn", [1])],
+                            candidates=[diagnose_candidate("loud", energy=0.8, loudness=-6.0, bpm=150.0, vocalness=0.2)],
+                        ),
+                        diagnose_engine("clap", "WARN", []),
+                        diagnose_engine("hybrid", "WARN", []),
+                    ]
+                )
+            ]
+        )
+
+        self.assertIn("selector_tuning", payload["scenarios"][0]["root_causes"])
+        self.assertNotIn("Tune selector", payload["summary"]["recommended_next_action"])
+        self.assertNotIn("Tune selector", payload["scenarios"][0]["next_action"])
+
     def test_diagnose_classifies_missing_model_evidence(self) -> None:
         payload = diagnose_bakeoff_payload(
             [

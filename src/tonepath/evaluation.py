@@ -377,7 +377,10 @@ def diagnose_bakeoff_payload(payload: list[dict[str, object]]) -> dict[str, obje
             "result_counts": result_counts,
             "root_cause_counts": root_cause_counts,
             "top_root_causes": [{"cause": cause, "count": count} for cause, count in ordered_causes[:5]],
-            "recommended_next_action": next_action_for_root_causes([cause for cause, _count in ordered_causes]),
+            "recommended_next_action": diagnose_summary_next_action(
+                [cause for cause, _count in ordered_causes],
+                result_counts,
+            ),
         },
         "scenarios": scenarios,
     }
@@ -398,7 +401,7 @@ def diagnose_scenario(scenario: dict[str, object]) -> dict[str, object]:
         "engines": [diagnose_engine_summary(engine) for engine in engines.values()],
         "issues": issues,
         "root_causes": root_causes,
-        "next_action": next_action_for_root_causes(root_causes),
+        "next_action": diagnose_scenario_next_action(root_causes, selector_result),
     }
 
 
@@ -675,6 +678,31 @@ def next_action_for_root_causes(root_causes: list[str]) -> str:
     return "No blocking diagnosis found."
 
 
+def diagnose_summary_next_action(root_causes: list[str], result_counts: dict[str, int]) -> str:
+    """Return a diagnosis action that is lighter when there are no failures."""
+
+    if result_counts.get("FAIL", 0) == 0:
+        if "metadata_hygiene" in root_causes:
+            return ROOT_CAUSE_ACTIONS["metadata_hygiene"]
+        if "clap_regression" in root_causes:
+            return ROOT_CAUSE_ACTIONS["clap_regression"]
+        return "No blocking diagnosis found; review residual warnings only if recommendations look odd."
+    return next_action_for_root_causes(root_causes)
+
+
+def diagnose_scenario_next_action(root_causes: list[str], selector_result: str) -> str:
+    """Return one scenario action without over-weighting warning-only selector issues."""
+
+    if selector_result != "FAIL":
+        if "metadata_hygiene" in root_causes:
+            return ROOT_CAUSE_ACTIONS["metadata_hygiene"]
+        if "clap_regression" in root_causes:
+            return ROOT_CAUSE_ACTIONS["clap_regression"]
+        if "selector_tuning" in root_causes:
+            return "Residual selector warning; inspect eval suite before tuning selector weights."
+    return next_action_for_root_causes(root_causes)
+
+
 def evaluate_bakeoff_engine(store: TonepathStore, scenario: dict[str, object], engine: str, limit: int) -> dict[str, object]:
     """Return one engine's benchmark result for a scenario."""
 
@@ -729,7 +757,7 @@ def clap_candidates(store: TonepathStore, plan: SessionPlan, limit: int) -> list
     """Return a CLAP text-audio reranked path from cached audio embeddings."""
 
     per_phase = max(1, math.ceil(limit / max(len(plan.phases), 1)))
-    tracks = store.list_tracks()
+    tracks = store.list_tracks(effective_metadata=True)
     selected: list[CandidateScore] = []
     used_ids: set[int] = set()
     used_keys: set[tuple[str, str, int]] = set()
@@ -768,7 +796,7 @@ def hybrid_candidates(store: TonepathStore, plan: SessionPlan, limit: int) -> li
 
     per_phase = max(1, math.ceil(limit / max(len(plan.phases), 1)))
     pool_size = max(per_phase * 4, 12)
-    tracks = store.list_tracks()
+    tracks = store.list_tracks(effective_metadata=True)
     selected: list[CandidateScore] = []
     used_ids: set[int] = set()
     used_keys: set[tuple[str, str, int]] = set()

@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
-from tonepath.models import Track
+from tonepath.models import EnrichmentRecord, Track
 
 
 NULL_MARKER = "(null)"
 UNKNOWN = "unknown"
+METADATA_OVERRIDE_SOURCE = "manual-metadata-override"
+METADATA_OVERRIDE_TIER = "local"
+METADATA_TITLE_FIELD = "metadata:title"
+METADATA_ARTIST_FIELD = "metadata:artist"
 
 
 def clean_metadata_text(value: str | None) -> str | None:
@@ -38,6 +44,38 @@ def display_label(track: Track) -> str:
     """Return a compact title-artist label for a track."""
 
     return f"{display_title(track)} - {display_artist(track)}"
+
+
+def metadata_override_values(records: list[EnrichmentRecord]) -> dict[str, str]:
+    """Return manual title/artist override values from enrichment records."""
+
+    values: dict[str, str] = {}
+    for record in records:
+        if record.source != METADATA_OVERRIDE_SOURCE:
+            continue
+        if record.field == METADATA_TITLE_FIELD:
+            cleaned = clean_metadata_text(record.value)
+            if cleaned is not None:
+                values["title"] = cleaned
+        elif record.field == METADATA_ARTIST_FIELD:
+            cleaned = clean_metadata_text(record.value)
+            if cleaned is not None:
+                values["artist"] = cleaned
+    return values
+
+
+def apply_metadata_overrides(track: Track, overrides: Mapping[str, str]) -> Track:
+    """Return a display-effective track with manual metadata overrides applied."""
+
+    title = overrides.get("title")
+    artist = overrides.get("artist")
+    if title is None and artist is None:
+        return track
+    return replace(
+        track,
+        title=title if title is not None else track.title,
+        artist=artist if artist is not None else track.artist,
+    )
 
 
 def fallback_track_label(title: str | None, fallback: str) -> str:

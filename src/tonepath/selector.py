@@ -31,7 +31,7 @@ def select_path(
 ) -> list[CandidateScore]:
     """Select tracks for every phase in a session plan."""
 
-    tracks = store.list_tracks()
+    tracks = store.list_tracks(effective_metadata=True)
     profile_rules = store.list_profile_rules() if profile_enabled else []
     selected: list[CandidateScore] = []
     used_ids: set[int] = set(excluded_track_ids or set())

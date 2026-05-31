@@ -21,7 +21,7 @@ except ImportError as exc:  # pragma: no cover - exercised before dependency ins
 
 from tonepath.analysis import AnalysisProgress, analyze_library
 from tonepath.db import TonepathStore
-from tonepath.display import clean_metadata_text, display_artist, display_title
+from tonepath.display import clean_metadata_text, display_artist, display_label, display_title
 from tonepath.doctor import run_doctor
 from tonepath.enrichment import EnrichmentProvider, enrich_library
 from tonepath.experience import listen_intelligence_summary, setup_next_step, smart_plan_session
@@ -38,6 +38,7 @@ from tonepath.evaluation import (
 )
 from tonepath.explanation import explain_candidate
 from tonepath.llm import llm_doctor, parse_prompt_with_llm
+from tonepath.library import clear_metadata_override, library_issues, set_metadata_override
 from tonepath.model_runtime import (
     isolation_report,
     model_runtime_report,
@@ -98,6 +99,7 @@ eval_app = typer.Typer(help="Evaluate local selection quality.")
 models_app = typer.Typer(help="Manage local model runtimes.")
 models_setup_app = typer.Typer(help="Set up local model runtimes.")
 llm_app = typer.Typer(help="Inspect optional LLM integrations.")
+library_app = typer.Typer(help="Inspect library hygiene and local metadata overrides.")
 
 app.add_typer(config_app, name="config")
 app.add_typer(feedback_app, name="feedback")
@@ -110,6 +112,7 @@ app.add_typer(eval_app, name="eval")
 app.add_typer(models_app, name="models")
 models_app.add_typer(models_setup_app, name="setup")
 app.add_typer(llm_app, name="llm")
+app.add_typer(library_app, name="library")
 
 console = Console()
 
@@ -660,6 +663,57 @@ def enrich(
     finally:
         store.close()
     console.print(f"Stored {count} enrichment field(s) from provider: {provider}")
+
+
+@library_app.command("issues")
+def library_issues_command(
+    json_output: Annotated[bool, typer.Option("--json", help="Print stable JSON for library hygiene checks.")] = False,
+) -> None:
+    """Show dirty metadata and duplicate display candidates."""
+
+    store = TonepathStore()
+    try:
+        payload = library_issues(store)
+    finally:
+        store.close()
+    if json_output:
+        print_json_payload(payload)
+        return
+    render_library_issues(payload)
+
+
+@library_app.command("set-meta")
+def library_set_meta(
+    track_id: Annotated[int, typer.Argument(help="Track id to override locally.")],
+    title: Annotated[str | None, typer.Option("--title", help="Display title override.")] = None,
+    artist: Annotated[str | None, typer.Option("--artist", help="Display artist override.")] = None,
+) -> None:
+    """Set a local display metadata override without editing audio tags."""
+
+    store = TonepathStore()
+    try:
+        try:
+            track = set_metadata_override(store, track_id, title, artist)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    finally:
+        store.close()
+    console.print(f"Saved local metadata override for track {track_id}: {display_label(track)}")
+
+
+@library_app.command("clear-meta")
+def library_clear_meta(track_id: Annotated[int, typer.Argument(help="Track id to clear local metadata overrides for.")]) -> None:
+    """Clear local display metadata overrides for one track."""
+
+    store = TonepathStore()
+    try:
+        try:
+            deleted, track = clear_metadata_override(store, track_id)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    finally:
+        store.close()
+    console.print(f"Cleared {deleted} local metadata override field(s) for track {track_id}: {display_label(track)}")
 
 
 @eval_app.command("selection")
@@ -1241,6 +1295,55 @@ def print_status_summary(status: LibraryStatus, runtime_ready: bool) -> None:
     table.add_row("Quality check", quality_check_hint(status))
     table.add_row("Next action", status_next_action(status, runtime_ready, settings))
     console.print(table)
+
+
+def render_library_issues(payload: dict[str, object]) -> None:
+    """Render library metadata and duplicate hygiene issues."""
+
+    summary = payload.get("summary")
+    if not isinstance(summary, dict):
+        raise TypeError("Library issues payload summary must be an object.")
+    console.print(
+        "[bold]Library issues[/bold] · "
+        f"dirty metadata {summary.get('dirty_metadata', 0)} · "
+        f"duplicate groups {summary.get('duplicate_groups', 0)} · "
+        f"duplicate candidates {summary.get('duplicate_candidates', 0)}"
+    )
+    dirty_rows = payload.get("dirty_metadata", [])
+    if isinstance(dirty_rows, list) and dirty_rows:
+        table = Table("Track ID", "Display", "Raw title", "Raw artist", "Path", "Override", box=box.SIMPLE, expand=True)
+        for row in dirty_rows:
+            if isinstance(row, dict):
+                table.add_row(
+                    str(row.get("track_id", "--")),
+                    str(row.get("display_label", "--")),
+                    str(row.get("raw_title") or "--"),
+                    str(row.get("raw_artist") or "--"),
+                    str(row.get("relative_path", "--")),
+                    "yes" if row.get("has_override") else "no",
+                )
+        console.print(table)
+    else:
+        console.print("Dirty metadata: none")
+
+    duplicate_groups = payload.get("duplicate_groups", [])
+    if isinstance(duplicate_groups, list) and duplicate_groups:
+        console.print("[bold]Duplicate candidates[/bold]")
+        for index, group in enumerate(duplicate_groups, start=1):
+            if not isinstance(group, list):
+                continue
+            table = Table(f"Group {index}", "Display", "Path", "Override", box=box.SIMPLE, expand=True)
+            for row in group:
+                if isinstance(row, dict):
+                    table.add_row(
+                        str(row.get("track_id", "--")),
+                        str(row.get("display_label", "--")),
+                        str(row.get("relative_path", "--")),
+                        "yes" if row.get("has_override") else "no",
+                    )
+            console.print(table)
+    else:
+        console.print("Duplicate candidates: none")
 
 
 def prepare_mode(settings: tonepath_config.TonepathConfig, fast: bool, full: bool) -> str:

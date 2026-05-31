@@ -7,6 +7,14 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from tonepath import config
+from tonepath.display import (
+    METADATA_ARTIST_FIELD,
+    METADATA_OVERRIDE_SOURCE,
+    METADATA_OVERRIDE_TIER,
+    METADATA_TITLE_FIELD,
+    apply_metadata_overrides,
+    metadata_override_values,
+)
 from tonepath.models import EnrichmentRecord, ProfileRule, SessionPhase, SessionPlan, Track, TrackFeatures
 
 
@@ -172,17 +180,26 @@ class TonepathStore:
             raise RuntimeError("Track upsert did not return a row.")
         return int(row["id"])
 
-    def list_tracks(self) -> list[Track]:
+    def list_tracks(self, effective_metadata: bool = False) -> list[Track]:
         """Return all known tracks."""
 
         rows = self.conn.execute("SELECT * FROM tracks ORDER BY artist, album, title, path").fetchall()
-        return [track_from_row(row) for row in rows]
+        tracks = [track_from_row(row) for row in rows]
+        if not effective_metadata:
+            return tracks
+        overrides = self.metadata_overrides_by_track()
+        return [apply_metadata_overrides(track, overrides.get(track.id or -1, {})) for track in tracks]
 
-    def get_track(self, track_id: int) -> Track | None:
+    def get_track(self, track_id: int, effective_metadata: bool = False) -> Track | None:
         """Return one known track by id."""
 
         row = self.conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchone()
-        return track_from_row(row) if row else None
+        if row is None:
+            return None
+        track = track_from_row(row)
+        if not effective_metadata:
+            return track
+        return apply_metadata_overrides(track, self.metadata_overrides(track_id))
 
     def prune_missing_tracks_under(self, root: Path, present_paths: set[Path]) -> int:
         """Delete known tracks under root that were not found by the latest scan."""
@@ -478,6 +495,116 @@ class TonepathStore:
             )
             for row in rows
         ]
+
+    def metadata_overrides(self, track_id: int) -> dict[str, str]:
+        """Return manual metadata overrides for one track."""
+
+        rows = self.conn.execute(
+            """
+            SELECT track_id, field, value, tier, source, confidence, is_online
+            FROM track_enrichment
+            WHERE track_id = ?
+              AND source = ?
+              AND tier = ?
+              AND field IN (?, ?)
+            ORDER BY field
+            """,
+            (
+                track_id,
+                METADATA_OVERRIDE_SOURCE,
+                METADATA_OVERRIDE_TIER,
+                METADATA_TITLE_FIELD,
+                METADATA_ARTIST_FIELD,
+            ),
+        ).fetchall()
+        return metadata_override_values(
+            [
+                EnrichmentRecord(
+                    track_id=int(row["track_id"]),
+                    field=str(row["field"]),
+                    value=str(row["value"]),
+                    tier=row["tier"],
+                    source=str(row["source"]),
+                    confidence=str(row["confidence"]),
+                    is_online=bool(row["is_online"]),
+                )
+                for row in rows
+            ]
+        )
+
+    def metadata_overrides_by_track(self) -> dict[int, dict[str, str]]:
+        """Return manual metadata overrides keyed by track id."""
+
+        rows = self.conn.execute(
+            """
+            SELECT track_id, field, value, tier, source, confidence, is_online
+            FROM track_enrichment
+            WHERE source = ?
+              AND tier = ?
+              AND field IN (?, ?)
+            ORDER BY track_id, field
+            """,
+            (
+                METADATA_OVERRIDE_SOURCE,
+                METADATA_OVERRIDE_TIER,
+                METADATA_TITLE_FIELD,
+                METADATA_ARTIST_FIELD,
+            ),
+        ).fetchall()
+        grouped: dict[int, list[EnrichmentRecord]] = {}
+        for row in rows:
+            track_id = int(row["track_id"])
+            grouped.setdefault(track_id, []).append(
+                EnrichmentRecord(
+                    track_id=track_id,
+                    field=str(row["field"]),
+                    value=str(row["value"]),
+                    tier=row["tier"],
+                    source=str(row["source"]),
+                    confidence=str(row["confidence"]),
+                    is_online=bool(row["is_online"]),
+                )
+            )
+        return {track_id: metadata_override_values(records) for track_id, records in grouped.items()}
+
+    def upsert_metadata_override(self, track_id: int, field: str, value: str) -> None:
+        """Store one manual metadata override field for a track."""
+
+        if field not in {METADATA_TITLE_FIELD, METADATA_ARTIST_FIELD}:
+            raise ValueError(f"Unsupported metadata override field: {field}")
+        self.upsert_enrichment(
+            EnrichmentRecord(
+                track_id=track_id,
+                field=field,
+                value=value,
+                tier=METADATA_OVERRIDE_TIER,
+                source=METADATA_OVERRIDE_SOURCE,
+                confidence="manual",
+                is_online=False,
+            )
+        )
+
+    def clear_metadata_overrides(self, track_id: int) -> int:
+        """Delete manual title and artist overrides for one track."""
+
+        cursor = self.conn.execute(
+            """
+            DELETE FROM track_enrichment
+            WHERE track_id = ?
+              AND source = ?
+              AND tier = ?
+              AND field IN (?, ?)
+            """,
+            (
+                track_id,
+                METADATA_OVERRIDE_SOURCE,
+                METADATA_OVERRIDE_TIER,
+                METADATA_TITLE_FIELD,
+                METADATA_ARTIST_FIELD,
+            ),
+        )
+        self.conn.commit()
+        return int(cursor.rowcount)
 
     def delete_profile_data(self) -> None:
         """Delete user profile, play, feedback, and session data while keeping scanned tracks."""

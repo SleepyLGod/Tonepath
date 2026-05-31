@@ -35,7 +35,7 @@ class LibraryStatus:
 def library_status(store: TonepathStore) -> LibraryStatus:
     """Return local library readiness counts."""
 
-    tracks = store.list_tracks()
+    tracks = store.list_tracks(effective_metadata=True)
     outside_tracks = tracks_outside_configured_dirs(tracks)
     row = store.conn.execute(
         """
@@ -92,18 +92,9 @@ def missing_analysis_track_labels(store: TonepathStore, limit: int) -> tuple[str
     ).fetchall()
     labels: list[str] = []
     for row in rows:
-        track = Track(
-            id=int(row["id"]),
-            path=Path(row["path"]),
-            file_hash=str(row["file_hash"]),
-            mtime=float(row["mtime"]),
-            title=row["title"],
-            artist=row["artist"],
-            album=row["album"],
-            genre=row["genre"],
-            duration=row["duration"],
-            format=row["format"],
-        )
+        track = store.get_track(int(row["id"]), effective_metadata=True)
+        if track is None:
+            continue
         labels.append(f"{escape(display_label(track))} ({escape(display_relative_path(track.path))})")
     return tuple(labels)
 
@@ -170,7 +161,7 @@ def status_next_action(status: LibraryStatus, runtime_ready: bool, settings: ton
             return "Run `uv run tonepath models setup essentia-tf`, then `uv run tonepath prepare --full`."
         return "Ready for TUI; run `uv run tonepath models setup essentia-tf` for better vocalness."
     if status.duplicate_tracks or status.dirty_metadata:
-        return "Ready for TUI; review duplicate candidates or dirty metadata when recommendations look odd."
+        return "Ready for TUI; run `uv run tonepath library issues` to review duplicate candidates or dirty metadata."
     return "Ready for TUI. Run `uv run tonepath`."
 
 

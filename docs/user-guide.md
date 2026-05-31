@@ -28,6 +28,22 @@ uv run tonepath listen "我现在很烦，想写论文，低刺激，不要人�
 
 `tonepath status` is the readiness dashboard. It shows an overall state such as `Ready for TUI`, `Needs preparation`, `Review files`, or `Model setup available`, plus a concrete next action. If a local file cannot be analyzed, Tonepath lists it under `Missing analysis files`; replace or remove the file if you want full-confidence recommendations, or keep it and Tonepath will treat it as low evidence.
 
+If recommendations look confusing because of bad tags, inspect the library hygiene report:
+
+```bash
+uv run tonepath library issues
+uv run tonepath library issues --json
+```
+
+Use local display overrides for bad metadata without editing audio files:
+
+```bash
+uv run tonepath library set-meta 42 --title "A Better Title" --artist "A Better Artist"
+uv run tonepath library clear-meta 42
+```
+
+Overrides are stored in Tonepath's SQLite `track_enrichment` table as local metadata evidence. They affect display, duplicate detection, `status`, `listen`, TUI, and evaluation output, but they do not modify scanned raw tags, model caches, or the music files themselves.
+
 `tonepath listen "..."` is the smart default CLI entrypoint. It checks readiness, reports the active experience mode, uses local deterministic planning by default, uses Smart-mode LLM intent parsing only when configured, and then previews or plays a local state-transition path. Long-term preference changes still require explicit `profile inspect` plus `profile apply` or `profile apply-group`.
 
 Run a short preparation pass for testing:
