@@ -178,6 +178,16 @@ uv run tonepath analyze --features vocalness --method audio-separator --force --
 
 By default, model methods skip existing results from the same method. Use `--force` to recompute. Use `--limit` for small batches and rerun with `--only-missing` after an interruption.
 
+## How Selection Stays Safe
+
+Tonepath does not treat "quiet" or "instrumental" as automatically good. The selector combines local evidence such as BPM, loudness, energy, vocalness, arousal, valence, and derived affect tags. In low-stimulation phases such as sleep, calm, decompression, and gentle focus, it also applies a semantic safety layer from local metadata and model tags.
+
+That safety layer demotes candidates that look risky for calm listening even when their numeric audio features look acceptable. Examples include march-like, choral or vocal-ensemble, epic, dramatic, ceremonial, anthem-like, showpiece, or very fast/vivace cues. These rules are not hardcoded to specific songs; they are derived from title, artist, genre, filename, and source-attributed tags. When a candidate is demoted this way, its reasons include text such as `semantic risk: march_like for low-stimulation phase`.
+
+For "sad -> gently uplifting" requests, Tonepath uses a `hold -> stabilize -> lift` path. The final `lift` phase gives a small bonus to tracks with higher valence, warmth, or uplift evidence, but only when they are still low-stimulation safe. High energy, high loudness, high vocalness, or semantic-risk candidates do not get this bonus. This is meant to make the path slightly brighter without turning it into a loud or forced happy playlist.
+
+CLAP and `hybrid` remain evaluation tools. They help test whether music-text retrieval can improve semantic ordering, but they do not drive normal `listen` results. The default recommendation path still uses the local selector first because it can enforce no-vocals, low-stimulation, evidence quality, and state-transition constraints more predictably.
+
 ## Evaluation and Audit
 
 Evaluate selection quality without playback or profile writes:

@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/SleepyLGod/Tonepath/actions/workflows/ci.yml/badge.svg)](https://github.com/SleepyLGod/Tonepath/actions/workflows/ci.yml)
 
-Tonepath is a local-first terminal music state-transition agent.
+Tonepath is a local-first private radio agent for state-transition listening.
 
-It turns a request like `I am irritated and want to focus in 30 minutes` into an explainable listening path: current state -> intermediate phases -> target state. Tonepath scans your local music library, stores evidence locally, selects tracks with confidence labels, and can play local files through `mpv`.
+Tell it how you feel and where you want to land. Tonepath turns a request like `I am irritated and want to focus in 30 minutes` into an explainable listening path: current state -> intermediate phases -> target state. It scans your local music library, stores audio evidence locally, selects tracks with confidence labels and reasons, and can play local files through `mpv`.
 
 Tonepath is currently a working terminal prototype. It is not a macOS app, web app, Spotify player, music generator, or therapy product.
 
@@ -14,7 +14,7 @@ For detailed usage, model setup, evaluation, profile learning, and privacy notes
 
 - prepares a local music library with source-attributed metadata and audio evidence;
 - turns Chinese or English listening goals into state-transition phases;
-- selects a short local listening path with confidence and reasons;
+- selects a short local listening path with confidence, reasons, and low-stimulation safety checks;
 - records feedback locally so profile rules can be reviewed before they affect selection;
 - keeps optional model, LLM, Codex, and online workflows explicit and opt-in.
 
@@ -25,7 +25,7 @@ For detailed usage, model setup, evaluation, profile learning, and privacy notes
 | CLI workflow | Implemented | `prepare`, `status`, `start`, `feedback`, `profile`, `eval`, `doctor`, and related commands. |
 | Local library | Implemented | Scans local audio metadata, stores tracks/features/sessions/feedback in SQLite under `TONEPATH_HOME`. |
 | Planning | Implemented | Deterministic Chinese/English prompt parsing and state-transition phase planning. |
-| Selection | Implemented | Explainable deterministic scoring with confidence labels and profile-rule support. |
+| Selection | Implemented | Explainable deterministic scoring with confidence labels, profile-rule support, low-stimulation semantic safety, and gentle-uplift affect handling. |
 | Playback | Implemented | Local `mpv` adapter with foreground, background, stop, and `--dry-run` preview. |
 | TUI | MVP | Textual workbench for prompt intake, playback control, queue, why panel, feedback, and event log. |
 | Audio analysis | Basic + optional models | Default lightweight analysis plus optional MIR, Essentia-TF tagging/affect, experimental CLAP bake-off, and separator fallback paths. |
@@ -77,6 +77,7 @@ uv run tonepath status
 uv run tonepath prepare --limit 5
 uv run tonepath listen "from irritated to focused in 30 minutes, no vocals" --dry-run
 uv run tonepath eval suite --limit 5
+uv run tonepath eval diagnose --limit 8
 uv run tonepath profile inspect
 uv run tonepath privacy status
 ```

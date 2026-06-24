@@ -281,11 +281,16 @@ Engineering rules:
 
 ## Immediate Next Step
 
-Make profile learning visible and comparable before starting the journal workflow:
+Validate the full private-radio loop with real listening before starting the journal workflow:
 
 ```bash
+uv run tonepath status
+uv run tonepath eval diagnose --limit 8
+uv run tonepath listen "我有点难过，想慢慢开心一点，但不要太吵" --dry-run
+uv run tonepath listen "我很焦虑，想二十分钟后平静下来，不要压抑" --dry-run
 uv run tonepath profile inspect
 uv run tonepath eval profile "我要写论文，四十五分钟，低刺激，最好不要人声" --limit 8
+uv run tonepath profile delete --all
 ```
 
-Phase 1 is complete only when feedback points users toward inspectable suggestions, applied rules explain recommendation changes, `eval profile` shows the with-profile/no-profile delta, and `profile delete --all` can remove the personalization effect. Only then should Tonepath add the private journal workflow.
+The current selector path should stay local and evidence-first: low-stimulation semantic risks are demoted, gentle-uplift phases can become slightly brighter, and CLAP/hybrid remain evaluation tools until they show a stable measured improvement. The next product phase should start only after real listening confirms that readiness, library hygiene, selection reasons, feedback, profile inspection, and profile deletion all feel understandable and reversible.
