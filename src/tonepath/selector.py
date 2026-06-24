@@ -13,13 +13,33 @@ from tonepath.analysis import (
 )
 from tonepath.db import TonepathStore
 from tonepath.display import canonical_track_key
-from tonepath.models import CandidateScore, ProfileRule, SessionPlan, SessionPhase, Track, TrackFeatures
+from tonepath.models import CandidateScore, EnrichmentRecord, ProfileRule, SessionPlan, SessionPhase, Track, TrackFeatures
 
 
 QUIET_GENRES = ("ambient", "classical", "instrumental", "lofi", "lo-fi", "downtempo")
 VOCAL_HEAVY_GENRES = ("pop", "rap", "hip-hop", "r&b")
 LOW_STIM_PHASES = {"focus", "decompress", "soften", "settle", "calm", "hold"}
 STRICT_LOW_STIM_PHASES = {"soften", "settle", "calm", "hold"}
+SEMANTIC_RISK_ORDER = (
+    "march_like",
+    "choral_or_vocal_ensemble",
+    "epic_or_dramatic",
+    "anthem_or_ceremonial",
+    "showpiece_or_vivace",
+)
+SEMANTIC_RISK_TEXT_TOKENS = {
+    "march_like": ("march", "marche", "military", "militaire"),
+    "choral_or_vocal_ensemble": ("choral", "choir", "chorus", "voices", "vocal ensemble"),
+    "epic_or_dramatic": ("epic", "dramatic", "drama", "trailer"),
+    "anthem_or_ceremonial": ("anthem", "ceremonial", "ceremony", "hymn", "ode to joy", "praise to joy"),
+    "showpiece_or_vivace": ("showpiece", "virtuoso", "vivace", "presto", "finale"),
+}
+SEMANTIC_RISK_TAGS = {
+    "choral_or_vocal_ensemble": {"choir": 0.25, "choral": 0.25, "voice": 0.55, "vocal": 0.55},
+    "epic_or_dramatic": {"epic": 0.15, "dramatic": 0.12, "drama": 0.12, "trailer": 0.12, "action": 0.18},
+    "anthem_or_ceremonial": {"anthem": 0.12, "ceremonial": 0.12},
+    "showpiece_or_vivace": {"virtuoso": 0.12, "fast": 0.45},
+}
 
 
 def select_path(
@@ -111,11 +131,22 @@ def score_track(
             reasons.append("low-evidence/unverified audio candidate")
 
     enrichment = store.list_enrichment(track.id)
+    semantic_risks = low_stimulation_semantic_risks(track, enrichment)
+    semantic_penalty = low_stimulation_semantic_penalty(semantic_risks, phase)
+    if semantic_penalty:
+        score -= semantic_penalty
+        for risk in semantic_risks:
+            reasons.append(f"semantic risk: {risk} for low-stimulation phase")
+
     affect_profile = affect_profile_from_enrichment(enrichment)
     affect_delta, affect_reasons = affect_phase_fit(affect_profile, phase)
     if affect_delta:
         score += affect_delta
     reasons.extend(affect_reasons)
+    uplift_delta, uplift_reasons = gentle_uplift_adjustment(features, phase, semantic_risks, affect_profile)
+    if uplift_delta:
+        score += uplift_delta
+    reasons.extend(uplift_reasons)
 
     if phase.vocal_policy == "avoid":
         if features and features.vocalness is not None:
@@ -221,6 +252,134 @@ def vocal_heavy_low_stim_penalty(phase: SessionPhase) -> float:
     if phase.target_energy <= 0.35:
         return 1.6
     return 1.0
+
+
+def low_stimulation_semantic_risks(track: Track, enrichment: list[EnrichmentRecord]) -> list[str]:
+    """Return metadata/tag-derived stimulation risks for low-stimulation contexts."""
+
+    text = " ".join(
+        value
+        for value in (
+            track.title,
+            track.artist,
+            track.album,
+            track.genre,
+            track.path.stem,
+        )
+        if value
+    ).lower()
+    risks: set[str] = set()
+    for risk, tokens in SEMANTIC_RISK_TEXT_TOKENS.items():
+        if any(token in text for token in tokens):
+            risks.add(risk)
+
+    for record in enrichment:
+        if not record.field.startswith("tag:"):
+            continue
+        label = normalize_semantic_tag(record.field.removeprefix("tag:"))
+        score = enrichment_score(record)
+        for risk, thresholds in SEMANTIC_RISK_TAGS.items():
+            threshold = thresholds.get(label)
+            if threshold is not None and score >= threshold:
+                risks.add(risk)
+
+    return [risk for risk in SEMANTIC_RISK_ORDER if risk in risks]
+
+
+def low_stimulation_semantic_penalty(risks: list[str], phase: SessionPhase) -> float:
+    """Return a conservative semantic-risk penalty for low-stimulation phases."""
+
+    if not risks or not semantic_guard_applies(phase):
+        return 0.0
+    base = 2.4 if phase.label in STRICT_LOW_STIM_PHASES else 1.6
+    if phase.label == "lift":
+        base = 1.6
+    return base + max(0, len(risks) - 1) * 0.6
+
+
+def gentle_uplift_adjustment(
+    features: TrackFeatures | None,
+    phase: SessionPhase,
+    semantic_risks: list[str],
+    affect_profile: dict[str, float],
+) -> tuple[float, list[str]]:
+    """Return a bounded valence adjustment for gentle low-stimulation lift phases."""
+
+    if not gentle_uplift_phase(phase) or features is None or features.valence_estimate is None:
+        return 0.0, []
+    valence = features.valence_estimate
+    if valence < 0.5:
+        penalty = min((0.5 - valence) / 0.2, 1.0) * 1.3
+        return -penalty, ["uplift phase valence is low for gentle lift"]
+    if not safe_for_gentle_uplift_bonus(features, phase, semantic_risks):
+        return 0.0, []
+
+    bonus = 1.5 + min((valence - 0.5) / 0.18, 1.0) * 0.9
+    bonus += 0.35 * affect_profile.get("uplift", 0.0)
+    bonus += 0.25 * affect_profile.get("warmth", 0.0)
+    return min(bonus, 2.8), ["uplift phase valence fit adjusted the score"]
+
+
+def gentle_uplift_phase(phase: SessionPhase) -> bool:
+    """Return whether one phase is the low-stimulation emotional lift step."""
+
+    return phase.label == "lift" and phase.target_energy <= 0.45
+
+
+def safe_for_gentle_uplift_bonus(
+    features: TrackFeatures,
+    phase: SessionPhase,
+    semantic_risks: list[str],
+) -> bool:
+    """Return whether a higher-valence lift candidate is still low-stimulation safe."""
+
+    if semantic_risks or stimulation_risk_count(features, phase):
+        return False
+    if features.energy is not None and features.energy > 0.68:
+        return False
+    if features.loudness is not None and features.loudness > -9.0:
+        return False
+    if features.arousal_estimate is not None and features.arousal_estimate > 0.65:
+        return False
+    vocal_limit = 0.55 if phase.vocal_policy == "avoid" else 0.7
+    if features.vocalness is not None and features.vocalness > vocal_limit:
+        return False
+    return True
+
+
+def semantic_guard_applies(phase: SessionPhase) -> bool:
+    """Return whether semantic stimulation risk should affect this phase."""
+
+    if phase.label in {"soften", "settle", "calm", "decompress", "hold"}:
+        return True
+    if phase.label == "stabilize" and phase.target_energy <= 0.45:
+        return True
+    if phase.label in {"focus", "lift"} and phase.target_energy <= 0.45:
+        return True
+    return False
+
+
+def normalize_semantic_tag(label: str) -> str:
+    """Normalize one enrichment tag for semantic-risk lookup."""
+
+    return (
+        label.strip()
+        .lower()
+        .replace("mood/theme---", "")
+        .replace("mood/theme-", "")
+        .replace("instrument---", "")
+        .replace("instrument-", "")
+        .replace("_", " ")
+    )
+
+
+def enrichment_score(record: EnrichmentRecord) -> float:
+    """Return a numeric enrichment score, treating malformed values as absent."""
+
+    try:
+        return float(record.value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def stimulation_risk_count(features: TrackFeatures, phase: SessionPhase) -> int:

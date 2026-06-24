@@ -643,6 +643,114 @@ class SelectorFeaturesTest(unittest.TestCase):
             self.assertIn("sad/dark/tension affect is risky for the lift phase", dark.reasons)
             store.close()
 
+    def test_gentle_lift_prefers_safe_higher_valence_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            low_id = store.upsert_track(track_for(tmp, "quiet-low.wav", title="Quiet Low"))
+            uplift_id = store.upsert_track(track_for(tmp, "gentle-uplift.wav", title="Gentle Uplift"))
+            store.upsert_features(
+                TrackFeatures(
+                    low_id,
+                    bpm=104.0,
+                    loudness=-18.0,
+                    energy=0.36,
+                    vocalness=0.18,
+                    arousal_estimate=0.35,
+                    valence_estimate=0.42,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+            store.upsert_features(
+                TrackFeatures(
+                    uplift_id,
+                    bpm=104.0,
+                    loudness=-11.5,
+                    energy=0.62,
+                    vocalness=0.28,
+                    arousal_estimate=0.42,
+                    valence_estimate=0.56,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+            upsert_affect(store, uplift_id, uplift=0.6, warmth=0.55, calmness=0.35, sadness=0.2, darkness=0.1, tension=0.15)
+
+            phase = SessionPhase("lift", 0, 600, 0.42, 0.68, 0.45)
+            low = score_track(store, store.get_track(low_id), phase)
+            uplift = score_track(store, store.get_track(uplift_id), phase)
+
+            self.assertGreater(uplift.score, low.score)
+            self.assertIn("uplift phase valence fit adjusted the score", uplift.reasons)
+            self.assertIn("uplift phase valence is low for gentle lift", low.reasons)
+            store.close()
+
+    def test_gentle_lift_does_not_reward_unsafe_high_valence_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            safe_id = store.upsert_track(track_for(tmp, "safe-uplift.wav", title="Safe Uplift"))
+            unsafe_id = store.upsert_track(track_for(tmp, "loud-vocal-uplift.wav", title="Loud Vocal Uplift"))
+            store.upsert_features(
+                TrackFeatures(
+                    safe_id,
+                    bpm=104.0,
+                    loudness=-16.0,
+                    energy=0.48,
+                    vocalness=0.24,
+                    arousal_estimate=0.4,
+                    valence_estimate=0.54,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+            store.upsert_features(
+                TrackFeatures(
+                    unsafe_id,
+                    bpm=132.0,
+                    loudness=-6.5,
+                    energy=0.78,
+                    vocalness=0.86,
+                    arousal_estimate=0.62,
+                    valence_estimate=0.74,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            phase = SessionPhase("lift", 0, 600, 0.42, 0.68, 0.45, "avoid")
+            safe = score_track(store, store.get_track(safe_id), phase)
+            unsafe = score_track(store, store.get_track(unsafe_id), phase)
+
+            self.assertGreater(safe.score, unsafe.score)
+            self.assertIn("uplift phase valence fit adjusted the score", safe.reasons)
+            self.assertNotIn("uplift phase valence fit adjusted the score", unsafe.reasons)
+            store.close()
+
+    def test_energized_phase_does_not_apply_gentle_lift_valence_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "upbeat.db")
+            upbeat_id = store.upsert_track(track_for(tmp, "upbeat.wav", title="Upbeat"))
+            store.upsert_features(
+                TrackFeatures(
+                    upbeat_id,
+                    bpm=124.0,
+                    loudness=-10.0,
+                    energy=0.72,
+                    vocalness=0.3,
+                    arousal_estimate=0.62,
+                    valence_estimate=0.74,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            phase = SessionPhase("energize", 0, 600, 0.7, 0.65, 0.75)
+            upbeat = score_track(store, store.get_track(upbeat_id), phase)
+
+            self.assertNotIn("uplift phase valence fit adjusted the score", upbeat.reasons)
+            self.assertNotIn("uplift phase valence is low for gentle lift", upbeat.reasons)
+            store.close()
+
     def test_hold_phase_demotes_high_bpm_low_stimulation_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = TonepathStore(Path(tmp) / "tonepath.db")
@@ -670,6 +778,184 @@ class SelectorFeaturesTest(unittest.TestCase):
 
             self.assertGreater(steady.score, frantic.score)
             self.assertIn("phase stimulation penalty adjusted the score", frantic.reasons)
+            store.close()
+
+    def test_calm_phase_demotes_march_like_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            gentle_id = store.upsert_track(track_for(tmp, "gentle.wav", title="Gentle Piano"))
+            march_id = store.upsert_track(track_for(tmp, "march.wav", title="Marche Militaire No. 1"))
+            for track_id in (gentle_id, march_id):
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id,
+                        bpm=104.0,
+                        loudness=-19.0,
+                        energy=0.35,
+                        vocalness=0.16,
+                        arousal_estimate=0.3,
+                        valence_estimate=0.36,
+                        feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                        confidence="high",
+                    )
+                )
+
+            phase = SessionPhase("calm", 0, 600, 0.2, 0.6, 0.2)
+            gentle = score_track(store, store.get_track(gentle_id), phase)
+            march = score_track(store, store.get_track(march_id), phase)
+
+            self.assertGreater(gentle.score, march.score)
+            self.assertIn("semantic risk: march_like for low-stimulation phase", march.reasons)
+            store.close()
+
+    def test_calm_phase_demotes_voice_ensemble_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            gentle_id = store.upsert_track(track_for(tmp, "gentle.wav", title="Soft Piano"))
+            voice_id = store.upsert_track(track_for(tmp, "voice.wav", title="Soft Ensemble"))
+            for track_id in (gentle_id, voice_id):
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id,
+                        bpm=104.0,
+                        loudness=-18.0,
+                        energy=0.42,
+                        vocalness=0.55,
+                        arousal_estimate=0.35,
+                        valence_estimate=0.42,
+                        feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                        confidence="high",
+                    )
+                )
+            upsert_tag(store, voice_id, "voice", 0.72)
+
+            phase = SessionPhase("settle", 0, 600, 0.25, 0.55, 0.25)
+            gentle = score_track(store, store.get_track(gentle_id), phase)
+            voice = score_track(store, store.get_track(voice_id), phase)
+
+            self.assertGreater(gentle.score, voice.score)
+            self.assertIn("semantic risk: choral_or_vocal_ensemble for low-stimulation phase", voice.reasons)
+            store.close()
+
+    def test_malformed_none_tag_score_does_not_trigger_semantic_risk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            track_id = store.upsert_track(track_for(tmp, "soft.wav", title="Soft Ensemble"))
+            store.upsert_features(
+                TrackFeatures(
+                    track_id,
+                    bpm=104.0,
+                    loudness=-18.0,
+                    energy=0.42,
+                    vocalness=0.5,
+                    arousal_estimate=0.35,
+                    valence_estimate=0.42,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+            original_list_enrichment = store.list_enrichment
+            store.list_enrichment = lambda _: [
+                EnrichmentRecord(
+                    track_id=track_id,
+                    field="tag:voice",
+                    value=None,  # type: ignore[arg-type]
+                    tier="features",
+                    source="test",
+                    confidence="low",
+                )
+            ]
+
+            phase = SessionPhase("settle", 0, 600, 0.25, 0.55, 0.25)
+            try:
+                candidate = score_track(store, store.get_track(track_id), phase)
+            finally:
+                store.list_enrichment = original_list_enrichment
+
+            self.assertNotIn("semantic risk: choral_or_vocal_ensemble for low-stimulation phase", candidate.reasons)
+            store.close()
+
+    def test_low_energy_stabilize_demotes_voice_ensemble_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            steady_id = store.upsert_track(track_for(tmp, "steady.wav", title="Steady Piano"))
+            voice_id = store.upsert_track(track_for(tmp, "voice.wav", title="Steady Voices"))
+            for track_id in (steady_id, voice_id):
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id,
+                        bpm=104.0,
+                        loudness=-18.0,
+                        energy=0.42,
+                        vocalness=0.5,
+                        arousal_estimate=0.35,
+                        valence_estimate=0.42,
+                        feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                        confidence="high",
+                    )
+                )
+            upsert_tag(store, voice_id, "voice", 0.72)
+
+            phase = SessionPhase("stabilize", 0, 600, 0.35, 0.58, 0.38)
+            steady = score_track(store, store.get_track(steady_id), phase)
+            voice = score_track(store, store.get_track(voice_id), phase)
+
+            self.assertGreater(steady.score, voice.score)
+            self.assertIn("semantic risk: choral_or_vocal_ensemble for low-stimulation phase", voice.reasons)
+            store.close()
+
+    def test_low_energy_lift_demotes_epic_dramatic_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            warm_id = store.upsert_track(track_for(tmp, "warm.wav", title="Warm Lift"))
+            epic_id = store.upsert_track(track_for(tmp, "epic.wav", title="Dramatic Lift"))
+            for track_id in (warm_id, epic_id):
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id,
+                        bpm=104.0,
+                        loudness=-17.0,
+                        energy=0.42,
+                        vocalness=0.2,
+                        arousal_estimate=0.38,
+                        valence_estimate=0.55,
+                        feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                        confidence="high",
+                    )
+                )
+                upsert_affect(store, track_id, uplift=0.55, warmth=0.5, calmness=0.4, sadness=0.2, darkness=0.1, tension=0.15)
+            upsert_tag(store, epic_id, "epic", 0.7)
+
+            phase = SessionPhase("lift", 0, 600, 0.42, 0.68, 0.45)
+            warm = score_track(store, store.get_track(warm_id), phase)
+            epic = score_track(store, store.get_track(epic_id), phase)
+
+            self.assertGreater(warm.score, epic.score)
+            self.assertIn("semantic risk: epic_or_dramatic for low-stimulation phase", epic.reasons)
+            store.close()
+
+    def test_energized_phase_does_not_apply_low_stimulation_semantic_risk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            march_id = store.upsert_track(track_for(tmp, "march.wav", title="Radetzky March"))
+            store.upsert_features(
+                TrackFeatures(
+                    march_id,
+                    bpm=120.0,
+                    loudness=-12.0,
+                    energy=0.72,
+                    vocalness=0.3,
+                    arousal_estimate=0.6,
+                    valence_estimate=0.62,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            phase = SessionPhase("energize", 0, 600, 0.7, 0.65, 0.75)
+            march = score_track(store, store.get_track(march_id), phase)
+
+            self.assertNotIn("semantic risk: march_like for low-stimulation phase", march.reasons)
             store.close()
 
     def test_unverified_audio_without_duration_or_features_is_demoted(self) -> None:
@@ -728,6 +1014,21 @@ def upsert_affect(store: TonepathStore, track_id: int, **values: float) -> None:
                 confidence="medium",
             )
         )
+
+
+def upsert_tag(store: TonepathStore, track_id: int, label: str, value: float) -> None:
+    """Store one model tag value for selector tests."""
+
+    store.upsert_enrichment(
+        EnrichmentRecord(
+            track_id=track_id,
+            field=f"tag:{label}",
+            value=str(value),
+            tier="features",
+            source="test",
+            confidence="high",
+        )
+    )
 
 
 if __name__ == "__main__":
