@@ -142,7 +142,7 @@ class TonepathApp(App[None]):
         Binding("s", "skip", "Skip"),
         Binding("l", "like", "Like"),
         Binding("m", "cycle_playback_mode", "Mode"),
-        Binding("i", "ai_assist", "AI Assist"),
+        Binding("i", "ai_assist", "AI Assist", show=False),
         Binding("?", "toggle_help", "Help", key_display="?"),
         Binding("e", "toggle_events", "Events", show=False),
         Binding("v", "no_vocals", "No vocals", show=False),
@@ -193,7 +193,7 @@ class TonepathApp(App[None]):
         self.store = TonepathStore()
         self.apply_panel_titles()
         table = self.query_one("#queue", DataTable)
-        table.add_columns("#", "Phase", "Track", "Energy", "Conf")
+        table.add_columns("#", "Phase", "Track", "Fit", "Energy", "Conf")
 
         self.model_runtime_ready = model_runtime_status().ready
         self.refresh_readiness()
@@ -328,7 +328,6 @@ class TonepathApp(App[None]):
         self.events_expanded = not self.events_expanded
         log = self.query_one("#event-log", RichLog)
         log.styles.height = 16 if self.events_expanded else 8
-        self.log_event("Expanded events." if self.events_expanded else "Collapsed events.")
         self.apply_panel_titles()
 
     def action_focus_prompt(self) -> None:
@@ -541,6 +540,7 @@ class TonepathApp(App[None]):
                 queue_cell(queue_marker(position), current=current, align="center"),
                 queue_cell(candidate.phase.label, current=current),
                 queue_cell(truncate(fallback_track_label(candidate.track.title, candidate.track.path.name), 28), current=current),
+                queue_cell(self.fit_label(candidate), current=current),
                 queue_cell(self.energy_text(candidate.track.id), current=current),
                 queue_cell(confidence_label(candidate.confidence), current=current),
             )
@@ -572,7 +572,7 @@ class TonepathApp(App[None]):
         bpm = bpm_text(features.bpm if features is not None else None)
         return "\n".join(
             [
-                f"{self.playback_status} | {candidate.phase.label} | {confidence_label(candidate.confidence)} | {self.playback_mode}",
+                f"{self.playback_status} · {candidate.phase.label} · {self.playback_mode} · {confidence_label(candidate.confidence)}",
                 truncate(fallback_track_label(candidate.track.title, candidate.track.path.name), 44),
                 display_artist(candidate.track),
                 f"energy {energy} {meter} · bpm {bpm}",
@@ -629,10 +629,10 @@ class TonepathApp(App[None]):
                 "Why",
                 self.human_fit_text(candidate),
                 "Evidence",
-                f"conf {confidence_label(candidate.confidence)} · energy {energy}",
-                f"BPM {bpm} · loud {loudness}",
-                f"vocalness {vocalness}",
-                f"Unknown {unknown}",
+                f"Confidence {confidence_label(candidate.confidence)} · Energy {energy}",
+                f"BPM {bpm} · Loudness {loudness}",
+                f"Vocalness {vocalness}",
+                f"Missing evidence: {unknown}",
             ]
         )
 
@@ -650,7 +650,9 @@ class TonepathApp(App[None]):
             notes.append("fits the gentle-lift target")
         if not notes:
             notes.append("matches this phase better than nearby candidates")
-        return f"{candidate.phase.label}: " + "; ".join(notes[:2]) + "."
+        if len(notes) == 1:
+            return f"Good fit for {candidate.phase.label}; {notes[0]}."
+        return f"Good fit for {candidate.phase.label}, but {notes[0]}; {notes[1]}."
 
     def help_panel_text(self) -> str:
         """Return the full TUI keyboard help text."""
@@ -658,21 +660,25 @@ class TonepathApp(App[None]):
         return "\n".join(
             [
                 "Help",
+                "Playback",
                 "Space / p  play current track",
                 ">          next track, no feedback",
                 "<          previous track, no feedback",
+                "x          stop playback",
+                "m          playback mode",
+                "Feedback",
                 "s          skip and record negative feedback",
                 "l          like current track",
                 "v          prefer less vocals",
                 "+          too loud; lower upcoming energy",
                 "-          too slow; raise upcoming energy",
-                "m          playback mode",
+                "Tools",
                 "i          AI Assist status",
                 "e          expand/collapse events",
                 "w          write full why to events",
                 "a / r      Codex audit / rerank preview",
                 "/ / n      prompt / new request",
-                "x / q      stop / quit",
+                "q          quit",
             ]
         )
 
@@ -711,14 +717,14 @@ class TonepathApp(App[None]):
 
         text = Text()
         for line in self.why_panel_text().splitlines():
-            if line in {"Why", "Evidence", "Help", "AI Assist"} or line.startswith("Unknown"):
+            if line in {"Why", "Evidence", "Help", "Playback", "Feedback", "Tools", "AI Assist"} or line.startswith("Missing evidence"):
                 if text:
                     text.append("\n")
-                style = TEAL if line == "Evidence" else AMBER if line in {"Why", "Help", "AI Assist"} else MUTED
+                style = TEAL if line == "Evidence" else AMBER if line in {"Why", "Help", "Playback", "Feedback", "Tools", "AI Assist"} else MUTED
                 text.append(line, style=f"bold {style}")
                 continue
             text.append("\n")
-            style = MUTED if line == "BPM · vocalness" else TEXT
+            style = MUTED if line.startswith("Missing evidence") else TEXT
             text.append(line, style=style)
         return text
 
@@ -758,6 +764,27 @@ class TonepathApp(App[None]):
         if features is None or features.energy is None:
             return "--"
         return f"{features.energy:.2f}"
+
+    def fit_label(self, candidate: CandidateScore) -> str:
+        """Return a short queue label that explains candidate fit at a glance."""
+
+        features = self.store.get_features(candidate.track.id) if self.store is not None and candidate.track.id else None
+        labels: list[str] = []
+        if any("semantic risk" in reason for reason in candidate.reasons):
+            labels.append("caution")
+        if any("vocalness feature supports" in reason for reason in candidate.reasons):
+            labels.append("low-vocal")
+        if any("low-stimulation" in reason or "sleep/calm" in reason for reason in candidate.reasons):
+            labels.append("calm-safe")
+        if any("uplift phase" in reason for reason in candidate.reasons):
+            labels.append("uplift")
+        if features is None:
+            labels.append("low-info")
+        elif (features.energy is not None and features.energy >= 0.65) or (features.bpm is not None and features.bpm >= 140.0):
+            labels.append("high-energy")
+        if not labels:
+            labels.append("fit")
+        return " ".join(labels[:2])
 
     def library_count(self) -> int:
         """Return the number of scanned tracks available to the TUI."""
@@ -819,13 +846,12 @@ class TonepathApp(App[None]):
         """Return a compact session status line."""
 
         settings = config.load_config()
-        llm_state = self.llm_status_label(settings)
-        model_state = "Model Ready" if self.model_runtime_ready else "Model Missing"
+        llm_state = self.status_ai_label(settings)
+        model_state = "Model ✓" if self.model_runtime_ready else "Model missing"
         parts = [
             f"● {self.playback_status}",
-            f"Mode {self.playback_mode}",
+            self.playback_mode,
             self.experience_label(),
-            self.readiness,
             model_state,
             llm_state,
             f"{self.library_count()} tracks",
@@ -833,6 +859,17 @@ class TonepathApp(App[None]):
         if extra:
             parts.append(extra)
         return "   " + " · ".join(parts)
+
+    def status_ai_label(self, settings: config.TonepathConfig) -> str:
+        """Return a compact AI Assist label for the status bar."""
+
+        if not settings.privacy.send_to_llm:
+            return "AI off"
+        try:
+            provider = provider_config()
+        except ValueError:
+            return "AI invalid"
+        return f"AI {provider.provider}" if provider.configured else f"AI key missing: {provider.provider}"
 
     def experience_label(self) -> str:
         """Return the active normal-user experience label."""

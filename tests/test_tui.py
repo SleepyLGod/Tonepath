@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from tonepath import config
 from tonepath.db import TonepathStore
-from tonepath.models import Track, TrackFeatures
+from tonepath.models import CandidateScore, SessionPhase, Track, TrackFeatures
 from tonepath.playback import MpvAdapter
 from tonepath.planner import plan_session
 from tonepath.profile import build_profile_evidence, deterministic_suggestions, save_suggestions
@@ -296,17 +296,19 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                         self.assertIsNotNone(app.query_one("#queue"))
                         self.assertIsNotNone(app.query_one("#why-panel"))
                         self.assertIsNotNone(app.query_one("#event-log"))
-                        self.assertEqual(app.query_one("#queue").ordered_columns[3].label.plain, "Energy")
+                        self.assertEqual(app.query_one("#queue").ordered_columns[3].label.plain, "Fit")
+                        self.assertEqual(app.query_one("#queue").ordered_columns[4].label.plain, "Energy")
                         self.assertIn("Why", app.why_panel_text())
                         self.assertIn("Evidence", app.why_panel_text())
-                        self.assertIn("Unknown", app.why_panel_text())
+                        self.assertIn("Missing evidence", app.why_panel_text())
                         self.assertIn("◇", app.timeline_text())
                         self.assertIn("✓ Private", app.privacy_text())
                         self.assertIn("✓ AI Assist Off", app.privacy_text())
                         self.assertIn("✓ Model Missing", app.privacy_text())
                         self.assertIn("✓ Codex", app.privacy_text())
                         self.assertEqual(len(app.privacy_text().splitlines()), 5)
-                        self.assertIn("Mode Manual", app.status_bar_text())
+                        self.assertIn("Manual", app.status_bar_text())
+                        self.assertNotIn("Mode Manual", app.status_bar_text())
                         await pilot.press("w")
                         await pilot.press("s")
                         await pilot.press("q")
@@ -342,6 +344,17 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(queue_marker("now"), "▶")
                     self.assertEqual(queue_marker("+1"), "1")
                     self.assertEqual(confidence_label("medium"), "med")
+                    self.assertIsNotNone(app.store)
+                    track = app.store.get_track(track_id) if app.store is not None else None
+                    self.assertIsNotNone(track)
+                    candidate = CandidateScore(
+                        track=track,
+                        phase=SessionPhase("focus", 0, 600, 0.5, 0.6, 0.5, "avoid"),
+                        score=1.0,
+                        confidence="high",
+                        reasons=("semantic risk: dramatic for low-stimulation phase", "vocalness feature supports no-vocals constraint"),
+                    )
+                    self.assertEqual(app.fit_label(candidate), "caution low-vocal")
                     await pilot.press("q")
 
     async def test_tui_play_starts_playback(self) -> None:
@@ -464,9 +477,14 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(app.playback_mode, "Repeat One")
                     await pilot.press("?")
                     self.assertEqual(app.right_panel, "help")
+                    self.assertIn("Playback", app.why_panel_text())
+                    self.assertIn("Feedback", app.why_panel_text())
+                    self.assertIn("Tools", app.why_panel_text())
                     self.assertIn("next track, no feedback", app.why_panel_text())
-                    await pilot.press("e")
-                    self.assertTrue(app.events_expanded)
+                    with patch.object(app, "log_event") as log_event:
+                        await pilot.press("e")
+                        self.assertTrue(app.events_expanded)
+                    log_event.assert_not_called()
                     await pilot.press("q")
 
     async def test_tui_ai_assist_panel_is_read_only_and_redacted(self) -> None:
@@ -493,7 +511,7 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("Status: AI Assist Ready: deepseek", panel)
                     self.assertIn("Will call LLM: yes, on new prompts", panel)
                     self.assertNotIn("secret-token", panel)
-                    self.assertIn("AI Assist Ready: deepseek", app.status_bar_text())
+                    self.assertIn("AI deepseek", app.status_bar_text())
                     await pilot.press("q")
 
                 after = config.render_config(config.load_config())
