@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from tonepath import config
 from tonepath.doctor import run_doctor
+from tonepath.tui_theme import PALETTE_BY_KEY, PALETTES, normalize_theme
 
 
 class ConfigTest(unittest.TestCase):
@@ -28,6 +29,7 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual(settings.models.preferred_tagger, "essentia-tf")
                 self.assertEqual(settings.models.separator_fallback, "off")
                 self.assertEqual(settings.experience.mode, "private")
+                self.assertEqual(settings.ui.theme, "warmline")
 
     def test_default_home_is_workspace_local_when_not_overridden(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
@@ -99,6 +101,43 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual(settings.models.mode, "full")
                 self.assertTrue(settings.models.allow_online)
                 self.assertFalse(settings.models.allow_setup)
+
+    def test_ui_theme_loads_and_invalid_theme_falls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                settings = config.write_config(replace(config.default_config(), ui=config.UiConfig(theme="midnight")))
+                self.assertTrue(settings.exists())
+                self.assertEqual(config.load_config().ui.theme, "midnight")
+
+                (Path(tmp) / "home" / "config.toml").write_text(
+                    "\n".join(
+                        [
+                            'music_dirs = ["~/Music"]',
+                            'data_dir = "x"',
+                            'player = "mpv"',
+                            'network_mode = "offline"',
+                            "",
+                            "[ui]",
+                            'theme = "unknown"',
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                self.assertEqual(config.load_config().ui.theme, "warmline")
+
+    def test_builtin_tui_theme_pack_is_stable(self) -> None:
+        keys = [palette.key for palette in PALETTES]
+
+        self.assertEqual(len(PALETTES), 9)
+        self.assertEqual(len(keys), len(set(keys)))
+        self.assertEqual(keys[:3], ["warmline", "midnight", "high-contrast"])
+        self.assertEqual(normalize_theme("solarized-light"), "solarized-light")
+        self.assertEqual(normalize_theme("catppuccin-mocha"), "catppuccin-mocha")
+        self.assertEqual(normalize_theme("unknown"), "warmline")
+        self.assertFalse(PALETTE_BY_KEY["solarized-light"].dark)
+        self.assertFalse(PALETTE_BY_KEY["catppuccin-latte"].dark)
+        self.assertTrue(PALETTE_BY_KEY["dracula"].dark)
+        self.assertTrue(PALETTE_BY_KEY["jukebox"].dark)
 
 
 if __name__ == "__main__":

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from tonepath.tui_theme import DEFAULT_THEME, normalize_theme
 
 
 APP_DIR_NAME = ".tonepath"
@@ -90,6 +92,13 @@ class ExperienceConfig:
 
 
 @dataclass(frozen=True)
+class UiConfig:
+    """Terminal UI preferences from the local config file."""
+
+    theme: str = DEFAULT_THEME
+
+
+@dataclass(frozen=True)
 class TonepathConfig:
     """User-editable local Tonepath configuration."""
 
@@ -100,6 +109,7 @@ class TonepathConfig:
     privacy: PrivacyConfig
     models: ModelConfig
     experience: ExperienceConfig
+    ui: UiConfig = field(default_factory=UiConfig)
 
     def expanded_music_dirs(self) -> tuple[Path, ...]:
         """Return configured music directories with `~` expanded."""
@@ -139,6 +149,7 @@ def default_config() -> TonepathConfig:
         privacy=PrivacyConfig(),
         models=ModelConfig(),
         experience=ExperienceConfig(),
+        ui=UiConfig(),
     )
 
 
@@ -154,6 +165,7 @@ def load_config() -> TonepathConfig:
     privacy_data = data.get("privacy", {})
     models_data = data.get("models", {})
     experience_data = data.get("experience", {})
+    ui_data = data.get("ui", {})
     data_dir_override = os.environ.get("TONEPATH_HOME")
     return TonepathConfig(
         music_dirs=tuple(str(item) for item in data.get("music_dirs", defaults.music_dirs)),
@@ -173,6 +185,9 @@ def load_config() -> TonepathConfig:
         ),
         experience=ExperienceConfig(
             mode=str(experience_data.get("mode", defaults.experience.mode)),
+        ),
+        ui=UiConfig(
+            theme=normalize_theme(str(ui_data.get("theme", defaults.ui.theme))),
         ),
     )
 
@@ -210,6 +225,7 @@ def add_music_dir(path: Path) -> TonepathConfig:
         privacy=current.privacy,
         models=current.models,
         experience=current.experience,
+        ui=current.ui,
     )
     write_config(updated)
     return updated
@@ -272,6 +288,7 @@ def preset_config(
         privacy=privacy,
         models=models,
         experience=ExperienceConfig(mode=mode),
+        ui=current.ui,
     )
 
 
@@ -299,6 +316,9 @@ def render_config(config: TonepathConfig) -> str:
             "",
             "[experience]",
             f"mode = {quote_string(config.experience.mode)}",
+            "",
+            "[ui]",
+            f"theme = {quote_string(normalize_theme(config.ui.theme))}",
             "",
         ]
     )

@@ -66,6 +66,12 @@ uv run tonepath scan /path/to/music
 
 The TUI opens as a local workbench. Run `uv run tonepath` or `uv run tonepath tui`, type a listening goal, and press Enter to create a session. Passing a prompt to `tonepath tui "..."` creates the session immediately, but still does not autoplay. Playback events are recorded locally in SQLite for future preference learning.
 
+The TUI has a small built-in theme pack: `Warmline`, `Midnight`, `High Contrast`, `Solarized Dark`, `Solarized Light`, `Catppuccin Mocha`, `Catppuccin Latte`, `Dracula`, and `Jukebox`. Press `t` to cycle themes; Tonepath stores the choice in `config.toml` under `[ui] theme = "..."`.
+
+These palettes are fixed local Tonepath palettes inspired by mature terminal color systems such as Solarized, Catppuccin, Dracula, and black/green music-player TUIs. Tonepath does not download external theme files and does not require Ghostty, iTerm, oh-my-zsh, or any terminal theme to be installed. Fonts are controlled by your terminal app, not Tonepath. Use a readable monospace font in Ghostty, iTerm, Terminal, or your preferred terminal.
+
+The bottom command bar stays visible while you type, so playback keys do not disappear when the Request input is focused. The Now panel shows an estimated progress bar when track duration is known. The pulse meter is a decorative energy visual derived from local features; it is not a real-time audio spectrum.
+
 TUI keys:
 
 ```text
@@ -82,6 +88,7 @@ v          prefer less vocals
 +          too loud; lower upcoming energy
 -          too slow; raise upcoming energy
 m          cycle playback mode
+t          cycle visual theme
 i          show AI Assist status
 e          expand/collapse event log
 w          write full why to events

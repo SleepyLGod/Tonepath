@@ -6,6 +6,10 @@ Tonepath is a local-first private radio agent for state-transition listening.
 
 Tell it how you feel and where you want to land. Tonepath turns a request like `I am irritated and want to focus in 30 minutes` into an explainable listening path: current state -> intermediate phases -> target state. It scans your local music library, stores audio evidence locally, selects tracks with confidence labels and reasons, and can play local files through `mpv`.
 
+![Tonepath TUI showing an explainable local listening path](docs/assets/tonepath-tui.png)
+
+Tonepath TUI: prompt, state-transition path, queue, why panel, playback controls, and local evidence.
+
 Tonepath is currently a working terminal prototype. It is not a macOS app, web app, Spotify player, music generator, or therapy product.
 
 For detailed usage, model setup, evaluation, profile learning, and privacy notes, read the [User Guide](docs/user-guide.md). For product direction, read the [Private Radio Agent Roadmap](docs/tonepath-private-radio-agent-roadmap.md).

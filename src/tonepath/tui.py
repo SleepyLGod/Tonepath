@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import time
 from typing import Any
 
 from rich.text import Text
@@ -19,22 +20,19 @@ from tonepath.playback_controller import PlaybackController
 from tonepath.profile import profile_learning_hint
 from tonepath.readiness import LibraryStatus, library_status, readiness_blocks_session, readiness_label, status_next_action
 from tonepath.session import SessionRunner
+from tonepath.tui_theme import PALETTE_BY_KEY, PALETTES, TonepathPalette, next_theme, normalize_theme
 
 try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical
-    from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
+    from textual.theme import Theme
+    from textual.widgets import DataTable, Header, Input, RichLog, Static
 except ImportError as exc:  # pragma: no cover - exercised before dependency install
     raise RuntimeError("Textual is not installed. Run `uv sync` before launching the TUI.") from exc
 
 
 PROMPT_PLACEHOLDER = "我现在很烦，想半小时后进入写代码状态，不要人声"
-AMBER = "#d8a657"
-AMBER_DIM = "#8f7242"
-MUTED = "#a7afa5"
-TEAL = "#6fb7a6"
-TEXT = "#e6e0cf"
 PLAYBACK_MODES = ("Manual", "Continue Path", "Repeat One", "Repeat Path")
 
 
@@ -48,33 +46,44 @@ class TonepathApp(App[None]):
     CSS = """
     Screen {
         layout: vertical;
-        background: #101311;
-        color: #e6e0cf;
+        background: $background;
+        color: $foreground;
     }
 
     #status-bar {
         height: 1;
         padding: 0 2;
         text-style: bold;
-        background: #1d211d;
-        color: #d8a657;
+        background: $surface;
+        color: $primary;
     }
 
     #prompt-input {
         height: 3;
         margin: 0 1;
-        background: #171b18;
-        border: round #8f7242;
-        border-title-color: #d8a657;
-        color: #e6e0cf;
+        background: $panel;
+        border: round $primary;
+        border-title-color: $primary;
+        border-title-align: right;
+        color: $foreground;
+    }
+
+    #prompt-input:focus {
+        background: $surface;
+        border: round $accent;
+        border-title-color: $accent;
     }
 
     #timeline {
         height: 3;
-        padding: 1 2;
+        margin: 0 1;
+        padding: 0 2;
         text-style: bold;
-        background: #151914;
-        color: #d8a657;
+        background: $panel;
+        border: round $primary;
+        border-title-color: $primary;
+        border-title-align: right;
+        color: $primary;
     }
 
     #body {
@@ -96,52 +105,80 @@ class TonepathApp(App[None]):
     #now-playing,
     #why-panel {
         padding: 1 2;
-        background: #171b18;
-        border: round #3a4038;
-        color: #e6e0cf;
+        background: $panel;
+        border: round $surface;
+        color: $foreground;
     }
 
     #now-playing {
-        height: 8;
+        height: 10;
         margin-bottom: 1;
-        border-left: heavy #d8a657;
-        border-title-color: #d8a657;
+        border-left: heavy $primary;
+        border-title-color: $primary;
     }
 
     #queue {
         height: 1fr;
-        background: #171b18;
-        border: round #3a4038;
-        border-title-color: #d8a657;
-        color: #e6e0cf;
+        background: $panel;
+        border: round $surface;
+        border-title-color: $primary;
+        color: $foreground;
+    }
+
+    #queue .datatable--header {
+        text-style: bold;
+        color: $primary;
+        background: $surface;
+    }
+
+    #queue .datatable--cursor {
+        text-style: bold;
+        color: $foreground;
+        background: $primary;
+    }
+
+    #queue .datatable--odd-row {
+        background: $panel;
+    }
+
+    #queue .datatable--even-row {
+        background: $surface;
     }
 
     #why-panel {
         height: 1fr;
-        border-title-color: #6fb7a6;
+        border-title-color: $secondary;
     }
 
     #event-log {
         height: 8;
         margin: 0 1;
-        background: #151914;
-        border: round #3a4038;
-        border-title-color: #a7afa5;
-        color: #a7afa5;
+        background: $surface;
+        border: round $panel;
+        border-title-color: $foreground;
+        color: $foreground;
+    }
+
+    #command-bar {
+        height: 1;
+        padding: 0 1;
+        background: $surface;
+        color: $foreground;
     }
     """
 
     BINDINGS = [
-        Binding("/", "focus_prompt", "Prompt"),
+        Binding("/", "focus_prompt", "Prompt", show=False),
         Binding("n", "new_prompt", "New", show=False),
         Binding("space", "play", "Play", key_display="Space"),
         Binding("p", "play", "Play", show=False),
-        Binding("x", "stop_playback", "Stop"),
+        Binding("x", "stop_playback", "Stop", show=False),
         Binding(">", "next_track", "Next", key_display=">"),
         Binding("<", "previous_track", "Prev", key_display="<"),
         Binding("s", "skip", "Skip"),
         Binding("l", "like", "Like"),
         Binding("m", "cycle_playback_mode", "Mode"),
+        Binding("t", "cycle_theme", "Theme"),
         Binding("i", "ai_assist", "AI Assist", show=False),
         Binding("?", "toggle_help", "Help", key_display="?"),
         Binding("e", "toggle_events", "Events", show=False),
@@ -151,7 +188,7 @@ class TonepathApp(App[None]):
         Binding("+", "too_loud", "Quieter", show=False),
         Binding("-", "too_slow", "More energy", show=False),
         Binding("w", "why", "Why", show=False),
-        Binding("q", "quit", "Quit"),
+        Binding("q", "quit", "Quit", show=False),
     ]
 
     def __init__(self, prompt: str | None = None) -> None:
@@ -162,6 +199,7 @@ class TonepathApp(App[None]):
         self.playback: PlaybackController | None = None
         self.playback_status = "Ready"
         self.playback_timer: Any | None = None
+        self.playback_started_at: float | None = None
         self.model_runtime_ready = False
         self.library_status: LibraryStatus | None = None
         self.readiness = "Needs setup"
@@ -170,6 +208,9 @@ class TonepathApp(App[None]):
         self.playback_mode = "Manual"
         self.events_expanded = False
         self.right_panel = "why"
+        self.pulse_tick = 0
+        self.theme_key = normalize_theme(config.load_config().ui.theme)
+        self.palette = PALETTE_BY_KEY[self.theme_key]
 
     def compose(self) -> ComposeResult:
         """Compose the terminal product surface with Textual built-ins."""
@@ -185,12 +226,14 @@ class TonepathApp(App[None]):
             with Vertical(id="right-pane"):
                 yield Static("", id="why-panel")
         yield RichLog(id="event-log", wrap=True, markup=False)
-        yield Footer()
+        yield Static("", id="command-bar")
 
     def on_mount(self) -> None:
         """Load local state and render the first session view."""
 
         self.store = TonepathStore()
+        self.install_themes()
+        self.theme = self.theme_key
         self.apply_panel_titles()
         table = self.query_one("#queue", DataTable)
         table.add_columns("#", "Phase", "Track", "Fit", "Energy", "Conf")
@@ -268,6 +311,9 @@ class TonepathApp(App[None]):
         if not moved:
             self.log_event("No next track." if direction > 0 else "No previous track.")
             return
+        if not was_playing:
+            self.playback_started_at = None
+            self.pulse_tick = 0
         candidate = self.runner.current()
         if candidate is None:
             self.playback_status = "No tracks"
@@ -297,6 +343,8 @@ class TonepathApp(App[None]):
             return
         stopped = self.playback.stop_current()
         self.playback_status = "Stopped"
+        self.playback_started_at = None
+        self.pulse_tick = 0
         self.log_event("Stopped playback." if stopped else "No active Tonepath playback.")
         self.refresh_session_view()
 
@@ -306,6 +354,28 @@ class TonepathApp(App[None]):
         index = PLAYBACK_MODES.index(self.playback_mode)
         self.playback_mode = PLAYBACK_MODES[(index + 1) % len(PLAYBACK_MODES)]
         self.log_event(f"Playback mode: {self.playback_mode}.")
+        self.refresh_session_view()
+
+    def action_cycle_theme(self) -> None:
+        """Cycle the TUI visual theme and persist the explicit user choice."""
+
+        self.theme_key = next_theme(self.theme_key)
+        self.palette = PALETTE_BY_KEY[self.theme_key]
+        self.theme = self.theme_key
+        settings = config.load_config()
+        config.write_config(
+            config.TonepathConfig(
+                music_dirs=settings.music_dirs,
+                data_dir=settings.data_dir,
+                player=settings.player,
+                network_mode=settings.network_mode,
+                privacy=settings.privacy,
+                models=settings.models,
+                experience=settings.experience,
+                ui=config.UiConfig(theme=self.theme_key),
+            )
+        )
+        self.log_event(f"Theme: {self.palette.label}.")
         self.refresh_session_view()
 
     def action_toggle_help(self) -> None:
@@ -334,6 +404,7 @@ class TonepathApp(App[None]):
         """Focus the prompt input bar."""
 
         self.query_one("#prompt-input", Input).focus()
+        self.query_one("#command-bar", Static).update(self.command_bar_renderable(prompt_focused=True))
 
     def action_new_prompt(self) -> None:
         """Return to the prompt intake state."""
@@ -342,6 +413,8 @@ class TonepathApp(App[None]):
             self.playback.stop_current()
         self.runner = None
         self.playback_status = "Ready"
+        self.playback_started_at = None
+        self.pulse_tick = 0
         prompt_input = self.query_one("#prompt-input", Input)
         prompt_input.value = ""
         self.render_intake()
@@ -438,6 +511,8 @@ class TonepathApp(App[None]):
             return
         if self.playback is not None:
             self.playback.stop_current()
+        self.playback_started_at = None
+        self.pulse_tick = 0
         self.right_panel = "why"
         settings = config.load_config()
         plan, note = smart_plan_session(cleaned, settings)
@@ -475,6 +550,8 @@ class TonepathApp(App[None]):
             self.log_event(str(exc))
             return
         self.playback_status = "Playing"
+        self.playback_started_at = time.monotonic()
+        self.pulse_tick = 0
         self.log_event(f"Playing: {fallback_track_label(candidate.track.title, candidate.track.path.name)}")
         self.ensure_playback_polling()
         self.refresh_session_view()
@@ -488,7 +565,13 @@ class TonepathApp(App[None]):
     def poll_playback_finished(self) -> None:
         """Update local session state when mpv exits without an explicit stop."""
 
-        if self.playback is None or not self.playback.finish_if_exited():
+        if self.playback is None:
+            return
+        if not self.playback.finish_if_exited():
+            if self.playback_status == "Playing" and self.runner is not None:
+                self.pulse_tick += 1
+                self.query_one("#now-playing", Static).update(self.now_playing_renderable())
+                self.query_one("#command-bar", Static).update(self.command_bar_renderable())
             return
         if self.runner is not None and self.playback_mode == "Repeat One":
             self.log_event("Repeating current track.")
@@ -504,6 +587,8 @@ class TonepathApp(App[None]):
                 self.start_current_playback()
                 return
         self.playback_status = "Finished"
+        self.playback_started_at = None
+        self.pulse_tick = 0
         self.log_event("Playback finished.")
         self.refresh_session_view()
 
@@ -516,9 +601,10 @@ class TonepathApp(App[None]):
 
         self.apply_panel_titles()
         self.query_one("#status-bar", Static).update(self.status_bar_text())
-        self.query_one("#timeline", Static).update(self.timeline_text())
+        self.query_one("#timeline", Static).update(self.timeline_renderable())
         self.query_one("#now-playing", Static).update(self.now_playing_renderable())
         self.query_one("#why-panel", Static).update(self.why_panel_renderable())
+        self.query_one("#command-bar", Static).update(self.command_bar_renderable())
         self.refresh_queue()
 
     def refresh_queue(self) -> None:
@@ -537,12 +623,12 @@ class TonepathApp(App[None]):
         for position, candidate in candidates:
             current = position == "now"
             table.add_row(
-                queue_cell(queue_marker(position), current=current, align="center"),
-                queue_cell(candidate.phase.label, current=current),
-                queue_cell(truncate(fallback_track_label(candidate.track.title, candidate.track.path.name), 28), current=current),
-                queue_cell(self.fit_label(candidate), current=current),
-                queue_cell(self.energy_text(candidate.track.id), current=current),
-                queue_cell(confidence_label(candidate.confidence), current=current),
+                queue_cell(queue_marker(position), current=current, align="center", palette=self.palette),
+                queue_cell(candidate.phase.label, current=current, palette=self.palette),
+                queue_cell(truncate(fallback_track_label(candidate.track.title, candidate.track.path.name), 28), current=current, palette=self.palette),
+                fit_cell(self.fit_label(candidate), current=current, palette=self.palette),
+                queue_cell(self.energy_text(candidate.track.id), current=current, palette=self.palette),
+                queue_cell(confidence_label(candidate.confidence), current=current, palette=self.palette),
             )
 
     def timeline_text(self) -> str:
@@ -556,6 +642,25 @@ class TonepathApp(App[None]):
             labels = labels[:-1]
         path = "  ◇  ".join([request.source_state, *labels, request.target_state])
         return f"{path} · {request.duration_sec // 60}m"
+
+    def timeline_renderable(self) -> Text:
+        """Return a styled path timeline with subtle phase color transitions."""
+
+        if self.runner is None:
+            return Text("Tonepath", style=f"bold {self.palette.primary}")
+        request = self.runner.active_plan().request
+        labels = [phase.label for phase in self.runner.active_plan().phases]
+        if labels and labels[-1] == request.target_state:
+            labels = labels[:-1]
+        parts = [request.source_state, *labels, request.target_state]
+        text = Text()
+        styles = [self.palette.warning, self.palette.primary, self.palette.secondary, self.palette.success]
+        for index, part in enumerate(parts):
+            if index:
+                text.append("  ◇  ", style=self.palette.muted)
+            text.append(part, style=f"bold {styles[min(index, len(styles) - 1)]}")
+        text.append(f" · {request.duration_sec // 60}m", style=f"bold {self.palette.primary}")
+        return text
 
     def now_playing_text(self) -> str:
         """Return the now-playing panel text."""
@@ -577,6 +682,8 @@ class TonepathApp(App[None]):
                 display_artist(candidate.track),
                 f"energy {energy} {meter} · bpm {bpm}",
                 f"loudness {loudness}",
+                f"progress {self.progress_text(candidate.track.duration)}",
+                f"pulse {self.pulse_text(features.energy if features is not None else None, features.arousal_estimate if features is not None else None)}",
             ]
         )
 
@@ -587,19 +694,39 @@ class TonepathApp(App[None]):
         text = Text()
         if not lines:
             return text
-        text.append("● ", style=AMBER)
-        text.append(lines[0], style=f"bold {AMBER}")
+        text.append(playback_symbol(self.playback_status), style=f"bold {self.palette.primary}")
+        text.append(" ", style=self.palette.primary)
+        text.append(lines[0], style=f"bold {self.palette.primary}")
         for index, line in enumerate(lines[1:], start=1):
             text.append("\n")
             if index == 1:
-                text.append(line, style=f"bold {TEXT}")
+                text.append(line, style=f"bold {self.palette.text}")
             elif index == 2:
-                text.append(line, style=MUTED)
-            elif "▮" in line or "▯" in line:
-                text.append(line, style=AMBER)
+                text.append(line, style=self.palette.muted)
+            elif "▮" in line or "▯" in line or "━" in line:
+                text.append(line, style=self.palette.primary)
             else:
-                text.append(line, style=AMBER_DIM)
+                text.append(line, style=self.palette.muted)
         return text
+
+    def progress_text(self, duration: float | None) -> str:
+        """Return a local estimated playback progress label."""
+
+        if duration is None or duration <= 0:
+            return "--:-- ──────────── --:--"
+        elapsed = 0.0
+        if self.playback_status == "Playing" and self.playback_started_at is not None:
+            elapsed = min(max(time.monotonic() - self.playback_started_at, 0.0), duration)
+        return f"{format_clock(elapsed)} {progress_bar(elapsed, duration)} {format_clock(duration)}"
+
+    def pulse_text(self, energy: float | None, arousal: float | None = None) -> str:
+        """Return a decorative energy pulse, not a real-time audio spectrum."""
+
+        base = energy if energy is not None else arousal
+        if base is None:
+            return "▁▁▁▁▁▁▁▁"
+        level = min(max(base, 0.0), 1.0)
+        return pulse_meter(level, self.pulse_tick if self.playback_status == "Playing" else 0)
 
     def why_panel_text(self) -> str:
         """Return a compact explanation preview for the right panel."""
@@ -678,6 +805,8 @@ class TonepathApp(App[None]):
                 "w          write full why to events",
                 "a / r      Codex audit / rerank preview",
                 "/ / n      prompt / new request",
+                "Theme",
+                "t          cycle Warmline / Midnight / High Contrast / Solarized / Catppuccin / Dracula / Jukebox",
                 "q          quit",
             ]
         )
@@ -717,14 +846,24 @@ class TonepathApp(App[None]):
 
         text = Text()
         for line in self.why_panel_text().splitlines():
-            if line in {"Why", "Evidence", "Help", "Playback", "Feedback", "Tools", "AI Assist"} or line.startswith("Missing evidence"):
+            if line in {"Why", "Evidence", "Help", "Playback", "Feedback", "Tools", "Theme", "AI Assist"} or line.startswith("Missing evidence"):
                 if text:
                     text.append("\n")
-                style = TEAL if line == "Evidence" else AMBER if line in {"Why", "Help", "Playback", "Feedback", "Tools", "AI Assist"} else MUTED
+                if line == "Evidence":
+                    style = self.palette.secondary
+                elif line.startswith("Missing evidence"):
+                    style = self.palette.muted
+                else:
+                    style = self.palette.primary
                 text.append(line, style=f"bold {style}")
                 continue
             text.append("\n")
-            style = MUTED if line.startswith("Missing evidence") else TEXT
+            if "caution" in line or "risk" in line:
+                style = self.palette.warning
+            elif line.startswith("Confidence") or line.startswith("BPM") or line.startswith("Vocalness"):
+                style = self.palette.muted
+            else:
+                style = self.palette.text
             text.append(line, style=style)
         return text
 
@@ -741,12 +880,13 @@ class TonepathApp(App[None]):
         self.apply_panel_titles()
         self.query_one("#status-bar", Static).update(self.status_bar_text(extra="Enter to plan"))
         self.query_one("#timeline", Static).update("No session yet · feeling → path → feedback → memory")
+        self.query_one("#command-bar", Static).update(self.command_bar_renderable(prompt_focused=True))
         self.query_one("#now-playing", Static).update(
             Text.assemble(
-                ("● No session yet\n", f"bold {AMBER}"),
-                (f"{guidance}\n", TEXT),
-                ("Example:\n", MUTED),
-                (PROMPT_PLACEHOLDER, AMBER_DIM),
+                ("● No session yet\n", f"bold {self.palette.primary}"),
+                (f"{guidance}\n", self.palette.text),
+                ("Example:\n", self.palette.muted),
+                (PROMPT_PLACEHOLDER, self.palette.primary),
             )
         )
         self.query_one("#why-panel", Static).update(
@@ -849,7 +989,7 @@ class TonepathApp(App[None]):
         llm_state = self.status_ai_label(settings)
         model_state = "Model ✓" if self.model_runtime_ready else "Model missing"
         parts = [
-            f"● {self.playback_status}",
+            f"{playback_symbol(self.playback_status)} {self.playback_status}",
             self.playback_mode,
             self.experience_label(),
             model_state,
@@ -858,7 +998,32 @@ class TonepathApp(App[None]):
         ]
         if extra:
             parts.append(extra)
-        return "   " + " · ".join(parts)
+        return " · ".join(parts)
+
+    def command_bar_renderable(self, prompt_focused: bool | None = None) -> Text:
+        """Return the persistent player command bar."""
+
+        if prompt_focused is None:
+            prompt_focused = bool(getattr(self.query_one("#prompt-input", Input), "has_focus", False))
+        commands = [
+            ("Space", "Play"),
+            (">", "Next"),
+            ("<", "Prev"),
+            ("s", "Skip"),
+            ("l", "Like"),
+            ("m", "Mode"),
+            ("t", "Theme"),
+            ("?", "Help"),
+        ]
+        if prompt_focused:
+            commands.insert(0, ("Enter", "Submit"))
+        text = Text()
+        for index, (key, label) in enumerate(commands):
+            if index:
+                text.append("  ", style=self.palette.muted)
+            text.append(f" {key} ", style=f"bold {self.palette.background} on {self.palette.primary}")
+            text.append(f" {label}", style=f"bold {self.palette.text}")
+        return text
 
     def status_ai_label(self, settings: config.TonepathConfig) -> str:
         """Return a compact AI Assist label for the status bar."""
@@ -875,6 +1040,26 @@ class TonepathApp(App[None]):
         """Return the active normal-user experience label."""
 
         return config.load_config().experience.mode.title()
+
+    def install_themes(self) -> None:
+        """Register Tonepath palettes with Textual's theme system."""
+
+        for palette in PALETTES:
+            self.register_theme(
+                Theme(
+                    name=palette.key,
+                    primary=palette.primary,
+                    secondary=palette.secondary,
+                    warning=palette.warning,
+                    success=palette.success,
+                    accent=palette.accent,
+                    foreground=palette.text,
+                    background=palette.background,
+                    surface=palette.surface,
+                    panel=palette.panel,
+                    dark=palette.dark,
+                )
+            )
 
     def latest_codex_preview(self) -> list[str] | None:
         """Return a compact rerank preview from the newest Codex audit for this session."""
@@ -926,6 +1111,7 @@ class TonepathApp(App[None]):
             "No scanned tracks.\n\nRun:\nuv run tonepath setup --preset private\nuv run tonepath config add-music-dir /path/to/music\nuv run tonepath prepare"
         )
         self.query_one("#why-panel", Static).update("Why panel appears after a local session starts.")
+        self.query_one("#command-bar", Static).update(self.command_bar_renderable(prompt_focused=True))
         self.log_event("No local tracks found.")
 
     def log_event(self, message: str) -> None:
@@ -942,6 +1128,7 @@ class TonepathApp(App[None]):
         self.query_one("#why-panel", Static).border_title = titles.get(self.right_panel, "Why")
         self.query_one("#event-log", RichLog).border_title = "Events expanded" if self.events_expanded else "Events"
         self.query_one("#prompt-input", Input).border_title = "Request"
+        self.query_one("#timeline", Static).border_title = "Path"
 
 
 def run_tui(prompt: str | None = None) -> None:
@@ -966,11 +1153,85 @@ def queue_marker(position: str) -> str:
     return position.replace("+", "")
 
 
-def queue_cell(value: str, current: bool = False, align: str | None = None) -> Text:
+def queue_cell(value: str, current: bool = False, align: str | None = None, palette: TonepathPalette | None = None) -> Text:
     """Return a styled queue table cell."""
 
-    style = f"bold {AMBER}" if current else MUTED
+    active_palette = palette or PALETTE_BY_KEY["warmline"]
+    style = f"bold {active_palette.primary}" if current else active_palette.muted
     return Text(value, style=style, justify=align)
+
+
+def fit_cell(value: str, current: bool = False, palette: TonepathPalette | None = None) -> Text:
+    """Return a queue fit label with compact semantic color coding."""
+
+    active_palette = palette or PALETTE_BY_KEY["warmline"]
+    text = Text(justify=None)
+    labels = value.split()
+    for index, label in enumerate(labels):
+        if index:
+            text.append(" ")
+        style = fit_label_style(label, active_palette, current=current)
+        text.append(label, style=style)
+    return text
+
+
+def fit_label_style(label: str, palette: TonepathPalette, current: bool = False) -> str:
+    """Return the rich style for a compact queue fit label."""
+
+    prefix = "bold " if current else ""
+    if label == "caution" or label == "high-energy":
+        return f"{prefix}{palette.warning}"
+    if label in {"low-vocal", "calm-safe"}:
+        return f"{prefix}{palette.secondary}"
+    if label == "uplift":
+        return f"{prefix}{palette.success}"
+    if label == "low-info":
+        return f"{prefix}{palette.muted}"
+    return f"{prefix}{palette.primary if current else palette.text}"
+
+
+def playback_symbol(status: str) -> str:
+    """Return a stable text-friendly playback symbol."""
+
+    if status == "Playing":
+        return "●"
+    if status in {"Stopped", "Finished"}:
+        return "■"
+    if status.startswith("Need") or status == "No tracks":
+        return "!"
+    return "○"
+
+
+def format_clock(seconds: float) -> str:
+    """Return a compact m:ss clock label."""
+
+    total = max(int(seconds), 0)
+    minutes, remainder = divmod(total, 60)
+    return f"{minutes}:{remainder:02d}"
+
+
+def progress_bar(elapsed: float, duration: float, width: int = 12) -> str:
+    """Return a fixed-width progress bar for estimated playback progress."""
+
+    if duration <= 0:
+        return "─" * width
+    ratio = min(max(elapsed / duration, 0.0), 1.0)
+    filled = min(max(round(ratio * width), 0), width)
+    return "━" * filled + "─" * (width - filled)
+
+
+def pulse_meter(level: float, tick: int, width: int = 8) -> str:
+    """Return a subtle animated energy pulse indicator."""
+
+    glyphs = ("▁", "▂", "▃", "▄", "▅", "▆")
+    bounded = min(max(level, 0.0), 1.0)
+    peak = min(max(round(bounded * (len(glyphs) - 1)), 1), len(glyphs) - 1)
+    values = []
+    for index in range(width):
+        wave = (index + tick) % 4
+        offset = 1 if wave in {1, 2} else 0
+        values.append(glyphs[min(peak + offset, len(glyphs) - 1)])
+    return "".join(values)
 
 
 def bpm_text(bpm: float | None) -> str:

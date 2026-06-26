@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,8 +12,22 @@ from tonepath.models import CandidateScore, SessionPhase, Track, TrackFeatures
 from tonepath.playback import MpvAdapter
 from tonepath.planner import plan_session
 from tonepath.profile import build_profile_evidence, deterministic_suggestions, save_suggestions
-from tonepath.tui import TonepathApp, bpm_text, confidence_label, energy_meter, profile_learning_hint, queue_marker, vocalness_text
-from textual.widgets import Input
+from tonepath.tui import (
+    TonepathApp,
+    bpm_text,
+    confidence_label,
+    energy_meter,
+    fit_cell,
+    format_clock,
+    progress_bar,
+    profile_learning_hint,
+    pulse_meter,
+    queue_marker,
+    vocalness_text,
+)
+from tonepath.tui_theme import PALETTE_BY_KEY, PALETTES
+from textual.theme import Theme
+from textual.widgets import Input, Static
 
 
 class FakeProcess:
@@ -37,6 +52,23 @@ class FinishedProcess(FakeProcess):
 
 
 class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
+    def test_builtin_palettes_register_as_textual_themes(self) -> None:
+        for palette in PALETTES:
+            theme = Theme(
+                name=palette.key,
+                primary=palette.primary,
+                secondary=palette.secondary,
+                warning=palette.warning,
+                success=palette.success,
+                accent=palette.accent,
+                foreground=palette.text,
+                background=palette.background,
+                surface=palette.surface,
+                panel=palette.panel,
+                dark=palette.dark,
+            )
+            self.assertEqual(theme.name, palette.key)
+
     def test_tui_profile_learning_hint_points_to_suggest_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
@@ -293,15 +325,18 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                 with patch.object(MpvAdapter, "start", return_value=FakeProcess()) as start:
                     async with app.run_test() as pilot:
                         self.assertIsNotNone(app.query_one("#timeline"))
+                        self.assertEqual(app.query_one("#timeline", Static).border_title, "Path")
                         self.assertIsNotNone(app.query_one("#queue"))
                         self.assertIsNotNone(app.query_one("#why-panel"))
                         self.assertIsNotNone(app.query_one("#event-log"))
+                        self.assertIsNotNone(app.query_one("#command-bar"))
                         self.assertEqual(app.query_one("#queue").ordered_columns[3].label.plain, "Fit")
                         self.assertEqual(app.query_one("#queue").ordered_columns[4].label.plain, "Energy")
                         self.assertIn("Why", app.why_panel_text())
                         self.assertIn("Evidence", app.why_panel_text())
                         self.assertIn("Missing evidence", app.why_panel_text())
                         self.assertIn("◇", app.timeline_text())
+                        self.assertIn("◇", app.timeline_renderable().plain)
                         self.assertIn("✓ Private", app.privacy_text())
                         self.assertIn("✓ AI Assist Off", app.privacy_text())
                         self.assertIn("✓ Model Missing", app.privacy_text())
@@ -309,6 +344,12 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(len(app.privacy_text().splitlines()), 5)
                         self.assertIn("Manual", app.status_bar_text())
                         self.assertNotIn("Mode Manual", app.status_bar_text())
+                        self.assertFalse(app.status_bar_text().startswith(" "))
+                        command_bar = app.command_bar_renderable().plain
+                        self.assertIn("Space", command_bar)
+                        self.assertIn("Play", command_bar)
+                        self.assertIn(">  Next", command_bar)
+                        self.assertIn("?  Help", command_bar)
                         await pilot.press("w")
                         await pilot.press("s")
                         await pilot.press("q")
@@ -341,9 +382,15 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(vocalness_text(0.24), "0.24")
                     self.assertEqual(energy_meter(None), "▯▯▯▯▯")
                     self.assertEqual(energy_meter(0.42), "▮▮▯▯▯")
+                    self.assertEqual(format_clock(64.9), "1:04")
+                    self.assertEqual(progress_bar(60.0, 180.0), "━━━━────────")
+                    self.assertNotEqual(pulse_meter(0.5, 0), pulse_meter(0.5, 1))
                     self.assertEqual(queue_marker("now"), "▶")
                     self.assertEqual(queue_marker("+1"), "1")
                     self.assertEqual(confidence_label("medium"), "med")
+                    fit = fit_cell("caution low-vocal", palette=PALETTE_BY_KEY["warmline"])
+                    self.assertEqual(fit.plain, "caution low-vocal")
+                    self.assertGreaterEqual(len(fit.spans), 2)
                     self.assertIsNotNone(app.store)
                     track = app.store.get_track(track_id) if app.store is not None else None
                     self.assertIsNotNone(track)
@@ -480,6 +527,12 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("Playback", app.why_panel_text())
                     self.assertIn("Feedback", app.why_panel_text())
                     self.assertIn("Tools", app.why_panel_text())
+                    self.assertIn("Theme", app.why_panel_text())
+                    self.assertIn("cycle Warmline", app.why_panel_text())
+                    self.assertIn("Solarized", app.why_panel_text())
+                    self.assertIn("Catppuccin", app.why_panel_text())
+                    self.assertIn("Dracula", app.why_panel_text())
+                    self.assertIn("Jukebox", app.why_panel_text())
                     self.assertIn("next track, no feedback", app.why_panel_text())
                     with patch.object(app, "log_event") as log_event:
                         await pilot.press("e")
@@ -536,6 +589,66 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(app.runner.current_index if app.runner is not None else -1, 1)
                         await pilot.press("q")
                 self.assertGreaterEqual(start.call_count, 2)
+
+    async def test_tui_command_bar_stays_visible_when_prompt_is_focused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    command_bar = app.query_one("#command-bar").render().plain
+                    self.assertIn("Enter", command_bar)
+                    self.assertIn("Submit", command_bar)
+                    self.assertIn("Space", command_bar)
+                    self.assertIn("Play", command_bar)
+                    self.assertIn(">", command_bar)
+                    self.assertIn("Next", command_bar)
+                    self.assertIn("s", command_bar)
+                    self.assertIn("Skip", command_bar)
+                    await pilot.press("q")
+
+    async def test_tui_theme_cycles_and_persists_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
+                config.write_config(config.default_config())
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                async with app.run_test() as pilot:
+                    self.assertEqual(app.theme_key, "warmline")
+                    await pilot.press("t")
+                    self.assertEqual(app.theme_key, "midnight")
+                    self.assertEqual(config.load_config().ui.theme, "midnight")
+                    self.assertEqual(app.palette.label, "Midnight")
+                    await pilot.press("t")
+                    self.assertEqual(app.theme_key, "high-contrast")
+                    self.assertEqual(config.load_config().ui.theme, "high-contrast")
+                    await pilot.press("q")
+
+    async def test_tui_progress_text_uses_local_playback_clock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                track_id = self.add_ready_track(store, tmp, "a.mp3")
+                store.conn.execute("UPDATE tracks SET duration = ? WHERE id = ?", (180.0, track_id))
+                store.conn.commit()
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                async with app.run_test() as pilot:
+                    self.assertIn("--:--", app.progress_text(None))
+                    app.playback_status = "Playing"
+                    app.playback_started_at = time.monotonic() - 64.0
+                    self.assertIn("1:04", app.progress_text(180.0))
+                    self.assertIn("3:00", app.progress_text(180.0))
+                    self.assertIn("━", app.progress_text(180.0))
+                    await pilot.press("q")
 
     async def test_tui_repeat_one_restarts_same_track_on_finish(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
