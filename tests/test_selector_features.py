@@ -368,6 +368,103 @@ class SelectorFeaturesTest(unittest.TestCase):
             self.assertIn("vocal-heavy track is risky for low-stimulation phase", vocal.reasons)
             store.close()
 
+    def test_sleep_calm_safety_demotes_moderate_stimulation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            gentle_id = store.upsert_track(track_for(tmp, "gentle.wav"))
+            active_id = store.upsert_track(track_for(tmp, "active.wav"))
+            store.upsert_features(
+                TrackFeatures(
+                    gentle_id,
+                    bpm=90.0,
+                    loudness=-18.0,
+                    energy=0.32,
+                    vocalness=0.2,
+                    arousal_estimate=0.25,
+                    valence_estimate=0.45,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+            store.upsert_features(
+                TrackFeatures(
+                    active_id,
+                    bpm=129.0,
+                    loudness=-17.5,
+                    energy=0.43,
+                    vocalness=0.56,
+                    arousal_estimate=0.32,
+                    valence_estimate=0.45,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            phase = SessionPhase("soften", 0, 600, 0.3, 0.45, 0.3)
+            gentle = score_track(store, store.get_track(gentle_id), phase)
+            active = score_track(store, store.get_track(active_id), phase)
+
+            self.assertGreater(gentle.score, active.score)
+            self.assertIn("sleep/calm safety penalty adjusted the score", active.reasons)
+            store.close()
+
+    def test_sleep_calm_semantic_risk_explains_vocal_allegro_dramatic_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            gentle_id = store.upsert_track(track_for(tmp, "gentle.wav", title="Soft Piano"))
+            risky_id = store.upsert_track(
+                track_for(tmp, "risky.wav", title="Choral Allegro Dramatic Piece")
+            )
+            for track_id in (gentle_id, risky_id):
+                store.upsert_features(
+                    TrackFeatures(
+                        track_id,
+                        bpm=96.0,
+                        loudness=-18.0,
+                        energy=0.35,
+                        vocalness=0.25,
+                        arousal_estimate=0.28,
+                        valence_estimate=0.42,
+                        feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                        confidence="high",
+                    )
+                )
+
+            phase = SessionPhase("calm", 0, 600, 0.2, 0.55, 0.2)
+            gentle = score_track(store, store.get_track(gentle_id), phase)
+            risky = score_track(store, store.get_track(risky_id), phase)
+
+            self.assertGreater(gentle.score, risky.score)
+            self.assertIn("semantic risk: choral_or_vocal_ensemble for low-stimulation phase", risky.reasons)
+            self.assertIn("semantic risk: vocal ensemble for sleep/calm", risky.reasons)
+            self.assertIn("semantic risk: allegro/showpiece for sleep/calm", risky.reasons)
+            store.close()
+
+    def test_energized_phase_does_not_apply_sleep_calm_safety(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            active_id = store.upsert_track(track_for(tmp, "active.wav", title="Active Allegro"))
+            store.upsert_features(
+                TrackFeatures(
+                    active_id,
+                    bpm=132.0,
+                    loudness=-10.0,
+                    energy=0.72,
+                    vocalness=0.58,
+                    arousal_estimate=0.62,
+                    valence_estimate=0.7,
+                    feature_source=ESSENTIA_VOICE_FEATURE_SOURCE,
+                    confidence="high",
+                )
+            )
+
+            phase = SessionPhase("energize", 0, 600, 0.7, 0.65, 0.75)
+            active = score_track(store, store.get_track(active_id), phase)
+
+            self.assertNotIn("sleep/calm safety penalty adjusted the score", active.reasons)
+            self.assertNotIn("semantic risk: allegro/showpiece for sleep/calm", active.reasons)
+            store.close()
+
     def test_low_stimulation_hold_demotes_fast_low_vocalness_track(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = TonepathStore(Path(tmp) / "tonepath.db")

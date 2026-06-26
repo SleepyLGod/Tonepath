@@ -20,6 +20,7 @@ QUIET_GENRES = ("ambient", "classical", "instrumental", "lofi", "lo-fi", "downte
 VOCAL_HEAVY_GENRES = ("pop", "rap", "hip-hop", "r&b")
 LOW_STIM_PHASES = {"focus", "decompress", "soften", "settle", "calm", "hold"}
 STRICT_LOW_STIM_PHASES = {"soften", "settle", "calm", "hold"}
+SLEEP_CALM_PHASES = {"soften", "settle", "calm"}
 SEMANTIC_RISK_ORDER = (
     "march_like",
     "choral_or_vocal_ensemble",
@@ -32,13 +33,20 @@ SEMANTIC_RISK_TEXT_TOKENS = {
     "choral_or_vocal_ensemble": ("choral", "choir", "chorus", "voices", "vocal ensemble"),
     "epic_or_dramatic": ("epic", "dramatic", "drama", "trailer"),
     "anthem_or_ceremonial": ("anthem", "ceremonial", "ceremony", "hymn", "ode to joy", "praise to joy"),
-    "showpiece_or_vivace": ("showpiece", "virtuoso", "vivace", "presto", "finale"),
+    "showpiece_or_vivace": ("showpiece", "virtuoso", "vivace", "presto", "finale", "allegro"),
 }
 SEMANTIC_RISK_TAGS = {
     "choral_or_vocal_ensemble": {"choir": 0.25, "choral": 0.25, "voice": 0.55, "vocal": 0.55},
     "epic_or_dramatic": {"epic": 0.15, "dramatic": 0.12, "drama": 0.12, "trailer": 0.12, "action": 0.18},
     "anthem_or_ceremonial": {"anthem": 0.12, "ceremonial": 0.12},
-    "showpiece_or_vivace": {"virtuoso": 0.12, "fast": 0.45},
+    "showpiece_or_vivace": {"virtuoso": 0.12, "fast": 0.45, "allegro": 0.12, "showpiece": 0.12},
+}
+SLEEP_CALM_RISK_LABELS = {
+    "march_like": "march-like",
+    "choral_or_vocal_ensemble": "vocal ensemble",
+    "epic_or_dramatic": "dramatic",
+    "anthem_or_ceremonial": "ceremonial",
+    "showpiece_or_vivace": "allegro/showpiece",
 }
 
 
@@ -110,6 +118,8 @@ def score_track(
         score += feature_fit(features, phase)
         stimulation_penalty = phase_stimulation_penalty(features, phase)
         score -= stimulation_penalty
+        sleep_calm_penalty = sleep_calm_safety_penalty(features, phase)
+        score -= sleep_calm_penalty
         reasons.append(f"audio features available from {features.feature_source}")
         if features.energy is not None:
             reasons.append("energy feature contributes to phase fit")
@@ -121,6 +131,8 @@ def score_track(
             reasons.append("phase stimulation penalty adjusted the score")
             if is_low_stimulation_phase(phase):
                 reasons.append("low-stimulation safety penalty adjusted the score")
+        if sleep_calm_penalty:
+            reasons.append("sleep/calm safety penalty adjusted the score")
         if phase.target_energy <= 0.45 and features.vocalness is not None and features.vocalness >= 0.75:
             score -= vocal_heavy_low_stim_penalty(phase)
             reasons.append("vocal-heavy track is risky for low-stimulation phase")
@@ -137,6 +149,8 @@ def score_track(
         score -= semantic_penalty
         for risk in semantic_risks:
             reasons.append(f"semantic risk: {risk} for low-stimulation phase")
+            if sleep_calm_guard_applies(phase):
+                reasons.append(f"semantic risk: {sleep_calm_risk_label(risk)} for sleep/calm")
 
     affect_profile = affect_profile_from_enrichment(enrichment)
     affect_delta, affect_reasons = affect_phase_fit(affect_profile, phase)
@@ -292,9 +306,39 @@ def low_stimulation_semantic_penalty(risks: list[str], phase: SessionPhase) -> f
     if not risks or not semantic_guard_applies(phase):
         return 0.0
     base = 2.4 if phase.label in STRICT_LOW_STIM_PHASES else 1.6
+    if sleep_calm_guard_applies(phase):
+        base = 4.8
     if phase.label == "lift":
         base = 1.6
     return base + max(0, len(risks) - 1) * 0.6
+
+
+def sleep_calm_guard_applies(phase: SessionPhase) -> bool:
+    """Return whether the stricter sleep/calm safety layer applies."""
+
+    return phase.label in SLEEP_CALM_PHASES and phase.target_energy <= 0.35
+
+
+def sleep_calm_safety_penalty(features: TrackFeatures, phase: SessionPhase) -> float:
+    """Return extra safety penalties for very low-stimulation sleep/calm phases."""
+
+    if not sleep_calm_guard_applies(phase):
+        return 0.0
+
+    penalty = 0.0
+    if features.bpm is not None and features.bpm > 120.0:
+        penalty += min((features.bpm - 120.0) / 18.0, 1.0) * 3.4
+    if features.energy is not None and features.energy > 0.42:
+        penalty += min((features.energy - 0.42) / 0.18, 1.0) * 2.4
+    if features.vocalness is not None and features.vocalness > 0.5:
+        penalty += min((features.vocalness - 0.5) / 0.25, 1.0) * 3.8
+    return penalty
+
+
+def sleep_calm_risk_label(risk: str) -> str:
+    """Return a user-readable semantic risk label for sleep/calm reasons."""
+
+    return SLEEP_CALM_RISK_LABELS.get(risk, risk)
 
 
 def gentle_uplift_adjustment(
