@@ -22,6 +22,29 @@ class SessionRunnerTest(unittest.TestCase):
             self.assertNotEqual(before.track.id, after.track.id)
             store.close()
 
+    def test_navigation_moves_without_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            self.add_track(store, tmp, "a.mp3")
+            self.add_track(store, tmp, "b.mp3")
+            runner = SessionRunner(store, "from irritated to focus in 30 minutes")
+            before = runner.current()
+            moved_next = runner.move_next()
+            after = runner.current()
+            moved_previous = runner.move_previous()
+            back = runner.current()
+            feedback_rows = store.conn.execute("SELECT COUNT(*) AS count FROM feedback").fetchone()["count"]
+
+            self.assertTrue(moved_next)
+            self.assertTrue(moved_previous)
+            self.assertIsNotNone(before)
+            self.assertIsNotNone(after)
+            self.assertIsNotNone(back)
+            self.assertNotEqual(before.track.id, after.track.id)
+            self.assertEqual(before.track.id, back.track.id)
+            self.assertEqual(feedback_rows, 0)
+            store.close()
+
     def test_no_vocals_updates_session_constraint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = TonepathStore(Path(tmp) / "tonepath.db")

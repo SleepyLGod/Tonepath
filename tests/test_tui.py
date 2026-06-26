@@ -118,7 +118,7 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNotNone(app.runner)
                     self.assertIn("DEEPSEEK_API_KEY missing", app.intent_note or "")
                     self.assertIn("✓ Smart", app.privacy_text())
-                    self.assertIn("✓ LLM Missing", app.privacy_text())
+                    self.assertIn("✓ AI Assist Missing Key: deepseek", app.privacy_text())
                     await pilot.press("q")
 
     async def test_tui_codex_keys_do_not_run_background_work(self) -> None:
@@ -297,15 +297,16 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                         self.assertIsNotNone(app.query_one("#why-panel"))
                         self.assertIsNotNone(app.query_one("#event-log"))
                         self.assertEqual(app.query_one("#queue").ordered_columns[3].label.plain, "Energy")
-                        self.assertIn("Fit", app.why_panel_text())
+                        self.assertIn("Why", app.why_panel_text())
                         self.assertIn("Evidence", app.why_panel_text())
                         self.assertIn("Unknown", app.why_panel_text())
                         self.assertIn("◇", app.timeline_text())
                         self.assertIn("✓ Private", app.privacy_text())
-                        self.assertIn("✓ LLM Off", app.privacy_text())
+                        self.assertIn("✓ AI Assist Off", app.privacy_text())
                         self.assertIn("✓ Model Missing", app.privacy_text())
                         self.assertIn("✓ Codex", app.privacy_text())
                         self.assertEqual(len(app.privacy_text().splitlines()), 5)
+                        self.assertIn("Mode Manual", app.status_bar_text())
                         await pilot.press("w")
                         await pilot.press("s")
                         await pilot.press("q")
@@ -391,6 +392,177 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                         await pilot.press("q")
                 self.assertGreaterEqual(start.call_count, 2)
                 self.assertTrue(stop.called)
+
+    async def test_tui_next_and_previous_do_not_record_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "b.mp3")
+                self.add_ready_track(store, tmp, "c.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                async with app.run_test() as pilot:
+                    self.assertIsNotNone(app.runner)
+                    before = app.runner.current() if app.runner is not None else None
+                    await pilot.press(">")
+                    after_next = app.runner.current() if app.runner is not None else None
+                    await pilot.press("<")
+                    after_previous = app.runner.current() if app.runner is not None else None
+                    await pilot.press("q")
+
+                store = TonepathStore()
+                feedback_rows = store.conn.execute("SELECT COUNT(*) AS count FROM feedback").fetchone()["count"]
+                store.close()
+                self.assertIsNotNone(before)
+                self.assertIsNotNone(after_next)
+                self.assertIsNotNone(after_previous)
+                self.assertNotEqual(before.track.id, after_next.track.id)
+                self.assertEqual(before.track.id, after_previous.track.id)
+                self.assertEqual(feedback_rows, 0)
+
+    async def test_tui_next_replaces_playback_without_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "b.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                with patch.object(MpvAdapter, "start", return_value=FakeProcess()) as start, patch.object(
+                    MpvAdapter, "stop_process"
+                ) as stop:
+                    async with app.run_test() as pilot:
+                        await pilot.press("space")
+                        await pilot.press(">")
+                        await pilot.press("q")
+
+                store = TonepathStore()
+                feedback_rows = store.conn.execute("SELECT COUNT(*) AS count FROM feedback").fetchone()["count"]
+                store.close()
+                self.assertGreaterEqual(start.call_count, 2)
+                self.assertTrue(stop.called)
+                self.assertEqual(feedback_rows, 0)
+
+    async def test_tui_playback_mode_cycles_and_help_toggles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                async with app.run_test() as pilot:
+                    self.assertEqual(app.playback_mode, "Manual")
+                    await pilot.press("m")
+                    self.assertEqual(app.playback_mode, "Continue Path")
+                    await pilot.press("m")
+                    self.assertEqual(app.playback_mode, "Repeat One")
+                    await pilot.press("?")
+                    self.assertEqual(app.right_panel, "help")
+                    self.assertIn("next track, no feedback", app.why_panel_text())
+                    await pilot.press("e")
+                    self.assertTrue(app.events_expanded)
+                    await pilot.press("q")
+
+    async def test_tui_ai_assist_panel_is_read_only_and_redacted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(
+                os.environ,
+                {"TONEPATH_HOME": str(home), "TONEPATH_LLM_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": "secret-token"},
+                clear=True,
+            ):
+                config.write_config(config.preset_config("smart", send_to_llm=True))
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+                before = config.render_config(config.load_config())
+
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    app.query_one("#prompt-input", Input).blur()
+                    await pilot.press("i")
+                    panel = app.why_panel_text()
+                    self.assertEqual(app.right_panel, "ai_assist")
+                    self.assertIn("AI Assist", panel)
+                    self.assertIn("Status: AI Assist Ready: deepseek", panel)
+                    self.assertIn("Will call LLM: yes, on new prompts", panel)
+                    self.assertNotIn("secret-token", panel)
+                    self.assertIn("AI Assist Ready: deepseek", app.status_bar_text())
+                    await pilot.press("q")
+
+                after = config.render_config(config.load_config())
+                self.assertEqual(before, after)
+
+    async def test_tui_continue_path_starts_next_track_on_finish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "b.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                with patch.object(MpvAdapter, "start", return_value=FinishedProcess()) as start:
+                    async with app.run_test() as pilot:
+                        await pilot.press("m")
+                        self.assertEqual(app.playback_mode, "Continue Path")
+                        await pilot.press("space")
+                        app.poll_playback_finished()
+                        self.assertEqual(app.playback_status, "Playing")
+                        self.assertEqual(app.runner.current_index if app.runner is not None else -1, 1)
+                        await pilot.press("q")
+                self.assertGreaterEqual(start.call_count, 2)
+
+    async def test_tui_repeat_one_restarts_same_track_on_finish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "b.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                with patch.object(MpvAdapter, "start", return_value=FinishedProcess()) as start:
+                    async with app.run_test() as pilot:
+                        await pilot.press("m")
+                        await pilot.press("m")
+                        self.assertEqual(app.playback_mode, "Repeat One")
+                        await pilot.press("space")
+                        app.poll_playback_finished()
+                        self.assertEqual(app.playback_status, "Playing")
+                        self.assertEqual(app.runner.current_index if app.runner is not None else -1, 0)
+                        await pilot.press("q")
+                self.assertGreaterEqual(start.call_count, 2)
+
+    async def test_tui_repeat_path_wraps_to_first_track_on_finish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "b.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                with patch.object(MpvAdapter, "start", return_value=FinishedProcess()) as start:
+                    async with app.run_test() as pilot:
+                        await pilot.press("m")
+                        await pilot.press("m")
+                        await pilot.press("m")
+                        self.assertEqual(app.playback_mode, "Repeat Path")
+                        if app.runner is not None:
+                            app.runner.current_index = len(app.runner.queue) - 1
+                        await pilot.press("space")
+                        app.poll_playback_finished()
+                        self.assertEqual(app.playback_status, "Playing")
+                        self.assertEqual(app.runner.current_index if app.runner is not None else -1, 0)
+                        await pilot.press("q")
+                self.assertGreaterEqual(start.call_count, 2)
 
     async def test_tui_stop_key_stops_playback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

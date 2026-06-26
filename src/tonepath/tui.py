@@ -14,7 +14,7 @@ from tonepath.experience import smart_plan_session
 from tonepath.evaluation import evaluate_rerank
 from tonepath.llm import provider_config
 from tonepath.model_runtime import model_runtime_status
-from tonepath.models import FeedbackType
+from tonepath.models import CandidateScore, FeedbackType
 from tonepath.playback_controller import PlaybackController
 from tonepath.profile import profile_learning_hint
 from tonepath.readiness import LibraryStatus, library_status, readiness_blocks_session, readiness_label, status_next_action
@@ -35,6 +35,7 @@ AMBER_DIM = "#8f7242"
 MUTED = "#a7afa5"
 TEAL = "#6fb7a6"
 TEXT = "#e6e0cf"
+PLAYBACK_MODES = ("Manual", "Continue Path", "Repeat One", "Repeat Path")
 
 
 class TonepathApp(App[None]):
@@ -93,7 +94,6 @@ class TonepathApp(App[None]):
     }
 
     #now-playing,
-    #privacy-badge,
     #why-panel {
         padding: 1 2;
         background: #171b18;
@@ -118,18 +118,11 @@ class TonepathApp(App[None]):
 
     #why-panel {
         height: 1fr;
-        margin-bottom: 1;
         border-title-color: #6fb7a6;
-    }
-
-    #privacy-badge {
-        height: 7;
-        border-title-color: #6fb7a6;
-        color: #6fb7a6;
     }
 
     #event-log {
-        height: 6;
+        height: 8;
         margin: 0 1;
         background: #151914;
         border: round #3a4038;
@@ -140,18 +133,24 @@ class TonepathApp(App[None]):
 
     BINDINGS = [
         Binding("/", "focus_prompt", "Prompt"),
-        Binding("n", "new_prompt", "New"),
-        Binding("space", "play", "Play"),
+        Binding("n", "new_prompt", "New", show=False),
+        Binding("space", "play", "Play", key_display="Space"),
         Binding("p", "play", "Play", show=False),
         Binding("x", "stop_playback", "Stop"),
+        Binding(">", "next_track", "Next", key_display=">"),
+        Binding("<", "previous_track", "Prev", key_display="<"),
         Binding("s", "skip", "Skip"),
         Binding("l", "like", "Like"),
-        Binding("v", "no_vocals", "No vocals"),
-        Binding("a", "codex_audit", "Audit"),
-        Binding("r", "codex_rerank", "Rerank"),
+        Binding("m", "cycle_playback_mode", "Mode"),
+        Binding("i", "ai_assist", "AI Assist"),
+        Binding("?", "toggle_help", "Help", key_display="?"),
+        Binding("e", "toggle_events", "Events", show=False),
+        Binding("v", "no_vocals", "No vocals", show=False),
+        Binding("a", "codex_audit", "Audit", show=False),
+        Binding("r", "codex_rerank", "Rerank", show=False),
         Binding("+", "too_loud", "Quieter", show=False),
         Binding("-", "too_slow", "More energy", show=False),
-        Binding("w", "why", "Why"),
+        Binding("w", "why", "Why", show=False),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -168,6 +167,9 @@ class TonepathApp(App[None]):
         self.readiness = "Needs setup"
         self.readiness_action = "Run `uv run tonepath setup --preset private`."
         self.intent_note: str | None = None
+        self.playback_mode = "Manual"
+        self.events_expanded = False
+        self.right_panel = "why"
 
     def compose(self) -> ComposeResult:
         """Compose the terminal product surface with Textual built-ins."""
@@ -182,7 +184,6 @@ class TonepathApp(App[None]):
                 yield DataTable(id="queue")
             with Vertical(id="right-pane"):
                 yield Static("", id="why-panel")
-                yield Static("", id="privacy-badge")
         yield RichLog(id="event-log", wrap=True, markup=False)
         yield Footer()
 
@@ -246,6 +247,39 @@ class TonepathApp(App[None]):
             self.log_event(f"Skipped to: {candidate.track.title or candidate.track.path.name}")
         self.refresh_session_view()
 
+    def action_next_track(self) -> None:
+        """Move to the next candidate without recording negative feedback."""
+
+        self.navigate_track(1)
+
+    def action_previous_track(self) -> None:
+        """Move to the previous candidate without recording feedback."""
+
+        self.navigate_track(-1)
+
+    def navigate_track(self, direction: int) -> None:
+        """Move through the current queue without changing recommendation feedback."""
+
+        if self.runner is None:
+            self.log_event("Enter a listening goal first.")
+            return
+        was_playing = self.playback_status == "Playing"
+        moved = self.runner.move_next() if direction > 0 else self.runner.move_previous()
+        if not moved:
+            self.log_event("No next track." if direction > 0 else "No previous track.")
+            return
+        candidate = self.runner.current()
+        if candidate is None:
+            self.playback_status = "No tracks"
+            self.refresh_session_view()
+            return
+        label = fallback_track_label(candidate.track.title, candidate.track.path.name)
+        self.log_event(f"Moved to {'next' if direction > 0 else 'previous'} track without feedback: {label}")
+        if was_playing:
+            self.start_current_playback()
+            return
+        self.refresh_session_view()
+
     def action_play(self) -> None:
         """Start playback for the current candidate."""
 
@@ -265,6 +299,37 @@ class TonepathApp(App[None]):
         self.playback_status = "Stopped"
         self.log_event("Stopped playback." if stopped else "No active Tonepath playback.")
         self.refresh_session_view()
+
+    def action_cycle_playback_mode(self) -> None:
+        """Cycle between manual, path, and repeat playback modes."""
+
+        index = PLAYBACK_MODES.index(self.playback_mode)
+        self.playback_mode = PLAYBACK_MODES[(index + 1) % len(PLAYBACK_MODES)]
+        self.log_event(f"Playback mode: {self.playback_mode}.")
+        self.refresh_session_view()
+
+    def action_toggle_help(self) -> None:
+        """Toggle the right panel between explanation and key help."""
+
+        self.right_panel = "why" if self.right_panel == "help" else "help"
+        self.log_event("Showing help panel." if self.right_panel == "help" else "Showing why panel.")
+        self.refresh_session_view()
+
+    def action_ai_assist(self) -> None:
+        """Show local AI Assist status without changing config or calling a model."""
+
+        self.right_panel = "why" if self.right_panel == "ai_assist" else "ai_assist"
+        self.log_event("Showing AI Assist status." if self.right_panel == "ai_assist" else "Showing why panel.")
+        self.refresh_session_view()
+
+    def action_toggle_events(self) -> None:
+        """Expand or collapse the event log panel."""
+
+        self.events_expanded = not self.events_expanded
+        log = self.query_one("#event-log", RichLog)
+        log.styles.height = 16 if self.events_expanded else 8
+        self.log_event("Expanded events." if self.events_expanded else "Collapsed events.")
+        self.apply_panel_titles()
 
     def action_focus_prompt(self) -> None:
         """Focus the prompt input bar."""
@@ -374,6 +439,7 @@ class TonepathApp(App[None]):
             return
         if self.playback is not None:
             self.playback.stop_current()
+        self.right_panel = "why"
         settings = config.load_config()
         plan, note = smart_plan_session(cleaned, settings)
         self.intent_note = note
@@ -425,24 +491,35 @@ class TonepathApp(App[None]):
 
         if self.playback is None or not self.playback.finish_if_exited():
             return
+        if self.runner is not None and self.playback_mode == "Repeat One":
+            self.log_event("Repeating current track.")
+            self.start_current_playback()
+            return
+        if self.runner is not None and self.playback_mode in {"Continue Path", "Repeat Path"}:
+            if self.runner.move_next():
+                self.log_event("Continuing to next track.")
+                self.start_current_playback()
+                return
+            if self.playback_mode == "Repeat Path" and self.runner.move_to_start():
+                self.log_event("Repeating path from the first track.")
+                self.start_current_playback()
+                return
         self.playback_status = "Finished"
         self.log_event("Playback finished.")
         self.refresh_session_view()
 
     def refresh_session_view(self) -> None:
-        """Refresh timeline, queue, why panel, and privacy badge."""
+        """Refresh timeline, queue, why panel, and playback status."""
 
         if self.runner is None:
             self.render_intake()
             return
 
-        self.query_one("#status-bar", Static).update(
-            f"● {self.playback_status}   {self.experience_label()} · {self.library_count()} tracks · / prompt · n new"
-        )
+        self.apply_panel_titles()
+        self.query_one("#status-bar", Static).update(self.status_bar_text())
         self.query_one("#timeline", Static).update(self.timeline_text())
         self.query_one("#now-playing", Static).update(self.now_playing_renderable())
         self.query_one("#why-panel", Static).update(self.why_panel_renderable())
-        self.query_one("#privacy-badge", Static).update(self.privacy_renderable())
         self.refresh_queue()
 
     def refresh_queue(self) -> None:
@@ -495,7 +572,7 @@ class TonepathApp(App[None]):
         bpm = bpm_text(features.bpm if features is not None else None)
         return "\n".join(
             [
-                f"{self.playback_status} | {candidate.phase.label} | {confidence_label(candidate.confidence)}",
+                f"{self.playback_status} | {candidate.phase.label} | {confidence_label(candidate.confidence)} | {self.playback_mode}",
                 truncate(fallback_track_label(candidate.track.title, candidate.track.path.name), 44),
                 display_artist(candidate.track),
                 f"energy {energy} {meter} · bpm {bpm}",
@@ -527,6 +604,10 @@ class TonepathApp(App[None]):
     def why_panel_text(self) -> str:
         """Return a compact explanation preview for the right panel."""
 
+        if self.right_panel == "help":
+            return self.help_panel_text()
+        if self.right_panel == "ai_assist":
+            return self.ai_assist_panel_text()
         if self.runner is None:
             return "Why panel\n\nA verifiable explanation appears after Tonepath creates a listening path."
         candidate = self.runner.current()
@@ -545,8 +626,8 @@ class TonepathApp(App[None]):
         unknown = "none" if not unknowns else " · ".join(unknowns)
         return "\n".join(
             [
-                "Fit",
-                f"{candidate.phase.label} · target {candidate.phase.target_energy:.2f}",
+                "Why",
+                self.human_fit_text(candidate),
                 "Evidence",
                 f"conf {confidence_label(candidate.confidence)} · energy {energy}",
                 f"BPM {bpm} · loud {loudness}",
@@ -555,15 +636,85 @@ class TonepathApp(App[None]):
             ]
         )
 
+    def human_fit_text(self, candidate: CandidateScore) -> str:
+        """Return a short user-facing explanation for the current candidate."""
+
+        notes: list[str] = []
+        if any("semantic risk" in reason for reason in candidate.reasons):
+            notes.append("has a calm-fit caution from local tags")
+        if any("low-stimulation" in reason for reason in candidate.reasons):
+            notes.append("was checked against low-stimulation safety")
+        if any("vocalness feature supports" in reason for reason in candidate.reasons):
+            notes.append("has low-vocal evidence")
+        if any("uplift phase" in reason for reason in candidate.reasons):
+            notes.append("fits the gentle-lift target")
+        if not notes:
+            notes.append("matches this phase better than nearby candidates")
+        return f"{candidate.phase.label}: " + "; ".join(notes[:2]) + "."
+
+    def help_panel_text(self) -> str:
+        """Return the full TUI keyboard help text."""
+
+        return "\n".join(
+            [
+                "Help",
+                "Space / p  play current track",
+                ">          next track, no feedback",
+                "<          previous track, no feedback",
+                "s          skip and record negative feedback",
+                "l          like current track",
+                "v          prefer less vocals",
+                "+          too loud; lower upcoming energy",
+                "-          too slow; raise upcoming energy",
+                "m          playback mode",
+                "i          AI Assist status",
+                "e          expand/collapse events",
+                "w          write full why to events",
+                "a / r      Codex audit / rerank preview",
+                "/ / n      prompt / new request",
+                "x / q      stop / quit",
+            ]
+        )
+
+    def ai_assist_panel_text(self) -> str:
+        """Return a redacted AI Assist status explanation."""
+
+        settings = config.load_config()
+        try:
+            provider = provider_config()
+            provider_text = provider.provider
+            provider_ready = provider.configured
+            key_text = "configured" if provider_ready else f"missing {provider.api_key_env}"
+        except ValueError:
+            provider_ready = False
+            provider_text = "invalid provider"
+            key_text = "provider config invalid"
+        will_call = "yes, on new prompts" if settings.experience.mode == "smart" and settings.privacy.send_to_llm and provider_ready else "no"
+        return "\n".join(
+            [
+                "AI Assist",
+                f"Status: {self.llm_status_label(settings)}",
+                f"Provider: {provider_text}",
+                f"Key: {key_text}",
+                f"Will call LLM: {will_call}",
+                "What it does: parse your listening intent.",
+                "What it will not do: invent BPM, vocalness, tags, or track facts.",
+                "Enable:",
+                "uv run tonepath setup --preset smart --send-to-llm",
+                "Check:",
+                "uv run tonepath llm doctor",
+            ]
+        )
+
     def why_panel_renderable(self) -> Text:
         """Return styled explanation preview content."""
 
         text = Text()
         for line in self.why_panel_text().splitlines():
-            if line in {"Fit", "Evidence"} or line.startswith("Unknown"):
+            if line in {"Why", "Evidence", "Help", "AI Assist"} or line.startswith("Unknown"):
                 if text:
                     text.append("\n")
-                style = TEAL if line == "Evidence" else AMBER if line == "Fit" else MUTED
+                style = TEAL if line == "Evidence" else AMBER if line in {"Why", "Help", "AI Assist"} else MUTED
                 text.append(line, style=f"bold {style}")
                 continue
             text.append("\n")
@@ -581,9 +732,8 @@ class TonepathApp(App[None]):
             guidance = "Ready for playback. Better vocalness is available after `uv run tonepath models setup essentia-tf`."
         else:
             guidance = "Ready for playback. How are you feeling? What should music help you become?"
-        self.query_one("#status-bar", Static).update(
-            f"● Ready   {self.experience_label()} · {self.library_count()} tracks · Enter to plan"
-        )
+        self.apply_panel_titles()
+        self.query_one("#status-bar", Static).update(self.status_bar_text(extra="Enter to plan"))
         self.query_one("#timeline", Static).update("No session yet · feeling → path → feedback → memory")
         self.query_one("#now-playing", Static).update(
             Text.assemble(
@@ -596,7 +746,6 @@ class TonepathApp(App[None]):
         self.query_one("#why-panel", Static).update(
             self.why_panel_renderable()
         )
-        self.query_one("#privacy-badge", Static).update(self.privacy_renderable())
         table = self.query_one("#queue", DataTable)
         table.clear(columns=False)
 
@@ -639,7 +788,7 @@ class TonepathApp(App[None]):
         self.readiness_action = status_next_action(self.library_status, self.model_runtime_ready, settings)
 
     def privacy_text(self) -> str:
-        """Return the local privacy badge text."""
+        """Return local mode, readiness, and external-capability status lines."""
 
         settings = config.load_config()
         llm_state = self.llm_status_label(settings)
@@ -659,27 +808,36 @@ class TonepathApp(App[None]):
         """Return a redacted LLM status for the mode/privacy badge."""
 
         if not settings.privacy.send_to_llm:
-            return "LLM Off"
+            return "AI Assist Off"
         try:
             provider = provider_config()
         except ValueError:
-            return "LLM Missing"
-        return "LLM Configured" if provider.configured else "LLM Missing"
+            return "AI Assist Provider Invalid"
+        return f"AI Assist Ready: {provider.provider}" if provider.configured else f"AI Assist Missing Key: {provider.provider}"
+
+    def status_bar_text(self, extra: str | None = None) -> str:
+        """Return a compact session status line."""
+
+        settings = config.load_config()
+        llm_state = self.llm_status_label(settings)
+        model_state = "Model Ready" if self.model_runtime_ready else "Model Missing"
+        parts = [
+            f"● {self.playback_status}",
+            f"Mode {self.playback_mode}",
+            self.experience_label(),
+            self.readiness,
+            model_state,
+            llm_state,
+            f"{self.library_count()} tracks",
+        ]
+        if extra:
+            parts.append(extra)
+        return "   " + " · ".join(parts)
 
     def experience_label(self) -> str:
         """Return the active normal-user experience label."""
 
         return config.load_config().experience.mode.title()
-
-    def privacy_renderable(self) -> Text:
-        """Return styled local privacy badge content."""
-
-        text = Text()
-        for index, line in enumerate(self.privacy_text().splitlines()):
-            if index:
-                text.append("\n")
-            text.append(line, style=f"bold {TEAL}" if index == 0 else TEAL)
-        return text
 
     def latest_codex_preview(self) -> list[str] | None:
         """Return a compact rerank preview from the newest Codex audit for this session."""
@@ -725,13 +883,12 @@ class TonepathApp(App[None]):
 
         self.query_one("#timeline", Static).update("Tonepath: setup required")
         self.playback_status = "No tracks"
-        self.query_one("#status-bar", Static).update(f"● No tracks   {self.experience_label()} · 0 tracks · setup required")
+        self.query_one("#status-bar", Static).update(self.status_bar_text(extra="setup required"))
         self.query_one("#prompt-input", Input).value = ""
         self.query_one("#now-playing", Static).update(
             "No scanned tracks.\n\nRun:\nuv run tonepath setup --preset private\nuv run tonepath config add-music-dir /path/to/music\nuv run tonepath prepare"
         )
         self.query_one("#why-panel", Static).update("Why panel appears after a local session starts.")
-        self.query_one("#privacy-badge", Static).update(self.privacy_renderable())
         self.log_event("No local tracks found.")
 
     def log_event(self, message: str) -> None:
@@ -744,9 +901,9 @@ class TonepathApp(App[None]):
 
         self.query_one("#now-playing", Static).border_title = "Now"
         self.query_one("#queue", DataTable).border_title = "Queue"
-        self.query_one("#why-panel", Static).border_title = "Why"
-        self.query_one("#privacy-badge", Static).border_title = "Mode / Privacy"
-        self.query_one("#event-log", RichLog).border_title = "Events"
+        titles = {"why": "Why", "help": "Help", "ai_assist": "AI Assist"}
+        self.query_one("#why-panel", Static).border_title = titles.get(self.right_panel, "Why")
+        self.query_one("#event-log", RichLog).border_title = "Events expanded" if self.events_expanded else "Events"
         self.query_one("#prompt-input", Input).border_title = "Request"
 
 

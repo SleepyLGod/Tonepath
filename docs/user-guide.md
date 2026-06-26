@@ -74,14 +74,35 @@ n          new prompt
 Enter      submit prompt when input is focused
 space / p  play current track
 x          stop playback
-s          skip
+s          skip and record negative feedback
+>          next track without feedback
+<          previous track without feedback
 l          like
-v          no-vocals
-+          too-loud
--          too-slow
-w          show why
+v          prefer less vocals
++          too loud; lower upcoming energy
+-          too slow; raise upcoming energy
+m          cycle playback mode
+i          show AI Assist status
+e          expand/collapse event log
+w          write full why to events
+a          show Codex audit command
+r          show latest Codex rerank preview
+?          show full help panel
 q          stop playback and quit
 ```
+
+Playback modes are TUI-local:
+
+```text
+Manual         play the current track and stop when it ends
+Continue Path  automatically continue through the generated path
+Repeat One     replay the current track
+Repeat Path    loop the generated path from the beginning
+```
+
+Use `>` when you simply want to hear the next candidate. Use `s` when the current track is a bad fit and Tonepath should remember that feedback.
+
+`AI Assist Off` means Tonepath is using only local deterministic intent parsing for new prompts. `AI Assist Ready: deepseek` or `AI Assist Ready: qwen` means Smart mode can call the configured LLM for intent parsing on new prompts. AI Assist does not judge BPM, vocalness, tags, artist metadata, or other audio facts; those remain local evidence.
 
 Preview the selected path and `mpv` command without playing audio:
 

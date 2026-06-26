@@ -51,6 +51,30 @@ class SessionRunner:
         start = min(self.current_index + 1, len(self.queue))
         return self.queue[start : start + limit]
 
+    def move_next(self) -> bool:
+        """Move to the next candidate without recording feedback."""
+
+        if self.current_index + 1 >= len(self.queue):
+            return False
+        self.current_index += 1
+        return True
+
+    def move_previous(self) -> bool:
+        """Move to the previous candidate without recording feedback."""
+
+        if self.current_index <= 0:
+            return False
+        self.current_index -= 1
+        return True
+
+    def move_to_start(self) -> bool:
+        """Move to the first candidate without recording feedback."""
+
+        if not self.queue:
+            return False
+        self.current_index = 0
+        return True
+
     def current_explanation(self) -> str:
         """Return an auditable explanation for the current track."""
 
