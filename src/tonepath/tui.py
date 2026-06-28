@@ -188,6 +188,8 @@ class TonepathApp(App[None]):
         Binding("+", "too_loud", "Quieter", show=False),
         Binding("-", "too_slow", "More energy", show=False),
         Binding("w", "why", "Why", show=False),
+        Binding("escape", "blur_prompt", "Done", show=False),
+        Binding("ctrl+q", "quit", "Quit", show=False),
         Binding("q", "quit", "Quit", show=False),
     ]
 
@@ -270,6 +272,15 @@ class TonepathApp(App[None]):
         if self.playback is not None:
             self.playback.stop_current()
         self.exit()
+
+    def action_blur_prompt(self) -> None:
+        """Leave prompt editing without submitting or clearing the request."""
+
+        prompt_input = self.query_one("#prompt-input", Input)
+        if not bool(getattr(prompt_input, "has_focus", False)):
+            return
+        prompt_input.blur()
+        self.query_one("#command-bar", Static).update(self.command_bar_renderable(prompt_focused=False))
 
     def action_skip(self) -> None:
         """Skip the current candidate and refresh upcoming recommendations."""
@@ -805,9 +816,11 @@ class TonepathApp(App[None]):
                 "w          write full why to events",
                 "a / r      Codex audit / rerank preview",
                 "/ / n      prompt / new request",
+                "Esc        finish prompt editing without submitting",
                 "Theme",
                 "t          cycle Warmline / Midnight / High Contrast / Solarized / Catppuccin / Dracula / Jukebox",
-                "q          quit",
+                "q          quit when prompt is not focused",
+                "Ctrl+Q     quit anytime",
             ]
         )
 
@@ -1017,6 +1030,8 @@ class TonepathApp(App[None]):
         ]
         if prompt_focused:
             commands.insert(0, ("Enter", "Submit"))
+            commands.insert(1, ("Esc", "Done"))
+            commands.insert(2, ("Ctrl+Q", "Quit"))
         text = Text()
         for index, (key, label) in enumerate(commands):
             if index:

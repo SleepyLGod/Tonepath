@@ -534,6 +534,9 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("Dracula", app.why_panel_text())
                     self.assertIn("Jukebox", app.why_panel_text())
                     self.assertIn("next track, no feedback", app.why_panel_text())
+                    self.assertIn("finish prompt editing", app.why_panel_text())
+                    self.assertIn("quit when prompt is not focused", app.why_panel_text())
+                    self.assertIn("quit anytime", app.why_panel_text())
                     with patch.object(app, "log_event") as log_event:
                         await pilot.press("e")
                         self.assertTrue(app.events_expanded)
@@ -608,7 +611,67 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("Next", command_bar)
                     self.assertIn("s", command_bar)
                     self.assertIn("Skip", command_bar)
+                    self.assertIn("Esc", command_bar)
+                    self.assertIn("Done", command_bar)
+                    self.assertIn("Ctrl+Q", command_bar)
+                    self.assertIn("Quit", command_bar)
+                    await pilot.press("ctrl+q")
+
+    async def test_tui_q_remains_prompt_text_when_prompt_is_focused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    prompt_input = app.query_one("#prompt-input", Input)
+                    self.assertTrue(prompt_input.has_focus)
                     await pilot.press("q")
+                    self.assertEqual(prompt_input.value, "q")
+                    self.assertIsNone(app.runner)
+                    await pilot.press("ctrl+q")
+
+    async def test_tui_escape_blurs_prompt_without_submitting_or_clearing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    prompt_input = app.query_one("#prompt-input", Input)
+                    prompt_input.value = "quiet focus"
+                    self.assertTrue(prompt_input.has_focus)
+                    await pilot.press("escape")
+                    self.assertFalse(prompt_input.has_focus)
+                    self.assertEqual(prompt_input.value, "quiet focus")
+                    self.assertIsNone(app.runner)
+                    command_bar = app.query_one("#command-bar").render().plain
+                    self.assertNotIn("Submit", command_bar)
+                    self.assertIn("Space", command_bar)
+                    self.assertIn("Help", command_bar)
+                    await pilot.press("q")
+
+    async def test_tui_ctrl_q_quits_from_focused_prompt_and_stops_playback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                with patch.object(MpvAdapter, "start", return_value=FakeProcess()), patch.object(
+                    MpvAdapter, "stop_process"
+                ) as stop:
+                    async with app.run_test() as pilot:
+                        await pilot.press("space")
+                        await pilot.press("/")
+                        self.assertTrue(app.query_one("#prompt-input", Input).has_focus)
+                        await pilot.press("ctrl+q")
+                self.assertTrue(stop.called)
 
     async def test_tui_theme_cycles_and_persists_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
