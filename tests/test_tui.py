@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from unittest.mock import patch
 
 from tonepath import config
 from tonepath.db import TonepathStore
+from tonepath.memory import memory_log_path, memory_profile_path
 from tonepath.models import CandidateScore, SessionPhase, Track, TrackFeatures
 from tonepath.playback import MpvAdapter
 from tonepath.planner import plan_session
@@ -27,7 +29,7 @@ from tonepath.tui import (
 )
 from tonepath.tui_theme import PALETTE_BY_KEY, PALETTES
 from textual.theme import Theme
-from textual.widgets import Input, Static
+from textual.widgets import Input, Static, TextArea
 
 
 class FakeProcess:
@@ -52,6 +54,13 @@ class FinishedProcess(FakeProcess):
 
 
 class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
+    async def wait_for_memory_idle(self, app: TonepathApp, pilot: object) -> None:
+        for _ in range(80):
+            if not app.memory_busy:
+                return
+            await pilot.pause(0.05)
+        self.fail("memory worker did not finish")
+
     def test_builtin_palettes_register_as_textual_themes(self) -> None:
         for palette in PALETTES:
             theme = Theme(
@@ -543,6 +552,41 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                     log_event.assert_not_called()
                     await pilot.press("q")
 
+    async def test_tui_memory_shortcut_is_distinct_from_playback_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                async with app.run_test() as pilot:
+                    self.assertEqual(app.playback_mode, "Manual")
+                    self.assertEqual(app.right_panel, "why")
+
+                    await pilot.press("m")
+                    self.assertEqual(app.playback_mode, "Continue Path")
+                    self.assertEqual(app.right_panel, "why")
+
+                    await pilot.press("ctrl+o")
+                    self.assertEqual(app.playback_mode, "Continue Path")
+                    self.assertEqual(app.right_panel, "memory")
+
+                    command_bar = app.command_bar_renderable().plain
+                    self.assertIn("Ctrl+O", command_bar)
+                    self.assertIn("Memory", command_bar)
+
+                    app.action_toggle_help()
+                    help_text = app.why_panel_text()
+                    self.assertIn("Ctrl+O", help_text)
+                    self.assertIn("letter o", help_text)
+                    self.assertIn("memory notes panel", help_text)
+                    self.assertIn("Ctrl+P", help_text)
+                    self.assertIn("Ctrl+G", help_text)
+                    self.assertNotIn("P          show memory profile", help_text)
+                    self.assertNotIn("G          generate memory suggestions", help_text)
+                    await pilot.press("ctrl+q")
+
     async def test_tui_ai_assist_panel_is_read_only_and_redacted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
@@ -572,6 +616,319 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
 
                 after = config.render_config(config.load_config())
                 self.assertEqual(before, after)
+
+    async def test_tui_memory_panel_toggle_preserves_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    await pilot.press("ctrl+o")
+                    memory_input = app.query_one("#memory-input", TextArea)
+                    self.assertEqual(app.right_panel, "memory")
+                    self.assertTrue(memory_input.display)
+                    self.assertEqual(memory_input.border_title, "Memory")
+                    self.assertIn("private note", str(memory_input.placeholder))
+                    self.assertIn("可以写吐槽", str(memory_input.placeholder))
+                    memory_input.load_text("最近写代码时不想听人声")
+                    await pilot.press("ctrl+o")
+                    self.assertEqual(app.right_panel, "why")
+                    await pilot.press("ctrl+o")
+                    self.assertEqual(app.query_one("#memory-input", TextArea).text, "最近写代码时不想听人声")
+                    await pilot.press("ctrl+q")
+
+    async def test_tui_memory_panel_switch_preserves_latest_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    await pilot.press("ctrl+o")
+                    app.query_one("#memory-input", TextArea).load_text("draft typed before switching panels")
+                    app.right_panel = "memory_profile"
+                    app.refresh_session_view()
+                    await pilot.press("ctrl+o")
+                    self.assertEqual(app.query_one("#memory-input", TextArea).text, "draft typed before switching panels")
+                    await pilot.press("ctrl+q")
+
+    async def test_tui_memory_save_writes_log_without_profile_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    app.action_toggle_memory()
+                    app.query_one("#memory-input", TextArea).load_text("树洞：写代码时人声会让我更乱")
+                    app.action_save_memory()
+                    self.assertTrue(memory_log_path().exists())
+                    self.assertIn("写代码", memory_log_path().read_text(encoding="utf-8"))
+                    self.assertEqual(app.query_one("#memory-input", TextArea).text, "")
+                    self.assertIn("Memory saved locally", app.memory_status_message)
+                    await pilot.press("ctrl+q")
+
+                store = TonepathStore()
+                try:
+                    summary = store.profile_summary()
+                finally:
+                    store.close()
+                self.assertEqual(summary["feedback"], 0)
+                self.assertEqual(summary["sessions"], 0)
+                self.assertEqual(summary["profile_rules"], 0)
+
+    async def test_tui_memory_save_and_learn_updates_profile_when_ai_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            env = {"TONEPATH_HOME": str(home), "TONEPATH_LLM_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": "secret"}
+            with patch.dict(os.environ, env, clear=True):
+                config.write_config(config.preset_config("smart", send_to_llm=True))
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "b.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                with patch("tonepath.tui.consolidate_memory_with_llm", return_value="# Tonepath Memory Profile\n\nPrefers low vocals while coding.\n"):
+                    async with app.run_test() as pilot:
+                        before_queue = [candidate.track.id for candidate in app.runner.queue] if app.runner is not None else []
+                        app.action_toggle_memory()
+                        app.query_one("#memory-input", TextArea).load_text("Coding needs low vocals and low stimulation.")
+                        app.action_save_and_learn_memory()
+                        await self.wait_for_memory_idle(app, pilot)
+                        after_queue = [candidate.track.id for candidate in app.runner.queue] if app.runner is not None else []
+                        self.assertEqual(before_queue, after_queue)
+                        self.assertTrue(memory_profile_path().exists())
+                        self.assertIn("low vocals", memory_profile_path().read_text(encoding="utf-8"))
+                        self.assertIn("Memory profile updated", app.memory_status_message)
+                        await pilot.press("q")
+
+    async def test_tui_memory_save_and_learn_saves_log_when_ai_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}, clear=True):
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    app.action_toggle_memory()
+                    app.query_one("#memory-input", TextArea).load_text("Save this even if AI is off.")
+                    app.action_save_and_learn_memory()
+                    self.assertTrue(memory_log_path().exists())
+                    self.assertFalse(memory_profile_path().exists())
+                    self.assertIn("AI Assist is not ready", app.memory_status_message)
+                    self.assertIn("AI Assist is not ready", str(app.query_one("#memory-input", TextArea).border_subtitle))
+                    await pilot.press("ctrl+q")
+
+    async def test_tui_memory_learn_stops_when_nonempty_draft_fails_to_save(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            env = {"TONEPATH_HOME": str(home), "TONEPATH_LLM_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": "secret"}
+            with patch.dict(os.environ, env, clear=True):
+                config.write_config(config.preset_config("smart", send_to_llm=True))
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    app.action_toggle_memory()
+                    app.query_one("#memory-input", TextArea).load_text("this should not learn when save fails")
+                    with patch("tonepath.tui.add_memory_log", side_effect=OSError("disk full")), patch.object(app, "start_memory_worker") as worker:
+                        app.action_save_and_learn_memory()
+                    worker.assert_not_called()
+                    self.assertIn("disk full", app.memory_status_message)
+                    self.assertIn("disk full", str(app.query_one("#memory-input", TextArea).border_subtitle))
+                    await pilot.press("ctrl+q")
+
+    async def test_tui_memory_learn_allows_empty_draft_with_existing_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            env = {"TONEPATH_HOME": str(home), "TONEPATH_LLM_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": "secret"}
+            with patch.dict(os.environ, env, clear=True):
+                config.write_config(config.preset_config("smart", send_to_llm=True))
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+                memory_log_path().parent.mkdir(parents=True, exist_ok=True)
+                memory_log_path().write_text(
+                    '{"body":"existing saved memory","created_at":"2026-01-01T00:00:00+00:00","id":"mem-000001","sequence":1,"source":"test"}\n',
+                    encoding="utf-8",
+                )
+
+                app = TonepathApp()
+                with patch("tonepath.tui.consolidate_memory_with_llm", return_value="# Tonepath Memory Profile\n\nExisting saved memory.\n"):
+                    async with app.run_test() as pilot:
+                        app.action_toggle_memory()
+                        self.assertEqual(app.query_one("#memory-input", TextArea).text, "")
+                        app.action_save_and_learn_memory()
+                        await self.wait_for_memory_idle(app, pilot)
+                        self.assertTrue(memory_profile_path().exists())
+                        self.assertIn("Memory profile updated", app.memory_status_message)
+                        await pilot.press("ctrl+q")
+
+    async def test_tui_memory_learn_runs_in_background(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            env = {"TONEPATH_HOME": str(home), "TONEPATH_LLM_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": "secret"}
+            with patch.dict(os.environ, env, clear=True):
+                config.write_config(config.preset_config("smart", send_to_llm=True))
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "b.mp3")
+                store.close()
+                started = threading.Event()
+                release = threading.Event()
+
+                def slow_consolidate(_evidence: dict[str, object]) -> str:
+                    started.set()
+                    release.wait(2)
+                    return "# Tonepath Memory Profile\n\nKeep coding calm.\n"
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                with patch("tonepath.tui.consolidate_memory_with_llm", side_effect=slow_consolidate):
+                    async with app.run_test() as pilot:
+                        app.action_toggle_memory()
+                        app.query_one("#memory-input", TextArea).load_text("Long memory update should not block playback controls.")
+                        app.action_save_and_learn_memory()
+                        for _ in range(40):
+                            if started.is_set():
+                                break
+                            await pilot.pause(0.05)
+                        self.assertTrue(started.is_set())
+                        self.assertTrue(app.memory_busy)
+                        self.assertIn("background", app.memory_status_message)
+                        await pilot.press("ctrl+o")
+                        self.assertEqual(app.right_panel, "why")
+                        await pilot.press("m")
+                        self.assertEqual(app.playback_mode, "Continue Path")
+                        release.set()
+                        await self.wait_for_memory_idle(app, pilot)
+                        self.assertIn("Memory profile updated", app.memory_status_message)
+                        await pilot.press("q")
+
+    async def test_tui_memory_profile_does_not_clear_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                memory_profile_path().parent.mkdir(parents=True)
+                memory_profile_path().write_text("# Tonepath Memory Profile\n\nKeep coding calm.\n", encoding="utf-8")
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    app.action_toggle_memory()
+                    app.query_one("#memory-input", TextArea).load_text("draft survives")
+                    await pilot.press("ctrl+p")
+                    self.assertEqual(app.right_panel, "memory_profile")
+                    self.assertIn("Keep coding calm", app.query_one("#memory-profile", Static).render().plain)
+                    app.action_toggle_memory()
+                    self.assertEqual(app.query_one("#memory-input", TextArea).text, "draft survives")
+                    await pilot.press("ctrl+q")
+
+    async def test_tui_memory_suggestions_apply_for_future_requests_only(self) -> None:
+        suggestion = {
+            "suggestion_id": "focus-low-vocal",
+            "scope": "focus",
+            "rule_type": "prefer_lower_vocalness",
+            "target": "vocalness",
+            "threshold": 0.35,
+            "weight": 0.6,
+            "confidence": "medium",
+            "rationale": "Writing memory prefers low-vocal music.",
+            "evidence_count": 2,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            env = {"TONEPATH_HOME": str(home), "TONEPATH_LLM_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": "secret"}
+            with patch.dict(os.environ, env, clear=True):
+                config.write_config(config.preset_config("smart", send_to_llm=True))
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "b.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                with patch("tonepath.tui.memory_suggestions_from_llm", return_value=[suggestion]):
+                    async with app.run_test() as pilot:
+                        before_queue = [candidate.track.id for candidate in app.runner.queue] if app.runner is not None else []
+                        await pilot.press("ctrl+g")
+                        await self.wait_for_memory_idle(app, pilot)
+                        self.assertEqual(app.right_panel, "memory_suggestions")
+                        self.assertTrue(app.memory_suggestions)
+                        app.action_apply_memory_suggestion()
+                        after_queue = [candidate.track.id for candidate in app.runner.queue] if app.runner is not None else []
+                        self.assertEqual(before_queue, after_queue)
+                        self.assertIn("future requests", app.memory_status_message)
+                        await pilot.press("q")
+
+                store = TonepathStore()
+                try:
+                    self.assertEqual(store.profile_summary()["profile_rules"], 1)
+                finally:
+                    store.close()
+
+    async def test_tui_memory_suggestions_do_not_start_duplicate_workers(self) -> None:
+        suggestion = {
+            "suggestion_id": "focus-low-vocal",
+            "scope": "focus",
+            "rule_type": "prefer_lower_vocalness",
+            "target": "vocalness",
+            "threshold": 0.35,
+            "weight": 0.6,
+            "confidence": "medium",
+            "rationale": "Writing memory prefers low-vocal music.",
+            "evidence_count": 2,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            env = {"TONEPATH_HOME": str(home), "TONEPATH_LLM_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": "secret"}
+            with patch.dict(os.environ, env, clear=True):
+                config.write_config(config.preset_config("smart", send_to_llm=True))
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "b.mp3")
+                store.close()
+                started = threading.Event()
+                release = threading.Event()
+                call_count = 0
+
+                def slow_suggestions(_evidence: dict[str, object]) -> list[dict[str, object]]:
+                    nonlocal call_count
+                    call_count += 1
+                    started.set()
+                    release.wait(2)
+                    return [suggestion]
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                with patch("tonepath.tui.memory_suggestions_from_llm", side_effect=slow_suggestions):
+                    async with app.run_test() as pilot:
+                        await pilot.press("ctrl+g")
+                        for _ in range(40):
+                            if started.is_set():
+                                break
+                            await pilot.pause(0.05)
+                        self.assertTrue(started.is_set())
+                        await pilot.press("ctrl+g")
+                        self.assertEqual(call_count, 1)
+                        self.assertIn("already running", app.memory_status_message)
+                        await pilot.press("m")
+                        self.assertEqual(app.playback_mode, "Continue Path")
+                        release.set()
+                        await self.wait_for_memory_idle(app, pilot)
+                        self.assertEqual(call_count, 1)
+                        self.assertTrue(app.memory_suggestions)
+                        await pilot.press("q")
 
     async def test_tui_continue_path_starts_next_track_on_finish(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

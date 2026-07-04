@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from rich.text import Text
@@ -14,10 +15,19 @@ from tonepath.display import display_artist, fallback_track_label
 from tonepath.experience import smart_plan_session
 from tonepath.evaluation import evaluate_rerank
 from tonepath.llm import provider_config
+from tonepath.memory import (
+    add_memory_log,
+    build_memory_evidence,
+    consolidate_memory_with_llm,
+    memory_profile_text,
+    memory_suggestions_from_llm,
+    save_consolidated_memory_profile,
+    write_memory_evidence,
+)
 from tonepath.model_runtime import model_runtime_status
 from tonepath.models import CandidateScore, FeedbackType
 from tonepath.playback_controller import PlaybackController
-from tonepath.profile import profile_learning_hint
+from tonepath.profile import apply_suggestion, apply_suggestion_group, list_pending_suggestions, pending_suggestion_groups, profile_learning_hint, save_suggestions
 from tonepath.readiness import LibraryStatus, library_status, readiness_blocks_session, readiness_label, status_next_action
 from tonepath.session import SessionRunner
 from tonepath.tui_theme import PALETTE_BY_KEY, PALETTES, TonepathPalette, next_theme, normalize_theme
@@ -27,13 +37,23 @@ try:
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical
     from textual.theme import Theme
-    from textual.widgets import DataTable, Header, Input, RichLog, Static
+    from textual.worker import Worker, WorkerState
+    from textual.widgets import DataTable, Header, Input, RichLog, Static, TextArea
 except ImportError as exc:  # pragma: no cover - exercised before dependency install
     raise RuntimeError("Textual is not installed. Run `uv sync` before launching the TUI.") from exc
 
 
 PROMPT_PLACEHOLDER = "我现在很烦，想半小时后进入写代码状态，不要人声"
 PLAYBACK_MODES = ("Manual", "Continue Path", "Repeat One", "Repeat Path")
+
+
+@dataclass(frozen=True)
+class MemoryWorkerResult:
+    """Result payload returned from a background memory task."""
+
+    kind: str
+    status_message: str
+    event_message: str
 
 
 class TonepathApp(App[None]):
@@ -103,7 +123,10 @@ class TonepathApp(App[None]):
     }
 
     #now-playing,
-    #why-panel {
+    #why-panel,
+    #memory-input,
+    #memory-profile,
+    #memory-suggestions {
         padding: 1 2;
         background: $panel;
         border: round $surface;
@@ -145,9 +168,17 @@ class TonepathApp(App[None]):
         background: $surface;
     }
 
-    #why-panel {
+    #why-panel,
+    #memory-input,
+    #memory-profile,
+    #memory-suggestions {
         height: 1fr;
         border-title-color: $secondary;
+    }
+
+    #memory-input:focus {
+        border: round $accent;
+        border-title-color: $accent;
     }
 
     #event-log {
@@ -178,6 +209,17 @@ class TonepathApp(App[None]):
         Binding("s", "skip", "Skip"),
         Binding("l", "like", "Like"),
         Binding("m", "cycle_playback_mode", "Mode"),
+        Binding("ctrl+o", "toggle_memory", "Memory", key_display="Ctrl+O", show=False, priority=True),
+        Binding("shift+m", "toggle_memory", "Memory", key_display="M", show=False, priority=True),
+        Binding("ctrl+s", "save_memory", "Save memory", show=False, priority=True),
+        Binding("ctrl+enter", "save_and_learn_memory", "Save + learn", show=False, priority=True),
+        Binding("ctrl+p", "memory_profile", "Memory profile", show=False, priority=True),
+        Binding("ctrl+g", "memory_suggestions", "Memory suggestions", show=False, priority=True),
+        Binding("shift+p", "memory_profile", "Profile", key_display="P", show=False),
+        Binding("shift+g", "memory_suggestions", "Suggestions", key_display="G", show=False),
+        Binding("j", "next_memory_suggestion", "Next suggestion", show=False),
+        Binding("k", "previous_memory_suggestion", "Previous suggestion", show=False),
+        Binding("enter", "apply_memory_suggestion", "Apply suggestion", show=False),
         Binding("t", "cycle_theme", "Theme"),
         Binding("i", "ai_assist", "AI Assist", show=False),
         Binding("?", "toggle_help", "Help", key_display="?"),
@@ -210,6 +252,12 @@ class TonepathApp(App[None]):
         self.playback_mode = "Manual"
         self.events_expanded = False
         self.right_panel = "why"
+        self.memory_draft = ""
+        self.memory_busy = False
+        self.memory_worker_kind: str | None = None
+        self.memory_status_message = ""
+        self.memory_suggestions: list[dict[str, object]] = []
+        self.selected_memory_suggestion_index = 0
         self.pulse_tick = 0
         self.theme_key = normalize_theme(config.load_config().ui.theme)
         self.palette = PALETTE_BY_KEY[self.theme_key]
@@ -227,6 +275,15 @@ class TonepathApp(App[None]):
                 yield DataTable(id="queue")
             with Vertical(id="right-pane"):
                 yield Static("", id="why-panel")
+                yield TextArea(
+                    "",
+                    id="memory-input",
+                    soft_wrap=True,
+                    show_line_numbers=False,
+                    placeholder="Write a private note, rant, monologue, or listening context... / 可以写吐槽、独白、心情和偏好",
+                )
+                yield Static("", id="memory-profile")
+                yield DataTable(id="memory-suggestions")
         yield RichLog(id="event-log", wrap=True, markup=False)
         yield Static("", id="command-bar")
 
@@ -239,6 +296,9 @@ class TonepathApp(App[None]):
         self.apply_panel_titles()
         table = self.query_one("#queue", DataTable)
         table.add_columns("#", "Phase", "Track", "Fit", "Energy", "Conf")
+        suggestions = self.query_one("#memory-suggestions", DataTable)
+        suggestions.add_columns("#", "Type", "Scope", "Confidence", "Rationale")
+        self.show_right_panel()
 
         self.model_runtime_ready = model_runtime_status().ready
         self.refresh_readiness()
@@ -392,6 +452,8 @@ class TonepathApp(App[None]):
     def action_toggle_help(self) -> None:
         """Toggle the right panel between explanation and key help."""
 
+        if self.right_panel == "memory":
+            self.sync_memory_draft()
         self.right_panel = "why" if self.right_panel == "help" else "help"
         self.log_event("Showing help panel." if self.right_panel == "help" else "Showing why panel.")
         self.refresh_session_view()
@@ -399,8 +461,239 @@ class TonepathApp(App[None]):
     def action_ai_assist(self) -> None:
         """Show local AI Assist status without changing config or calling a model."""
 
+        if self.right_panel == "memory":
+            self.sync_memory_draft()
         self.right_panel = "why" if self.right_panel == "ai_assist" else "ai_assist"
         self.log_event("Showing AI Assist status." if self.right_panel == "ai_assist" else "Showing why panel.")
+        self.refresh_session_view()
+
+    def action_toggle_memory(self) -> None:
+        """Toggle the private memory notes panel without losing its draft."""
+
+        if self.right_panel == "memory":
+            self.sync_memory_draft()
+            self.right_panel = "why"
+        else:
+            self.right_panel = "memory"
+        self.refresh_session_view()
+        if self.right_panel == "memory":
+            self.query_one("#memory-input", TextArea).focus()
+            self.query_one("#command-bar", Static).update(self.command_bar_renderable(prompt_focused=False))
+
+    def action_save_memory(self) -> None:
+        """Save the current memory draft to the local memory log only."""
+
+        if not self.save_memory_draft():
+            return
+        self.memory_status_message = "Memory saved locally. Use Ctrl+Enter when you want to update the profile."
+        self.right_panel = "memory"
+        self.refresh_session_view()
+
+    def action_save_and_learn_memory(self) -> None:
+        """Save the current memory draft and consolidate new logs with explicit AI Assist."""
+
+        if self.memory_busy:
+            self.show_memory_task_busy("memory")
+            return
+        self.sync_memory_draft()
+        had_draft = bool(self.memory_draft.strip())
+        saved = self.save_memory_draft(allow_empty=True)
+        if had_draft and not saved:
+            return
+        settings = config.load_config()
+        if not self.llm_ready_for_memory(settings):
+            if saved:
+                self.memory_status_message = "Memory saved locally. AI Assist is not ready, so profile was not updated."
+            else:
+                self.memory_status_message = "AI Assist is not ready. Run setup smart with send-to-llm, then try again."
+            self.right_panel = "memory"
+            self.log_event(self.memory_status_message)
+            self.refresh_session_view()
+            return
+        if self.store is None:
+            self.memory_status_message = "Local store is unavailable."
+            self.right_panel = "memory"
+            self.refresh_session_view()
+            return
+        self.start_memory_worker("consolidate", "memory", self.consolidate_memory_job)
+
+    def action_memory_profile(self) -> None:
+        """Show the consolidated memory profile without clearing the memory draft."""
+
+        self.sync_memory_draft()
+        self.right_panel = "memory_profile"
+        self.refresh_session_view()
+
+    def action_memory_suggestions(self) -> None:
+        """Generate memory-derived profile suggestions without applying them."""
+
+        if self.memory_busy:
+            self.show_memory_task_busy("memory_suggestions")
+            return
+        self.sync_memory_draft()
+        settings = config.load_config()
+        if not self.llm_ready_for_memory(settings):
+            self.memory_status_message = "AI Assist is not ready. Run `uv run tonepath setup --preset smart --send-to-llm`."
+            self.right_panel = "memory_suggestions"
+            self.refresh_session_view()
+            return
+        if self.store is None:
+            self.memory_status_message = "Local store is unavailable."
+            self.right_panel = "memory_suggestions"
+            self.refresh_session_view()
+            return
+        self.start_memory_worker("suggestions", "memory_suggestions", self.memory_suggestions_job)
+
+    def start_memory_worker(self, kind: str, panel: str, work: Any) -> None:
+        """Start one background memory task without blocking playback controls."""
+
+        self.memory_busy = True
+        self.memory_worker_kind = kind
+        self.right_panel = panel
+        self.memory_status_message = "Memory learning in background... playback continues."
+        self.refresh_session_view()
+        self.log_event(self.memory_status_message)
+        self.run_worker(
+            work,
+            name=f"memory-{kind}",
+            group="memory",
+            description=self.memory_status_message,
+            exit_on_error=False,
+            exclusive=True,
+            thread=True,
+        )
+
+    def show_memory_task_busy(self, panel: str) -> None:
+        """Tell the user an existing memory task is still running."""
+
+        self.right_panel = panel
+        self.memory_status_message = "Memory task already running. Playback continues."
+        self.refresh_session_view()
+
+    def consolidate_memory_job(self) -> MemoryWorkerResult:
+        """Build evidence and consolidate memory profile off the TUI thread."""
+
+        store = TonepathStore()
+        try:
+            evidence = build_memory_evidence(store)
+            new_logs = evidence.get("new_memory_logs", [])
+            if not isinstance(new_logs, list) or not new_logs:
+                return MemoryWorkerResult(
+                    kind="consolidate",
+                    status_message="No new memory logs to consolidate.",
+                    event_message="No new memory logs to consolidate. Current queue is unchanged.",
+                )
+            evidence_path = write_memory_evidence(evidence)
+            profile_markdown = consolidate_memory_with_llm(evidence)
+            save_consolidated_memory_profile(store, evidence, profile_markdown)
+            return MemoryWorkerResult(
+                kind="consolidate",
+                status_message="Memory profile updated. Suggestions are still advisory until applied.",
+                event_message=f"Memory profile updated from {evidence_path}. Current queue is unchanged.",
+            )
+        except RuntimeError as exc:
+            message = f"Memory saved, but profile update failed: {exc}"
+            return MemoryWorkerResult(kind="consolidate", status_message=message, event_message=message)
+        finally:
+            store.close()
+
+    def memory_suggestions_job(self) -> MemoryWorkerResult:
+        """Generate pending memory suggestions off the TUI thread."""
+
+        store = TonepathStore()
+        try:
+            evidence = build_memory_evidence(store)
+            evidence_path = write_memory_evidence(evidence)
+            suggestions = memory_suggestions_from_llm(evidence)
+            save_suggestions(evidence, suggestions, source="memory-llm")
+            if suggestions:
+                status = f"Generated {len(suggestions)} pending memory suggestion(s)."
+            else:
+                status = "No memory suggestions yet; more evidence is needed."
+            return MemoryWorkerResult(
+                kind="suggestions",
+                status_message=status,
+                event_message=f"Memory suggestions checked: {evidence_path}. Current queue is unchanged.",
+            )
+        except RuntimeError as exc:
+            message = f"Memory suggestions failed: {exc}"
+            return MemoryWorkerResult(kind="suggestions", status_message=message, event_message=message)
+        finally:
+            store.close()
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        """Refresh memory panels when a background memory task completes."""
+
+        worker = event.worker
+        if worker.group != "memory" or event.state not in {WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED}:
+            return
+        self.memory_busy = False
+        self.memory_worker_kind = None
+        if event.state == WorkerState.SUCCESS:
+            result = worker.result
+            if isinstance(result, MemoryWorkerResult):
+                self.memory_status_message = result.status_message
+                if result.kind == "suggestions":
+                    self.load_memory_suggestions()
+                self.log_event(result.event_message)
+            else:
+                self.memory_status_message = "Memory task finished, but returned an unreadable result."
+                self.log_event(self.memory_status_message)
+        elif event.state == WorkerState.ERROR:
+            self.memory_status_message = f"Memory task failed: {worker.error}. Try the CLI memory command as a fallback."
+            self.log_event(self.memory_status_message)
+        else:
+            self.memory_status_message = "Memory task was cancelled. Current queue is unchanged."
+            self.log_event(self.memory_status_message)
+        self.refresh_session_view()
+
+    def action_next_memory_suggestion(self) -> None:
+        """Move down in the memory suggestion list."""
+
+        if self.right_panel != "memory_suggestions":
+            return
+        items = self.memory_suggestion_items()
+        if not items:
+            return
+        self.selected_memory_suggestion_index = min(self.selected_memory_suggestion_index + 1, len(items) - 1)
+        self.refresh_memory_suggestions()
+
+    def action_previous_memory_suggestion(self) -> None:
+        """Move up in the memory suggestion list."""
+
+        if self.right_panel != "memory_suggestions":
+            return
+        items = self.memory_suggestion_items()
+        if not items:
+            return
+        self.selected_memory_suggestion_index = max(self.selected_memory_suggestion_index - 1, 0)
+        self.refresh_memory_suggestions()
+
+    def action_apply_memory_suggestion(self) -> None:
+        """Apply the selected memory-derived suggestion for future requests only."""
+
+        if self.right_panel != "memory_suggestions" or self.store is None:
+            return
+        items = self.memory_suggestion_items()
+        if not items:
+            self.memory_status_message = "No pending memory suggestions to apply."
+            self.refresh_memory_suggestions()
+            return
+        index = min(self.selected_memory_suggestion_index, len(items) - 1)
+        item = items[index]
+        try:
+            if item["kind"] == "group":
+                result = apply_suggestion_group(self.store, str(item["id"]))
+                applied = ", ".join(str(value) for value in result.get("applied", [])) or "none"
+                skipped = ", ".join(str(value) for value in result.get("skipped", [])) or "none"
+                self.memory_status_message = f"Applied group {item['id']} for future requests. Applied: {applied}; skipped: {skipped}."
+            else:
+                rule = apply_suggestion(self.store, str(item["id"]))
+                self.memory_status_message = f"Applied {rule.rule_type} for future requests."
+        except RuntimeError as exc:
+            self.memory_status_message = str(exc)
+        self.load_memory_suggestions()
+        self.log_event(f"{self.memory_status_message} Rerun Request to use it.")
         self.refresh_session_view()
 
     def action_toggle_events(self) -> None:
@@ -455,6 +748,8 @@ class TonepathApp(App[None]):
     def action_why(self) -> None:
         """Write the current auditable explanation to the event log."""
 
+        if self.right_panel == "memory":
+            self.sync_memory_draft()
         if self.runner is None:
             self.log_event("Enter a listening goal first.")
             return
@@ -614,7 +909,7 @@ class TonepathApp(App[None]):
         self.query_one("#status-bar", Static).update(self.status_bar_text())
         self.query_one("#timeline", Static).update(self.timeline_renderable())
         self.query_one("#now-playing", Static).update(self.now_playing_renderable())
-        self.query_one("#why-panel", Static).update(self.why_panel_renderable())
+        self.refresh_right_panel()
         self.query_one("#command-bar", Static).update(self.command_bar_renderable())
         self.refresh_queue()
 
@@ -811,6 +1106,13 @@ class TonepathApp(App[None]):
                 "+          too loud; lower upcoming energy",
                 "-          too slow; raise upcoming energy",
                 "Tools",
+                "Ctrl+O     memory notes panel (Control + letter o, not zero)",
+                "Ctrl+S     save memory locally",
+                "Ctrl+Enter save memory and update profile",
+                "Ctrl+P     show memory profile",
+                "Ctrl+G     generate memory suggestions",
+                "j / k      move suggestion selection",
+                "Enter      apply selected suggestion",
                 "i          AI Assist status",
                 "e          expand/collapse events",
                 "w          write full why to events",
@@ -902,9 +1204,7 @@ class TonepathApp(App[None]):
                 (PROMPT_PLACEHOLDER, self.palette.primary),
             )
         )
-        self.query_one("#why-panel", Static).update(
-            self.why_panel_renderable()
-        )
+        self.refresh_right_panel()
         table = self.query_one("#queue", DataTable)
         table.clear(columns=False)
 
@@ -1025,9 +1325,16 @@ class TonepathApp(App[None]):
             ("s", "Skip"),
             ("l", "Like"),
             ("m", "Mode"),
+            ("Ctrl+O", "Memory"),
             ("t", "Theme"),
             ("?", "Help"),
         ]
+        if self.right_panel == "memory":
+            commands.insert(0, ("Ctrl+S", "Save"))
+            commands.insert(1, ("Ctrl+Enter", "Save+Learn"))
+        elif self.right_panel == "memory_suggestions":
+            commands.insert(0, ("Enter", "Apply"))
+            commands.insert(1, ("j/k", "Move"))
         if prompt_focused:
             commands.insert(0, ("Enter", "Submit"))
             commands.insert(1, ("Esc", "Done"))
@@ -1125,7 +1432,7 @@ class TonepathApp(App[None]):
         self.query_one("#now-playing", Static).update(
             "No scanned tracks.\n\nRun:\nuv run tonepath setup --preset private\nuv run tonepath config add-music-dir /path/to/music\nuv run tonepath prepare"
         )
-        self.query_one("#why-panel", Static).update("Why panel appears after a local session starts.")
+        self.refresh_right_panel()
         self.query_one("#command-bar", Static).update(self.command_bar_renderable(prompt_focused=True))
         self.log_event("No local tracks found.")
 
@@ -1141,9 +1448,165 @@ class TonepathApp(App[None]):
         self.query_one("#queue", DataTable).border_title = "Queue"
         titles = {"why": "Why", "help": "Help", "ai_assist": "AI Assist"}
         self.query_one("#why-panel", Static).border_title = titles.get(self.right_panel, "Why")
+        memory_input = self.query_one("#memory-input", TextArea)
+        memory_input.border_title = "Memory"
+        memory_input.border_subtitle = self.memory_status_message if self.right_panel == "memory" else ""
+        self.query_one("#memory-profile", Static).border_title = "Memory Profile"
+        self.query_one("#memory-suggestions", DataTable).border_title = "Suggestions"
         self.query_one("#event-log", RichLog).border_title = "Events expanded" if self.events_expanded else "Events"
         self.query_one("#prompt-input", Input).border_title = "Request"
         self.query_one("#timeline", Static).border_title = "Path"
+
+    def show_right_panel(self) -> None:
+        """Show only the widget backing the active right-panel mode."""
+
+        memory_input = self.query_one("#memory-input", TextArea)
+        if self.right_panel != "memory" and bool(getattr(memory_input, "display", False)):
+            self.memory_draft = memory_input.text
+        self.query_one("#why-panel", Static).display = self.right_panel in {"why", "help", "ai_assist"}
+        memory_input.display = self.right_panel == "memory"
+        self.query_one("#memory-profile", Static).display = self.right_panel == "memory_profile"
+        self.query_one("#memory-suggestions", DataTable).display = self.right_panel == "memory_suggestions"
+
+    def refresh_right_panel(self) -> None:
+        """Refresh the active right-panel widget."""
+
+        self.apply_panel_titles()
+        self.show_right_panel()
+        if self.right_panel in {"why", "help", "ai_assist"}:
+            self.query_one("#why-panel", Static).update(self.why_panel_renderable())
+        elif self.right_panel == "memory":
+            memory_input = self.query_one("#memory-input", TextArea)
+            if bool(getattr(memory_input, "has_focus", False)):
+                self.memory_draft = memory_input.text
+            elif memory_input.text != self.memory_draft:
+                memory_input.load_text(self.memory_draft)
+        elif self.right_panel == "memory_profile":
+            self.query_one("#memory-profile", Static).update(self.memory_profile_renderable())
+        elif self.right_panel == "memory_suggestions":
+            self.refresh_memory_suggestions()
+
+    def sync_memory_draft(self) -> None:
+        """Copy the current memory text area content into app state."""
+
+        try:
+            self.memory_draft = self.query_one("#memory-input", TextArea).text
+        except Exception:
+            return
+
+    def save_memory_draft(self, allow_empty: bool = False) -> bool:
+        """Persist the current memory draft to local memory logs."""
+
+        self.sync_memory_draft()
+        body = self.memory_draft.strip()
+        if not body:
+            if not allow_empty:
+                self.memory_status_message = "Tree-hole draft is empty."
+                self.right_panel = "memory"
+                self.log_event(self.memory_status_message)
+                self.refresh_session_view()
+            return False
+        try:
+            record = add_memory_log(body, source="tui")
+        except (OSError, ValueError) as exc:
+            self.memory_status_message = str(exc)
+            self.right_panel = "memory"
+            self.log_event(self.memory_status_message)
+            self.refresh_session_view()
+            return False
+        self.memory_draft = ""
+        self.query_one("#memory-input", TextArea).load_text("")
+        self.log_event(f"Memory saved: {record['id']}. Current queue is unchanged.")
+        return True
+
+    def llm_ready_for_memory(self, settings: config.TonepathConfig) -> bool:
+        """Return whether TUI memory learning may call the configured LLM."""
+
+        if not settings.privacy.send_to_llm:
+            return False
+        try:
+            provider = provider_config()
+        except ValueError:
+            return False
+        return provider.configured
+
+    def memory_profile_renderable(self) -> Text:
+        """Return styled memory profile text plus current TUI status."""
+
+        text = Text()
+        if self.memory_status_message:
+            text.append("Status\n", style=f"bold {self.palette.primary}")
+            text.append(f"{self.memory_status_message}\n\n", style=self.palette.text)
+        text.append(memory_profile_text(), style=self.palette.text)
+        return text
+
+    def load_memory_suggestions(self) -> None:
+        """Load pending profile suggestions for the TUI memory panel."""
+
+        self.memory_suggestions = self.memory_suggestion_items()
+        if self.selected_memory_suggestion_index >= len(self.memory_suggestions):
+            self.selected_memory_suggestion_index = max(len(self.memory_suggestions) - 1, 0)
+
+    def memory_suggestion_items(self) -> list[dict[str, object]]:
+        """Return grouped and individual pending suggestions for display."""
+
+        items: list[dict[str, object]] = []
+        for group in pending_suggestion_groups():
+            items.append(
+                {
+                    "kind": "group",
+                    "id": str(group.get("group_id", "--")),
+                    "scope": str(group.get("scope", "--")),
+                    "confidence": str(group.get("confidence", "--")),
+                    "rationale": str(group.get("rationale") or group.get("hint") or ""),
+                }
+            )
+        grouped_ids: set[str] = set()
+        for group in pending_suggestion_groups():
+            ids = group.get("suggestion_ids")
+            if isinstance(ids, list):
+                grouped_ids.update(str(item) for item in ids)
+        for suggestion in list_pending_suggestions():
+            suggestion_id = str(suggestion.get("suggestion_id", "--"))
+            if suggestion_id in grouped_ids:
+                continue
+            items.append(
+                {
+                    "kind": "rule",
+                    "id": suggestion_id,
+                    "scope": str(suggestion.get("scope", "--")),
+                    "confidence": str(suggestion.get("confidence", "--")),
+                    "rationale": str(suggestion.get("rationale", "")),
+                }
+            )
+        return items
+
+    def refresh_memory_suggestions(self) -> None:
+        """Render memory-derived suggestions in the right-panel table."""
+
+        table = self.query_one("#memory-suggestions", DataTable)
+        table.clear(columns=False)
+        items = self.memory_suggestion_items()
+        self.memory_suggestions = items
+        if not items:
+            table.add_row(
+                queue_cell("-", palette=self.palette),
+                queue_cell("none", palette=self.palette),
+                queue_cell("--", palette=self.palette),
+                queue_cell("--", palette=self.palette),
+                queue_cell(self.memory_status_message or "No pending memory suggestions.", palette=self.palette),
+            )
+            return
+        self.selected_memory_suggestion_index = min(self.selected_memory_suggestion_index, len(items) - 1)
+        for index, item in enumerate(items):
+            current = index == self.selected_memory_suggestion_index
+            table.add_row(
+                queue_cell("▶" if current else str(index + 1), current=current, palette=self.palette),
+                queue_cell(str(item["kind"]), current=current, palette=self.palette),
+                queue_cell(str(item["scope"]), current=current, palette=self.palette),
+                queue_cell(str(item["confidence"]), current=current, palette=self.palette),
+                queue_cell(truncate(str(item["rationale"]), 54), current=current, palette=self.palette),
+            )
 
 
 def run_tui(prompt: str | None = None) -> None:

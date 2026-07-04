@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +42,17 @@ from tonepath.evaluation import (
 from tonepath.explanation import explain_candidate
 from tonepath.llm import llm_doctor, parse_prompt_with_llm
 from tonepath.library import clear_metadata_override, library_issues, set_metadata_override
+from tonepath.memory import (
+    add_memory_log,
+    build_memory_evidence,
+    consolidate_memory_with_llm,
+    ensure_memory_profile,
+    memory_profile_path,
+    memory_profile_text,
+    memory_suggestions_from_llm,
+    save_consolidated_memory_profile,
+    write_memory_evidence,
+)
 from tonepath.model_runtime import (
     isolation_report,
     model_runtime_report,
@@ -100,6 +114,7 @@ models_app = typer.Typer(help="Manage local model runtimes.")
 models_setup_app = typer.Typer(help="Set up local model runtimes.")
 llm_app = typer.Typer(help="Inspect optional LLM integrations.")
 library_app = typer.Typer(help="Inspect library hygiene and local metadata overrides.")
+memory_app = typer.Typer(help="Manage private memory notes and consolidated listening profile.")
 
 app.add_typer(config_app, name="config")
 app.add_typer(feedback_app, name="feedback")
@@ -113,6 +128,7 @@ app.add_typer(models_app, name="models")
 models_app.add_typer(models_setup_app, name="setup")
 app.add_typer(llm_app, name="llm")
 app.add_typer(library_app, name="library")
+app.add_typer(memory_app, name="memory")
 
 console = Console()
 
@@ -1185,7 +1201,107 @@ def profile_delete(all_data: Annotated[bool, typer.Option("--all", help="Delete 
         store.close()
     delete_profile_cache()
     delete_profile_markdown()
-    console.print("Deleted local profile rules, feedback, sessions, plays, memory, evidence, and pending suggestions.")
+    console.print("Deleted local profile rules, feedback, sessions, plays, profile Markdown/evidence, and pending suggestions.")
+
+
+@memory_app.command("add")
+def memory_add(
+    text: Annotated[str | None, typer.Argument(help="Private memory text to append.")] = None,
+    use_stdin: Annotated[bool, typer.Option("--stdin", help="Read private memory text from stdin.")] = False,
+) -> None:
+    """Append one private tree-hole memory entry to the local log."""
+
+    if use_stdin and text is not None:
+        raise typer.BadParameter("Use either text or --stdin, not both.")
+    body = sys.stdin.read() if use_stdin else text
+    if body is None or not body.strip():
+        raise typer.BadParameter("Memory text is empty.")
+    try:
+        record = add_memory_log(body, source="cli-stdin" if use_stdin else "cli")
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print(f"Memory saved: {record['id']}")
+    console.print("Run `uv run tonepath memory consolidate --llm --confirm` when you want to update the editable profile.")
+
+
+@memory_app.command("show")
+def memory_show() -> None:
+    """Show the consolidated human-editable memory profile Markdown."""
+
+    console.print(memory_profile_text(), markup=False)
+
+
+@memory_app.command("edit")
+def memory_edit() -> None:
+    """Open the consolidated memory profile Markdown in the local editor."""
+
+    path = ensure_memory_profile()
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+    try:
+        command = shlex.split(editor)
+        if not command:
+            raise OSError("empty editor command")
+        subprocess.run([*command, str(path)], check=True)
+    except (subprocess.CalledProcessError, OSError, ValueError) as exc:
+        raise typer.BadParameter(f"Editor failed: {editor}") from exc
+    console.print(f"Memory profile edited: {path}")
+
+
+@memory_app.command("consolidate")
+def memory_consolidate(
+    use_llm: Annotated[bool, typer.Option("--llm", help="Use configured DeepSeek/Qwen LLM to consolidate memory logs.")] = False,
+    provider: Annotated[str | None, typer.Option(help="LLM provider: deepseek or qwen.")] = None,
+    confirm: Annotated[bool, typer.Option("--confirm", help="Confirm sending privacy-safe memory evidence to the LLM.")] = False,
+) -> None:
+    """Consolidate private memory logs into the editable memory profile Markdown."""
+
+    if not use_llm:
+        raise typer.BadParameter("memory consolidate currently requires --llm --confirm.")
+    settings = tonepath_config.load_config()
+    if not confirm and not settings.privacy.send_to_llm:
+        raise typer.BadParameter("memory consolidate --llm requires --confirm or privacy.send_to_llm = true.")
+    store = TonepathStore()
+    try:
+        evidence = build_memory_evidence(store)
+        new_logs = evidence.get("new_memory_logs", [])
+        if not isinstance(new_logs, list) or not new_logs:
+            raise typer.BadParameter("No new memory logs to consolidate.")
+        evidence_path = write_memory_evidence(evidence)
+        profile_markdown = consolidate_memory_with_llm(evidence, provider=provider)
+        profile_path = save_consolidated_memory_profile(store, evidence, profile_markdown)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        store.close()
+    console.print(f"Memory evidence: {evidence_path}")
+    console.print(f"Memory profile updated: {profile_path}")
+
+
+@memory_app.command("suggest")
+def memory_suggest(
+    use_llm: Annotated[bool, typer.Option("--llm", help="Use configured DeepSeek/Qwen LLM to suggest profile rules from memory.")] = False,
+    provider: Annotated[str | None, typer.Option(help="LLM provider: deepseek or qwen.")] = None,
+    confirm: Annotated[bool, typer.Option("--confirm", help="Confirm sending privacy-safe memory evidence to the LLM.")] = False,
+) -> None:
+    """Generate pending profile-rule suggestions from the memory profile and new logs."""
+
+    if not use_llm:
+        raise typer.BadParameter("memory suggest currently requires --llm --confirm.")
+    settings = tonepath_config.load_config()
+    if not confirm and not settings.privacy.send_to_llm:
+        raise typer.BadParameter("memory suggest --llm requires --confirm or privacy.send_to_llm = true.")
+    store = TonepathStore()
+    try:
+        evidence = build_memory_evidence(store)
+    finally:
+        store.close()
+    evidence_path = write_memory_evidence(evidence)
+    try:
+        suggestions = memory_suggestions_from_llm(evidence, provider=provider)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    suggestions_path = save_suggestions(evidence, suggestions, source="memory-llm")
+    render_profile_suggestions(suggestions, evidence_path, suggestions_path)
 
 
 @privacy_app.command("status")

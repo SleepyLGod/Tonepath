@@ -88,6 +88,13 @@ v          prefer less vocals
 +          too loud; lower upcoming energy
 -          too slow; raise upcoming energy
 m          cycle playback mode
+Ctrl+O     open or hide the memory notes panel (Control + letter o, not zero)
+Ctrl+S     save memory locally
+Ctrl+Enter save memory and update profile with AI Assist
+Ctrl+P     show the consolidated memory profile
+Ctrl+G     generate memory-derived suggestions
+j / k      move through suggestions
+Enter      apply selected suggestion when suggestions are focused
 t          cycle visual theme
 i          show AI Assist status
 e          expand/collapse event log
@@ -283,6 +290,49 @@ uv run tonepath profile evidence write
 ```
 
 Markdown profile files are local context for you and optional LLM/Codex suggestions. They do not directly change selection; only validated suggestions applied through `profile apply` or `profile apply-group` become active profile rules.
+
+## Private Memory and Tree-Hole Notes
+
+Memory is separate from ad-hoc listening requests. A request asks Tonepath to make a path now. Memory is where you can paste a short complaint, a long monologue, or recurring listening context that should later shape your profile.
+
+Raw memory entries are appended to a local JSONL log for traceability. The user-facing file is the consolidated Markdown profile:
+
+```text
+TONEPATH_HOME/memory/logs/memory-log.jsonl
+TONEPATH_HOME/memory/profile.md
+```
+
+Add memory without changing recommendations:
+
+```bash
+uv run tonepath memory add "最近写代码很烦，听到人声会更乱"
+uv run tonepath memory add --stdin
+```
+
+View or edit the consolidated profile:
+
+```bash
+uv run tonepath memory show
+uv run tonepath memory edit
+```
+
+Update the Markdown profile from new logs with explicit LLM opt-in:
+
+```bash
+uv run tonepath memory consolidate --llm --confirm
+```
+
+Generate pending profile suggestions from the memory profile, new logs, and feedback evidence:
+
+```bash
+uv run tonepath memory suggest --llm --confirm
+uv run tonepath profile inspect
+uv run tonepath profile apply <suggestion-id>
+```
+
+Memory-derived suggestions are advisory until applied. `profile delete --all` clears profile rules, sessions, feedback, profile Markdown/evidence, and pending suggestions, but it does not delete raw memory logs or `memory/profile.md`; those are private user-authored context.
+
+In the TUI, press `Ctrl+O` to open the Memory panel. This means Control + the letter o, not the number 0. Hiding the panel keeps the draft. `Ctrl+S` saves the draft to the local log only. `Ctrl+Enter` saves and updates the Markdown profile when AI Assist is enabled. `Ctrl+P` shows the profile, and `Ctrl+G` shows pending suggestions. Applying a suggestion affects future requests only; it does not stop playback or rewrite the current queue.
 
 Optional LLM prompt parsing:
 

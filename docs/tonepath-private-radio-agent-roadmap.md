@@ -4,12 +4,12 @@
 
 Tonepath is a local-first private radio agent for state-transition listening.
 
-The product should help a listener move from a current state to a target state through an explainable path of local music. It should learn from local listening behavior, explicit feedback, optional LLM reflection, and optional private journaling. Tonepath is not a Spotify clone, a music generator, a therapy product, or a generic AI DJ.
+The product should help a listener move from a current state to a target state through an explainable path of local music. It should learn from local listening behavior, explicit feedback, optional LLM reflection, and optional private memory. Tonepath is not a Spotify clone, a music generator, a therapy product, or a generic AI DJ.
 
 The core loop is:
 
 ```text
-local library -> audio evidence -> user intent or journal -> path selection -> playback -> feedback -> profile -> better future paths
+local library -> audio evidence -> request or memory -> path selection -> playback -> feedback -> profile -> better future paths
 ```
 
 ## Current State
@@ -70,10 +70,10 @@ This is enough to prove the product direction. Profile suggestions now exist, bu
 
 ## Design Principles
 
-- **Local-first by default.** Audio files, library state, profile rules, journal entries, and playback history stay local unless the user explicitly opts in.
+- **Local-first by default.** Audio files, library state, profile rules, memory logs, and playback history stay local unless the user explicitly opts in.
 - **LLM is reflective, not factual.** LLMs may summarize preferences, parse language, rewrite explanations, and suggest profile rules. They must not invent BPM, vocalness, genre, mood, lyrics, or track facts.
 - **Evidence before recommendation.** Every recommendation should be traceable to prompt intent, stored audio evidence, feedback, profile rules, or clearly labeled audit context.
-- **User effort is optional.** A basic user should only need `prepare`, `status`, and `tonepath`. Advanced users can configure models, run audits, inspect profile rules, or write journal entries.
+- **User effort is optional.** A basic user should only need `prepare`, `status`, and `tonepath`. Advanced users can configure models, run audits, inspect profile rules, or add private memory notes.
 - **No hidden heavy jobs.** TUI must not silently download models, run source separation, or call online services.
 - **Advisory before mutation.** LLM and Codex outputs should create pending suggestions first. Applying profile rules should be explicit or governed by a clear local policy.
 - **Clean boundaries.** Analysis extracts facts. Planning parses intent. Selection scores candidates. Profile summarizes user preference. LLM reflects over safe evidence. TUI displays and captures input.
@@ -104,28 +104,29 @@ Acceptance:
 - LLM/Codex suggestions never upload audio, local paths, API keys, or full library dumps.
 - A user can give feedback, inspect what Tonepath learned, apply or delete a rule, and compare selection with and without profile influence.
 
-### Phase 2: Private Journal and Tree-Hole Workflow
+### Phase 2: Private Memory and Tree-Hole Workflow
 
 Goal: let users express mood and context naturally, without manually tuning preferences.
 
-Journal is a private listening-context surface, not therapy, medical advice, or mental health treatment. It should help Tonepath understand listening intent and constraints without making clinical claims.
+Memory is a private listening-context surface, not therapy, medical advice, or mental health treatment. It should help Tonepath understand listening intent and constraints without making clinical claims. It is separate from the ad-hoc Request box: Request makes a path now; Memory stores longer-running context for profile consolidation.
 
 Possible commands:
 
 ```bash
-uv run tonepath journal add
-uv run tonepath journal list
-uv run tonepath journal reflect --llm --confirm
-uv run tonepath journal mood
+uv run tonepath memory add "最近写代码很烦，听到人声会更乱"
+uv run tonepath memory add --stdin
+uv run tonepath memory show
+uv run tonepath memory edit
+uv run tonepath memory consolidate --llm --confirm
+uv run tonepath memory suggest --llm --confirm
 ```
 
 Product behavior:
 
-- Store private journal entries locally.
-- Extract state, task, constraints, and music needs from entries.
-- Use deterministic parsing by default.
+- Append private memory entries to a local machine-readable log.
+- Consolidate the log into a human-readable, editable `memory/profile.md`.
 - Use LLM reflection only with explicit opt-in or local privacy policy.
-- Feed journal-derived insights into pending profile suggestions, not directly into selector mutation.
+- Feed memory-derived insights into pending profile suggestions, not directly into selector mutation.
 - Avoid therapy or medical claims.
 
 Example user entry:
@@ -143,10 +144,10 @@ Possible derived signal:
 
 Acceptance:
 
-- Journal entries are stored locally and deletable.
+- Memory logs are stored locally and deletable.
 - Reflection output is structured and source-grounded.
-- Journal text is never sent to LLM without explicit consent.
-- TUI can show recent journal-derived intent without turning it into therapy advice.
+- Memory text is never sent to LLM without explicit consent.
+- TUI can later show memory-derived profile suggestions without turning them into therapy advice.
 
 ### Phase 3: Music Understanding and Model Quality
 
@@ -185,7 +186,7 @@ Future features:
 - Spotify playlist or URI handoff, not Tonepath-controlled Spotify playback.
 - macOS app shell over the same local core.
 - Web remote for local playback control.
-- Richer TUI with profile, journal, and audit panels.
+- Richer TUI with profile, memory, and audit panels.
 - Playlist export.
 - Calendar or task context, if privacy boundaries are clear.
 - LLM narrator or session reflection, if it only rewrites stored evidence.
@@ -230,7 +231,7 @@ Profile benchmark should stay lightweight:
 LLM should participate in:
 
 - natural-language intent parsing;
-- journal reflection;
+- memory consolidation;
 - profile preference summarization;
 - profile rule suggestion;
 - explanation rewriting;
@@ -262,7 +263,7 @@ Keep modules simple and bounded:
 - `planner.py`: parse intent and build state-transition phases.
 - `selector.py`: score candidates from evidence, feedback, and applied profile rules.
 - `profile.py`: build profile evidence, generate suggestions, and apply profile rules.
-- `journal.py`: store and reflect on private journal entries.
+- `memory.py`: append private memory logs, consolidate them into Markdown, and generate profile suggestions.
 - `llm.py`: provider configuration and strict request/response handling.
 - `evaluation.py`: read-only audit, benchmark, and comparison flows.
 - `tui.py`: display, input, and playback controls only.
@@ -281,7 +282,7 @@ Engineering rules:
 
 ## Immediate Next Step
 
-Validate the full private-radio loop with real listening before starting the journal workflow:
+Validate the full private-radio loop with real listening before expanding the memory workflow:
 
 ```bash
 uv run tonepath status
