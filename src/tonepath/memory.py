@@ -25,6 +25,7 @@ LAST_CONSOLIDATED_SEQUENCE_KEY = "memory:last_consolidated_sequence"
 MEMORY_LOG_LOCK = threading.Lock()
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
+LAST_CONSOLIDATED_SEQUENCE_RE = re.compile(r"(?im)^#{1,6}\s*Last Consolidated Sequence:\s*\d+\s*$")
 API_KEY_RE = re.compile(
     r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{16,}|"
     r"\b(?:sk-[A-Za-z0-9_-]{12,}|sk-proj-[A-Za-z0-9_-]{12,}|[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{16,})\b"
@@ -350,15 +351,30 @@ def normalize_memory_profile_markdown(text: str) -> str:
     return f"{cleaned.rstrip()}\n"
 
 
+def memory_profile_with_checkpoint(text: str, sequence: int | None) -> str:
+    """Return profile Markdown with a local, trustworthy consolidation checkpoint."""
+
+    cleaned = normalize_memory_profile_markdown(text).rstrip()
+    if sequence is None:
+        return f"{cleaned}\n"
+    marker = f"## Last Consolidated Sequence: {sequence}"
+    if LAST_CONSOLIDATED_SEQUENCE_RE.search(cleaned):
+        cleaned = LAST_CONSOLIDATED_SEQUENCE_RE.sub(marker, cleaned)
+    else:
+        cleaned = f"{cleaned}\n\n{marker}"
+    return f"{cleaned.rstrip()}\n"
+
+
 def save_consolidated_memory_profile(store: TonepathStore, evidence: dict[str, object], profile_markdown: str) -> Path:
     """Persist a consolidated memory profile and update the checkpoint."""
 
     path = memory_profile_path()
     ensure_private_dir(path.parent)
-    write_private_text(path, normalize_memory_profile_markdown(profile_markdown))
     sequences = [int(record.get("sequence", 0)) for record in evidence.get("new_memory_logs", []) if isinstance(record, dict)]
+    last_sequence = max(sequences) if sequences else None
+    write_private_text(path, memory_profile_with_checkpoint(profile_markdown, last_sequence))
     if sequences:
-        store.set_app_state(LAST_CONSOLIDATED_SEQUENCE_KEY, str(max(sequences)))
+        store.set_app_state(LAST_CONSOLIDATED_SEQUENCE_KEY, str(last_sequence))
     return path
 
 

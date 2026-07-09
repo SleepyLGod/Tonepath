@@ -112,7 +112,7 @@ class MemoryCliTest(unittest.TestCase):
     def test_memory_consolidate_llm_updates_profile_and_checkpoint(self) -> None:
         response = llm_response(
             {
-                "profile_markdown": "# Tonepath Memory Profile\n\n## Listening Context\n\n写代码时偏好低人声、低刺激，但需要一点节奏。"
+                "profile_markdown": "# Tonepath Memory Profile\n\n## Listening Context\n\n写代码时偏好低人声、低刺激，但需要一点节奏。\n\n## Last Consolidated Sequence: 0"
             }
         )
         with tempfile.TemporaryDirectory() as tmp:
@@ -128,6 +128,8 @@ class MemoryCliTest(unittest.TestCase):
                 self.assertIn("Memory profile updated", result.output)
                 profile_text = memory_profile_path().read_text(encoding="utf-8")
                 self.assertIn("低人声", profile_text)
+                self.assertIn("## Last Consolidated Sequence: 1", profile_text)
+                self.assertNotIn("Last Consolidated Sequence: 0", profile_text)
                 evidence_paths = list((home / "cache" / "memory").glob("*/evidence.json"))
                 self.assertTrue(evidence_paths)
                 evidence_text = evidence_paths[0].read_text(encoding="utf-8")
