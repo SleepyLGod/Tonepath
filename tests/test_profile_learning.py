@@ -332,8 +332,20 @@ class ProfileLearningTest(unittest.TestCase):
                 self.assertEqual(payload["readiness"], "No feedback yet")
                 self.assertEqual(payload["active_rules"], [])
                 self.assertEqual(payload["pending_suggestions"], [])
-                self.assertEqual(payload["memory"]["path"], str(home / "profile" / "memory.md"))
+                self.assertEqual(payload["memory"]["path"], str(home / "memory" / "profile.md"))
                 self.assertFalse(payload["memory"]["exists"])
+
+    def test_profile_inspect_text_reports_canonical_memory_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                result = CliRunner().invoke(app, ["profile", "inspect"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                output = plain_output(result.output)
+                compact = re.sub(r"\s+", "", output)
+                self.assertIn(f"Memoryprofile:{home / 'memory' / 'profile.md'}(missing)", compact)
+                self.assertNotIn(str(home / "profile" / "memory.md"), compact)
 
     def test_profile_inspect_shows_pending_suggestion_apply_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

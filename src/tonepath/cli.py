@@ -996,7 +996,7 @@ def profile_inspect(json_output: Annotated[bool, typer.Option("--json", help="Pr
     summary = store.profile_summary()
     rules = store.list_profile_rules()
     store.close()
-    memory_path = profile_memory_path()
+    memory_path = memory_profile_path()
     evidence_path = profile_evidence_latest_path()
     pending = list_pending_suggestions()
     groups = pending_suggestion_groups()
@@ -1022,7 +1022,7 @@ def profile_inspect(json_output: Annotated[bool, typer.Option("--json", help="Pr
     for key, value in summary.items():
         table.add_row(key, str(value))
     console.print(table)
-    console.print(f"Profile memory: {memory_path} ({'exists' if memory_path.exists() else 'missing'})")
+    console.print(f"Memory profile: {memory_path} ({'exists' if memory_path.exists() else 'missing'})")
     console.print(f"Profile evidence: {evidence_path} ({'exists' if evidence_path.exists() else 'missing'})")
     if active_rules:
         rule_table = Table("Scope", "Rule", "Target", "Threshold", "Weight", "Source", "Confidence", "Rationale", box=box.SIMPLE, expand=True)

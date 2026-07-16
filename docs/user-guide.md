@@ -282,15 +282,6 @@ uv run tonepath eval profile "我要写论文，四十五分钟，低刺激，�
 
 Profile suggestions are pending until explicitly applied. Applied suggestions become local `profile_rules`; selector explanations show profile-rule impact when a rule changes a candidate score. Suggestion groups are a review/apply convenience so complementary rules, such as lower vocalness plus high-BPM demotion, can be applied together.
 
-Write human-editable profile memory and evidence Markdown:
-
-```bash
-uv run tonepath profile memory write
-uv run tonepath profile evidence write
-```
-
-Markdown profile files are local context for you and optional LLM/Codex suggestions. They do not directly change selection; only validated suggestions applied through `profile apply` or `profile apply-group` become active profile rules.
-
 ## Private Memory and Tree-Hole Notes
 
 Memory is separate from ad-hoc listening requests. A request asks Tonepath to make a path now. Memory is where you can paste a short complaint, a long monologue, or recurring listening context that should later shape your profile.
@@ -301,6 +292,8 @@ Raw memory entries are appended to a local JSONL log for traceability. The user-
 TONEPATH_HOME/memory/logs/memory-log.jsonl
 TONEPATH_HOME/memory/profile.md
 ```
+
+`memory/profile.md` is the single user-facing Memory Profile shown by both `memory show` and `profile inspect`. It is local context for you and optional LLM/Codex suggestions; it does not directly change selection.
 
 Add memory without changing recommendations:
 
