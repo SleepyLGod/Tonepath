@@ -30,6 +30,7 @@ class SessionRunner:
         self.energy_delta = 0.0
         self.force_no_vocals = self.base_plan.request.no_vocals
         self.queue = select_path(store, self.active_plan(), limit_per_phase=limit_per_phase)
+        self.store.replace_session_queue(self.session_id, self.queue)
 
     def active_plan(self) -> SessionPlan:
         """Return the current plan after session-level feedback adjustments."""
@@ -123,7 +124,9 @@ class SessionRunner:
             limit_per_phase=self.limit_per_phase,
             excluded_track_ids=used_ids,
         )
-        self.queue = [*keep, *future]
+        new_queue = [*keep, *future]
+        self.store.replace_session_queue(self.session_id, new_queue)
+        self.queue = new_queue
 
     def adjust_phase(self, phase: SessionPhase) -> SessionPhase:
         """Apply session feedback constraints to one phase."""

@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tonepath.db import TonepathStore
 from tonepath.models import Track
@@ -20,6 +21,11 @@ class SessionRunnerTest(unittest.TestCase):
             self.assertIsNotNone(before)
             self.assertIsNotNone(after)
             self.assertNotEqual(before.track.id, after.track.id)
+            snapshot = store.session_queue_items(runner.session_id)
+            self.assertEqual(
+                [row["track_id"] for row in snapshot],
+                [candidate.track.id for candidate in runner.queue],
+            )
             store.close()
 
     def test_navigation_moves_without_feedback(self) -> None:
@@ -45,6 +51,21 @@ class SessionRunnerTest(unittest.TestCase):
             self.assertEqual(feedback_rows, 0)
             store.close()
 
+    def test_initial_queue_is_saved_with_the_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            self.add_track(store, tmp, "a.mp3")
+            self.add_track(store, tmp, "b.mp3")
+
+            runner = SessionRunner(store, "from irritated to focus in 30 minutes")
+            snapshot = store.session_queue_items(runner.session_id)
+
+            self.assertEqual(
+                [row["track_id"] for row in snapshot],
+                [candidate.track.id for candidate in runner.queue],
+            )
+            store.close()
+
     def test_no_vocals_updates_session_constraint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = TonepathStore(Path(tmp) / "tonepath.db")
@@ -64,6 +85,25 @@ class SessionRunnerTest(unittest.TestCase):
             runner.apply_feedback("too-loud")
             after = runner.active_plan().phases[0].target_energy
             self.assertLess(after, before)
+            store.close()
+
+    def test_rebuild_failure_keeps_active_queue_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            self.add_track(store, tmp, "a.mp3")
+            self.add_track(store, tmp, "b.mp3")
+            runner = SessionRunner(store, "from irritated to focus in 30 minutes")
+            original_queue = list(runner.queue)
+
+            with patch("tonepath.session.select_path", return_value=[]), patch.object(
+                store,
+                "replace_session_queue",
+                side_effect=RuntimeError("database write failed"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "database write failed"):
+                    runner.rebuild_future()
+
+            self.assertEqual(runner.queue, original_queue)
             store.close()
 
     def add_track(self, store: TonepathStore, tmp: str, name: str) -> int:

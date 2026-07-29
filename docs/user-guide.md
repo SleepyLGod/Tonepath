@@ -131,6 +131,44 @@ uv run tonepath start "from irritated to focused in 30 minutes" --background
 uv run tonepath stop
 ```
 
+## Saved Sessions and Exact Replay
+
+Tonepath stores the final queue for every non-dry-run CLI or TUI session. The snapshot keeps the original order, phase, score, confidence, explanation reasons, title, artist, and local path. If feedback rebuilds the future queue, Tonepath updates the snapshot so history reflects what the session actually became.
+
+List sessions that were actually played or explicitly saved:
+
+```bash
+uv run tonepath history list
+uv run tonepath history list --saved-only
+uv run tonepath history list --all
+```
+
+Inspect and bookmark a useful path:
+
+```bash
+uv run tonepath history show 42
+uv run tonepath history save 42 --name "写代码但别太困"
+uv run tonepath history unsave 42
+```
+
+Exact replay uses the original saved queue and order; it does not call the selector again:
+
+```bash
+uv run tonepath history replay 42 --dry-run
+uv run tonepath history replay 42
+uv run tonepath history replay 42 --background
+```
+
+If a file has been removed, replay omits it and names the missing path. Replay stops with a clear error if no playable files remain. Sessions created before queue snapshots were introduced remain viewable, but cannot pretend to support exact replay; `history show` prints a copyable `tonepath listen` command for generating a new path from the original Request.
+
+Export one session for local inspection or another local player:
+
+```bash
+uv run tonepath history export 42 --output ~/Desktop/tonepath-session-42
+```
+
+The output contains `session.json` and `playlist.m3u8`. The JSON includes the Request, phases, queue evidence, session feedback, and omitted files. Both files may contain absolute local music paths, so keep the bundle on trusted local storage. Tonepath refuses to overwrite a non-empty output directory. History export never includes Memory, API keys, the complete library, or another session.
+
 ## Advanced Analysis
 
 Store source-attributed local metadata enrichment:

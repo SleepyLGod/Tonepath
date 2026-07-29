@@ -48,6 +48,15 @@ class CliPlaybackTest(unittest.TestCase):
                 self.assertEqual(result.exit_code, 0, result.output)
                 store = TonepathStore()
                 self.assertEqual(store.get_app_state(CURRENT_MPV_PID_KEY), "4321")
+                session_id = store.current_session_id()
+                self.assertIsNotNone(session_id)
+                snapshot = store.session_queue_items(session_id)
+                self.assertEqual(len(snapshot), 1)
+                play = store.conn.execute(
+                    "SELECT session_id, track_id FROM plays ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                self.assertEqual(play["session_id"], session_id)
+                self.assertEqual(play["track_id"], snapshot[0]["track_id"])
                 store.close()
 
     def test_stop_clears_stored_pid(self) -> None:

@@ -40,6 +40,13 @@ from tonepath.evaluation import (
     run_codex_audit,
 )
 from tonepath.explanation import explain_candidate
+from tonepath.history import (
+    create_replay_session,
+    export_history_bundle,
+    list_history,
+    load_history,
+    prepare_replay,
+)
 from tonepath.llm import llm_doctor, parse_prompt_with_llm
 from tonepath.library import clear_metadata_override, library_issues, set_metadata_override
 from tonepath.memory import (
@@ -115,6 +122,7 @@ models_setup_app = typer.Typer(help="Set up local model runtimes.")
 llm_app = typer.Typer(help="Inspect optional LLM integrations.")
 library_app = typer.Typer(help="Inspect library hygiene and local metadata overrides.")
 memory_app = typer.Typer(help="Manage private memory notes and consolidated listening profile.")
+history_app = typer.Typer(help="Inspect, save, replay, and export listening sessions.")
 
 app.add_typer(config_app, name="config")
 app.add_typer(feedback_app, name="feedback")
@@ -129,6 +137,7 @@ models_app.add_typer(models_setup_app, name="setup")
 app.add_typer(llm_app, name="llm")
 app.add_typer(library_app, name="library")
 app.add_typer(memory_app, name="memory")
+app.add_typer(history_app, name="history")
 
 console = Console()
 
@@ -387,13 +396,15 @@ def run_planned_session(
     command = adapter.build_command(paths)
     if dry_run:
         console.print("Dry-run mpv command:")
-        console.print(" ".join(command))
+        console.print(escape(" ".join(command)))
         console.print("Dry-run only; session not saved.")
         return
 
     session_id = store.save_session(plan)
+    store.replace_session_queue(session_id, candidates)
     controller = PlaybackController(store, adapter=adapter)
-    process = controller.start(paths)
+    first_track_id = candidates[0].track.id
+    process = controller.start(paths, session_id=session_id, track_id=first_track_id)
     console.print(f"Session {session_id} started with mpv PID {process.pid}.")
     if background:
         console.print("Run `tonepath stop` to stop background playback.")
@@ -430,6 +441,203 @@ def current() -> None:
     store = TonepathStore()
     session_id = store.current_session_id()
     console.print(f"Current session: {session_id if session_id is not None else 'none'}")
+
+
+@history_app.command("list")
+def history_list_command(
+    include_all: Annotated[bool, typer.Option("--all", help="Include sessions that were never played or saved.")] = False,
+    saved_only: Annotated[bool, typer.Option("--saved-only", help="Show only bookmarked sessions.")] = False,
+) -> None:
+    """List local listening history."""
+
+    store = TonepathStore()
+    try:
+        try:
+            sessions = list_history(store, include_all=include_all, saved_only=saved_only)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        if not sessions:
+            console.print("No matching listening sessions.")
+            return
+        table = Table(title="Listening History", box=box.SIMPLE)
+        table.add_column("ID", justify="right")
+        table.add_column("Saved")
+        table.add_column("Started")
+        table.add_column("Transition")
+        table.add_column("Plays", justify="right")
+        table.add_column("Tracks", justify="right")
+        table.add_column("Name")
+        table.add_column("Request")
+        for session in sessions:
+            table.add_row(
+                str(session.id),
+                "yes" if session.saved else "",
+                escape(session.started_at),
+                escape(f"{session.source_state} -> {session.target_state}"),
+                str(session.play_count),
+                str(session.queue_count),
+                escape(session.bookmark_name or ""),
+                escape(session.prompt),
+            )
+        console.print(table)
+    finally:
+        store.close()
+
+
+@history_app.command("show")
+def history_show_command(
+    session_id: Annotated[int, typer.Argument(help="Session id to inspect.")],
+) -> None:
+    """Show one saved session and its original queue snapshot."""
+
+    store = TonepathStore()
+    try:
+        try:
+            record = load_history(store, session_id)
+        except RuntimeError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        console.print(f"Session: {record.session.id}")
+        console.print(f"Request: {escape(record.session.prompt)}")
+        console.print(
+            f"Transition: {escape(record.session.source_state)} -> "
+            f"{escape(record.session.target_state)} · {record.session.duration_sec // 60}m"
+        )
+        console.print(
+            f"Saved: {escape(record.session.bookmark_name or 'no')} · "
+            f"Plays: {record.session.play_count} · Tracks: {len(record.queue)}"
+        )
+        rebuild_command = f"uv run tonepath listen {shlex.quote(record.session.prompt)}"
+        console.print(f"Run again with new selection: {escape(rebuild_command)}")
+        if not record.queue:
+            console.print(
+                "This legacy session does not have a queue snapshot, so exact replay is unavailable."
+            )
+            return
+        table = Table(title="Original Queue", box=box.SIMPLE)
+        table.add_column("#", justify="right")
+        table.add_column("Phase")
+        table.add_column("Track")
+        table.add_column("Confidence")
+        table.add_column("Status")
+        for item in record.queue:
+            label = " - ".join(part for part in (item.artist, item.title) if part) or item.path.name
+            table.add_row(
+                str(item.position + 1),
+                escape(item.phase_label),
+                escape(label),
+                escape(item.confidence),
+                "available" if item.path.exists() else "missing",
+            )
+        console.print(table)
+    finally:
+        store.close()
+
+
+@history_app.command("save")
+def history_save_command(
+    session_id: Annotated[int, typer.Argument(help="Session id to bookmark.")],
+    name: Annotated[str | None, typer.Option("--name", help="Optional human-readable bookmark name.")] = None,
+) -> None:
+    """Bookmark a listening session."""
+
+    store = TonepathStore()
+    try:
+        try:
+            load_history(store, session_id)
+        except RuntimeError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        cleaned_name = name.strip() if name and name.strip() else None
+        store.save_session_bookmark(session_id, cleaned_name)
+        suffix = f" as {escape(cleaned_name)}" if cleaned_name else ""
+        console.print(f"Saved session {session_id}{suffix}.")
+    finally:
+        store.close()
+
+
+@history_app.command("unsave")
+def history_unsave_command(
+    session_id: Annotated[int, typer.Argument(help="Session id to remove from saved sessions.")],
+) -> None:
+    """Remove a listening-session bookmark without deleting history."""
+
+    store = TonepathStore()
+    try:
+        try:
+            load_history(store, session_id)
+        except RuntimeError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        store.delete_session_bookmark(session_id)
+        console.print(f"Session {session_id} is not saved.")
+    finally:
+        store.close()
+
+
+@history_app.command("replay")
+def history_replay_command(
+    session_id: Annotated[int, typer.Argument(help="Session id to replay exactly.")],
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview without saving or launching mpv.")] = False,
+    background: Annotated[bool, typer.Option("--background", help="Start mpv and return immediately.")] = False,
+) -> None:
+    """Replay the available files from an original saved queue."""
+
+    store = TonepathStore()
+    try:
+        try:
+            replay = prepare_replay(store, session_id)
+        except RuntimeError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        for item in replay.omitted:
+            console.print(f"Omitted missing track: {escape(str(item.path))}")
+        render_plan(list(replay.candidates))
+        paths = [candidate.track.path for candidate in replay.candidates]
+        adapter = MpvAdapter()
+        if dry_run:
+            console.print("Dry-run mpv command:")
+            console.print(escape(" ".join(adapter.build_command(paths))))
+            console.print("Dry-run only; replay session not saved.")
+            return
+
+        replay_session_id = create_replay_session(store, replay)
+        controller = PlaybackController(store, adapter=adapter)
+        first_track_id = replay.candidates[0].track.id
+        process = controller.start(
+            paths,
+            session_id=replay_session_id,
+            track_id=first_track_id,
+        )
+        console.print(
+            f"Replay session {replay_session_id} started from session {session_id} "
+            f"with mpv PID {process.pid}."
+        )
+        if background:
+            console.print("Run `tonepath stop` to stop background playback.")
+            return
+        try:
+            controller.wait_foreground(process)
+        except KeyboardInterrupt:
+            console.print("Playback stopped.")
+            raise typer.Exit(code=130) from None
+    finally:
+        store.close()
+
+
+@history_app.command("export")
+def history_export_command(
+    session_id: Annotated[int, typer.Argument(help="Session id to export.")],
+    output: Annotated[Path, typer.Option("--output", help="New or empty output directory.")],
+) -> None:
+    """Export one session to JSON and M3U8 files."""
+
+    store = TonepathStore()
+    try:
+        try:
+            exported = export_history_bundle(store, session_id, output.expanduser())
+        except (RuntimeError, ValueError, OSError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        console.print(f"Exported session {session_id} to {escape(str(exported))}.")
+        console.print("This bundle contains local file paths; keep it on trusted local storage.")
+    finally:
+        store.close()
 
 
 @app.command()
@@ -1483,10 +1691,10 @@ def render_plan(candidates: list[CandidateScore]) -> None:
     table = Table("Phase", "Track", "Artist", "Confidence", "Score")
     for candidate in candidates:
         table.add_row(
-            candidate.phase.label,
-            display_title(candidate.track),
-            display_artist(candidate.track),
-            candidate.confidence,
+            escape(candidate.phase.label),
+            escape(display_title(candidate.track)),
+            escape(display_artist(candidate.track)),
+            escape(candidate.confidence),
             f"{candidate.score:.2f}",
         )
     console.print(table)

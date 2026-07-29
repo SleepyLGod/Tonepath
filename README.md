@@ -19,6 +19,7 @@ For detailed usage, model setup, evaluation, profile learning, and privacy notes
 - prepares a local music library with source-attributed metadata and audio evidence;
 - turns Chinese or English listening goals into state-transition phases;
 - selects a short local listening path with confidence, reasons, and low-stimulation safety checks;
+- keeps replayable local session history with bookmarks and JSON/M3U8 export bundles;
 - records feedback locally so profile rules can be reviewed before they affect selection;
 - keeps optional model, LLM, Codex, and online workflows explicit and opt-in.
 
@@ -26,7 +27,7 @@ For detailed usage, model setup, evaluation, profile learning, and privacy notes
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| CLI workflow | Implemented | `prepare`, `status`, `start`, `feedback`, `profile`, `eval`, `doctor`, and related commands. |
+| CLI workflow | Implemented | `prepare`, `status`, `listen`, `start`, `history`, `profile`, `eval`, `doctor`, and related commands. |
 | Local library | Implemented | Scans local audio metadata, stores tracks/features/sessions/feedback in SQLite under `TONEPATH_HOME`. |
 | Planning | Implemented | Deterministic Chinese/English prompt parsing and state-transition phase planning. |
 | Selection | Implemented | Explainable deterministic scoring with confidence labels, profile-rule support, low-stimulation semantic safety, and gentle-uplift affect handling. |
@@ -82,6 +83,7 @@ uv run tonepath prepare --limit 5
 uv run tonepath listen "from irritated to focused in 30 minutes, no vocals" --dry-run
 uv run tonepath eval suite --limit 5
 uv run tonepath eval diagnose --limit 8
+uv run tonepath history list
 uv run tonepath profile inspect
 uv run tonepath privacy status
 ```

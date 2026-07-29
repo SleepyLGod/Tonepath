@@ -566,10 +566,10 @@ class ProfileLearningTest(unittest.TestCase):
     def test_roadmap_documents_profile_visibility_loop(self) -> None:
         roadmap = (Path(__file__).resolve().parents[1] / "docs" / "tonepath-private-radio-agent-roadmap.md").read_text(encoding="utf-8")
 
-        self.assertIn("tonepath profile inspect", roadmap)
-        self.assertIn("tonepath eval profile", roadmap)
-        self.assertIn("profile delete --all", roadmap)
-        self.assertIn("personalized radio loop is still early-stage", roadmap)
+        self.assertIn("Profile and Memory loops now exist", roadmap)
+        self.assertIn("tonepath history list", roadmap)
+        self.assertIn("tonepath history replay", roadmap)
+        self.assertIn("tonepath history export", roadmap)
 
 
 def populated_store(tmp: str, loudness: float, bpm: float, vocalness: float) -> tuple[TonepathStore, int]:

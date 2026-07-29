@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
@@ -15,7 +16,7 @@ from tonepath.display import (
     apply_metadata_overrides,
     metadata_override_values,
 )
-from tonepath.models import EnrichmentRecord, ProfileRule, SessionPhase, SessionPlan, Track, TrackFeatures
+from tonepath.models import CandidateScore, EnrichmentRecord, ProfileRule, SessionPhase, SessionPlan, Track, TrackFeatures
 
 
 SCHEMA = """
@@ -69,6 +70,27 @@ CREATE TABLE IF NOT EXISTS session_phases (
   target_valence REAL NOT NULL,
   target_energy REAL NOT NULL,
   vocal_policy TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS session_queue_items (
+  id INTEGER PRIMARY KEY,
+  session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL,
+  track_path TEXT NOT NULL,
+  title TEXT,
+  artist TEXT,
+  phase_label TEXT NOT NULL,
+  score REAL NOT NULL,
+  confidence TEXT NOT NULL,
+  reasons_json TEXT NOT NULL,
+  UNIQUE(session_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS session_bookmarks (
+  session_id INTEGER PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+  name TEXT,
+  saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS plays (
@@ -320,6 +342,169 @@ class TonepathStore:
             ],
         )
 
+    def replace_session_queue(self, session_id: int, candidates: Iterable[CandidateScore]) -> None:
+        """Replace the persisted final queue snapshot for one session."""
+
+        rows = [
+            (
+                session_id,
+                position,
+                candidate.track.id,
+                str(candidate.track.path),
+                candidate.track.title,
+                candidate.track.artist,
+                candidate.phase.label,
+                candidate.score,
+                candidate.confidence,
+                json.dumps(candidate.reasons, ensure_ascii=False),
+            )
+            for position, candidate in enumerate(candidates)
+        ]
+        with self.conn:
+            self.conn.execute("DELETE FROM session_queue_items WHERE session_id = ?", (session_id,))
+            self.conn.executemany(
+                """
+                INSERT INTO session_queue_items (
+                  session_id, position, track_id, track_path, title, artist,
+                  phase_label, score, confidence, reasons_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def session_queue_items(self, session_id: int) -> list[dict[str, object]]:
+        """Return one session's queue snapshot in original order."""
+
+        rows = self.conn.execute(
+            """
+            SELECT position, track_id, track_path, title, artist, phase_label,
+                   score, confidence, reasons_json
+            FROM session_queue_items
+            WHERE session_id = ?
+            ORDER BY position
+            """,
+            (session_id,),
+        ).fetchall()
+        return [
+            {
+                "position": int(row["position"]),
+                "track_id": int(row["track_id"]) if row["track_id"] is not None else None,
+                "track_path": str(row["track_path"]),
+                "title": row["title"],
+                "artist": row["artist"],
+                "phase_label": str(row["phase_label"]),
+                "score": float(row["score"]),
+                "confidence": str(row["confidence"]),
+                "reasons": list(json.loads(row["reasons_json"])),
+            }
+            for row in rows
+        ]
+
+    def save_session_bookmark(self, session_id: int, name: str | None = None) -> None:
+        """Save or rename one session bookmark."""
+
+        self.conn.execute(
+            """
+            INSERT INTO session_bookmarks (session_id, name)
+            VALUES (?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+              name=excluded.name,
+              saved_at=CURRENT_TIMESTAMP
+            """,
+            (session_id, name),
+        )
+        self.conn.commit()
+
+    def delete_session_bookmark(self, session_id: int) -> None:
+        """Remove one session bookmark if present."""
+
+        self.conn.execute("DELETE FROM session_bookmarks WHERE session_id = ?", (session_id,))
+        self.conn.commit()
+
+    def history_session_rows(
+        self,
+        include_all: bool = False,
+        saved_only: bool = False,
+    ) -> list[dict[str, object]]:
+        """Return session summaries for the history domain."""
+
+        where = ""
+        if saved_only:
+            where = "WHERE bookmark.session_id IS NOT NULL"
+        elif not include_all:
+            where = """
+            WHERE bookmark.session_id IS NOT NULL
+               OR EXISTS (SELECT 1 FROM plays WHERE plays.session_id = sessions.id)
+            """
+        rows = self.conn.execute(
+            f"""
+            SELECT sessions.*,
+                   bookmark.name AS bookmark_name,
+                   bookmark.saved_at AS bookmarked_at,
+                   (SELECT COUNT(*) FROM plays WHERE plays.session_id = sessions.id) AS play_count,
+                   (
+                     SELECT COUNT(*) FROM session_queue_items
+                     WHERE session_queue_items.session_id = sessions.id
+                   ) AS queue_count
+            FROM sessions
+            LEFT JOIN session_bookmarks AS bookmark ON bookmark.session_id = sessions.id
+            {where}
+            ORDER BY sessions.started_at DESC, sessions.id DESC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def history_session_row(self, session_id: int) -> dict[str, object] | None:
+        """Return one session summary for the history domain."""
+
+        row = self.conn.execute(
+            """
+            SELECT sessions.*,
+                   bookmark.name AS bookmark_name,
+                   bookmark.saved_at AS bookmarked_at,
+                   (SELECT COUNT(*) FROM plays WHERE plays.session_id = sessions.id) AS play_count,
+                   (
+                     SELECT COUNT(*) FROM session_queue_items
+                     WHERE session_queue_items.session_id = sessions.id
+                   ) AS queue_count
+            FROM sessions
+            LEFT JOIN session_bookmarks AS bookmark ON bookmark.session_id = sessions.id
+            WHERE sessions.id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def session_phase_rows(self, session_id: int) -> list[dict[str, object]]:
+        """Return persisted phases for one session in original order."""
+
+        rows = self.conn.execute(
+            """
+            SELECT label, start_sec, end_sec, target_arousal, target_valence,
+                   target_energy, vocal_policy
+            FROM session_phases
+            WHERE session_id = ?
+            ORDER BY start_sec, id
+            """,
+            (session_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def session_feedback_rows(self, session_id: int) -> list[dict[str, object]]:
+        """Return feedback recorded for one session."""
+
+        rows = self.conn.execute(
+            """
+            SELECT id, track_id, type, value, created_at
+            FROM feedback
+            WHERE session_id = ?
+            ORDER BY created_at, id
+            """,
+            (session_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def current_session_id(self) -> int | None:
         """Return the current session id if one is known."""
 
@@ -401,6 +586,8 @@ class TonepathStore:
             "track_enrichment",
             "sessions",
             "session_phases",
+            "session_queue_items",
+            "session_bookmarks",
             "plays",
             "feedback",
             "profile_rules",
@@ -609,7 +796,15 @@ class TonepathStore:
     def delete_profile_data(self) -> None:
         """Delete user profile, play, feedback, and session data while keeping scanned tracks."""
 
-        for table in ("profile_rules", "feedback", "plays", "session_phases", "sessions"):
+        for table in (
+            "profile_rules",
+            "feedback",
+            "plays",
+            "session_bookmarks",
+            "session_queue_items",
+            "session_phases",
+            "sessions",
+        ):
             self.conn.execute(f"DELETE FROM {table}")
         self.conn.execute("DELETE FROM app_state WHERE key = 'current_session_id'")
         self.conn.commit()

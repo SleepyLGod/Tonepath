@@ -22,14 +22,15 @@ Tonepath currently has a working local-first CLI/TUI prototype:
 - deterministic bilingual intent parsing for Chinese and English prompts;
 - deterministic path planning and selector scoring with explainable reasons;
 - controlled `mpv` playback with foreground stop, background stop, and TUI playback controls;
-- Textual TUI with prompt intake, timeline, queue, now-playing state, why panel, privacy badge, and event log;
+- saved-session queue snapshots, bookmarks, exact local replay, and JSON/M3U8 export;
+- Textual TUI with prompt intake, timeline, queue, now-playing state, why panel, private Memory, and event log;
 - feedback capture for like, skip, no-vocals, too-loud, and too-slow;
-- profile command surface and LLM/Codex-assisted profile suggestions;
-- benchmark/eval commands for intent, selection, suite checks, audit packs, Codex audit, and rerank preview;
+- profile comparison plus deterministic and LLM/Codex-assisted pending suggestions;
+- benchmark/eval commands for intent, selection, suite checks, diagnostics, CLAP/hybrid bake-off, audit packs, Codex audit, and rerank preview;
 - optional DeepSeek/Qwen prompt parsing and packaged Codex audit skill;
 - GitHub CI and packaged resource checks.
 
-This is enough to prove the product direction. Profile suggestions now exist, but the personalized radio loop is still early-stage: Tonepath must make learned preferences visible, comparable, reversible, and clearly tied to recommendation changes before it can be called a mature personalized music agent.
+This is enough to prove the product direction. Profile and Memory loops now exist, but the personalized radio experience still needs real listening evidence and clearer history navigation before it can be called mature.
 
 ## Product Gaps
 
@@ -50,7 +51,7 @@ This is enough to prove the product direction. Profile suggestions now exist, bu
 
 ### Models and Music Understanding
 
-- There is no formal model bake-off yet.
+- CLAP and hybrid bake-off tooling exists, but neither has earned promotion into default listening.
 - Essentia-TF is the main local tagging route, but the quality boundary needs clearer product validation.
 - `audio-separator` and Demucs-style separation are useful fallback tools, not primary music-understanding models.
 - Future candidates such as YAMNet, MERT, Music2Vec, MuQ/MuLan-style embeddings, or other local music models should be evaluated only after the current profile loop is stable.
@@ -58,8 +59,7 @@ This is enough to prove the product direction. Profile suggestions now exist, bu
 ### Codex and LLM
 
 - Codex audit is advisory; it does not yet become a controlled recommendation improvement loop.
-- Codex is not yet deeply involved in profile maintenance.
-- LLM parsing exists, but LLM is not yet a first-class profile reflection engine.
+- Codex and LLM can generate pending profile suggestions, but their long-term usefulness still needs real-user validation.
 - LLM outputs need strict schemas, validation, and evaluation before they can safely affect profile rules.
 
 ### Privacy and Trust
@@ -186,8 +186,8 @@ Future features:
 - Spotify playlist or URI handoff, not Tonepath-controlled Spotify playback.
 - macOS app shell over the same local core.
 - Web remote for local playback control.
-- Richer TUI with profile, memory, and audit panels.
-- Playlist export.
+- TUI history and saved-session navigation.
+- Authorized catalog or playlist handoff beyond the implemented local M3U8 session export.
 - Calendar or task context, if privacy boundaries are clear.
 - LLM narrator or session reflection, if it only rewrites stored evidence.
 
@@ -282,16 +282,14 @@ Engineering rules:
 
 ## Immediate Next Step
 
-Validate the full private-radio loop with real listening before expanding the memory workflow:
+Validate Saved Sessions Core before adding its TUI surface:
 
 ```bash
-uv run tonepath status
-uv run tonepath eval diagnose --limit 8
-uv run tonepath listen "我有点难过，想慢慢开心一点，但不要太吵" --dry-run
-uv run tonepath listen "我很焦虑，想二十分钟后平静下来，不要压抑" --dry-run
-uv run tonepath profile inspect
-uv run tonepath eval profile "我要写论文，四十五分钟，低刺激，最好不要人声" --limit 8
-uv run tonepath profile delete --all
+uv run tonepath history list
+uv run tonepath history show <session-id>
+uv run tonepath history save <session-id> --name "A useful path"
+uv run tonepath history replay <session-id> --dry-run
+uv run tonepath history export <session-id> --output /tmp/tonepath-session
 ```
 
-The current selector path should stay local and evidence-first: low-stimulation semantic risks are demoted, gentle-uplift phases can become slightly brighter, and CLAP/hybrid remain evaluation tools until they show a stable measured improvement. The next product phase should start only after real listening confirms that readiness, library hygiene, selection reasons, feedback, profile inspection, and profile deletion all feel understandable and reversible.
+After the CLI persistence, replay, missing-file, and privacy boundaries are verified, design a separate TUI History panel. Do not mix that UI work with Player Core, Privacy Center, Setup Wizard, Session Host, or catalog handoff. The current selector remains local and evidence-first, and CLAP/hybrid remain evaluation tools until they show stable measured improvement.
