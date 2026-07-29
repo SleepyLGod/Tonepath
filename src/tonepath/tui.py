@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import time
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from rich.text import Text
@@ -25,7 +27,7 @@ from tonepath.memory import (
     write_memory_evidence,
 )
 from tonepath.model_runtime import model_runtime_status
-from tonepath.models import CandidateScore, FeedbackType
+from tonepath.models import CandidateScore, FeedbackType, SessionPlan
 from tonepath.playback_controller import PlaybackController
 from tonepath.profile import apply_suggestion, apply_suggestion_group, list_pending_suggestions, pending_suggestion_groups, profile_learning_hint, save_suggestions
 from tonepath.readiness import LibraryStatus, library_status, readiness_blocks_session, readiness_label, status_next_action
@@ -42,6 +44,8 @@ try:
 except ImportError as exc:  # pragma: no cover - exercised before dependency install
     raise RuntimeError("Textual is not installed. Run `uv sync` before launching the TUI.") from exc
 
+from tonepath.tui_history import HistoryLoadResult, HistoryRerunRequest, HistoryScreen
+
 
 PROMPT_PLACEHOLDER = "我现在很烦，想半小时后进入写代码状态，不要人声"
 PLAYBACK_MODES = ("Manual", "Continue Path", "Repeat One", "Repeat Path")
@@ -54,6 +58,16 @@ class MemoryWorkerResult:
     kind: str
     status_message: str
     event_message: str
+
+
+@dataclass(frozen=True)
+class RequestWorkerResult:
+    """Intent plan returned from a background Smart request."""
+
+    prompt: str
+    plan: SessionPlan
+    intent_note: str | None
+    history_source_session_id: int | None
 
 
 class TonepathApp(App[None]):
@@ -209,6 +223,7 @@ class TonepathApp(App[None]):
         Binding("s", "skip", "Skip"),
         Binding("l", "like", "Like"),
         Binding("m", "cycle_playback_mode", "Mode"),
+        Binding("ctrl+l", "history", "History", key_display="Ctrl+L", show=False, priority=True),
         Binding("ctrl+o", "toggle_memory", "Memory", key_display="Ctrl+O", show=False, priority=True),
         Binding("shift+m", "toggle_memory", "Memory", key_display="M", show=False, priority=True),
         Binding("ctrl+s", "save_memory", "Save memory", show=False, priority=True),
@@ -258,6 +273,8 @@ class TonepathApp(App[None]):
         self.memory_status_message = ""
         self.memory_suggestions: list[dict[str, object]] = []
         self.selected_memory_suggestion_index = 0
+        self.request_busy = False
+        self.request_status_message = ""
         self.pulse_tick = 0
         self.theme_key = normalize_theme(config.load_config().ui.theme)
         self.palette = PALETTE_BY_KEY[self.theme_key]
@@ -480,6 +497,51 @@ class TonepathApp(App[None]):
             self.query_one("#memory-input", TextArea).focus()
             self.query_one("#command-bar", Static).update(self.command_bar_renderable(prompt_focused=False))
 
+    def action_history(self) -> None:
+        """Open listening history without changing the active player state."""
+
+        if isinstance(self.screen, HistoryScreen):
+            self.screen.dismiss(None)
+            return
+        if self.store is None:
+            self.log_event("Local store is unavailable.")
+            return
+        self.push_screen(HistoryScreen(self.store), self.on_history_loaded)
+
+    def on_history_loaded(
+        self,
+        result: HistoryLoadResult | HistoryRerunRequest | None,
+    ) -> None:
+        """Handle an exact history load or a fresh run of its original request."""
+
+        if result is None:
+            return
+        if isinstance(result, HistoryRerunRequest):
+            self.start_request_planning(
+                result.prompt,
+                history_source_session_id=result.source_session_id,
+            )
+            return
+        if self.playback is not None:
+            self.playback.stop_current()
+        self.runner = result.runner
+        self.intent_note = None
+        self.playback = self.playback or PlaybackController(self.store)
+        self.playback_status = "Ready"
+        self.playback_started_at = None
+        self.pulse_tick = 0
+        self.right_panel = "why"
+        prompt_input = self.query_one("#prompt-input", Input)
+        prompt_input.value = self.runner.active_plan().request.prompt
+        prompt_input.blur()
+        for item in result.omitted:
+            label = item.title or item.path.name
+            self.log_event(f"History omitted missing file: {label}")
+        self.log_event(
+            f"Loaded exact history path from session {result.source_session_id}. Press Space to play."
+        )
+        self.refresh_session_view()
+
     def action_save_memory(self) -> None:
         """Save the current memory draft to the local memory log only."""
 
@@ -501,7 +563,7 @@ class TonepathApp(App[None]):
         if had_draft and not saved:
             return
         settings = config.load_config()
-        if not self.llm_ready_for_memory(settings):
+        if not self.llm_ready(settings):
             if saved:
                 self.memory_status_message = "Memory saved locally. AI Assist is not ready, so profile was not updated."
             else:
@@ -532,7 +594,7 @@ class TonepathApp(App[None]):
             return
         self.sync_memory_draft()
         settings = config.load_config()
-        if not self.llm_ready_for_memory(settings):
+        if not self.llm_ready(settings):
             self.memory_status_message = "AI Assist is not ready. Run `uv run tonepath setup --preset smart --send-to-llm`."
             self.right_panel = "memory_suggestions"
             self.refresh_session_view()
@@ -622,10 +684,16 @@ class TonepathApp(App[None]):
             store.close()
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        """Refresh memory panels when a background memory task completes."""
+        """Apply completed request or memory work on the TUI thread."""
 
         worker = event.worker
-        if worker.group != "memory" or event.state not in {WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED}:
+        terminal_states = {WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED}
+        if event.state not in terminal_states:
+            return
+        if worker.group == "request":
+            self.finish_request_worker(worker, event.state)
+            return
+        if worker.group != "memory":
             return
         self.memory_busy = False
         self.memory_worker_kind = None
@@ -793,9 +861,102 @@ class TonepathApp(App[None]):
 
         if event.input.id != "prompt-input":
             return
-        self.create_session(event.value)
+        self.start_request_planning(event.value)
 
-    def create_session(self, prompt: str) -> None:
+    def start_request_planning(
+        self,
+        prompt: str,
+        *,
+        history_source_session_id: int | None = None,
+    ) -> None:
+        """Plan a Smart request off-thread while keeping the current path active."""
+
+        if self.request_busy:
+            self.request_status_message = "Request planning already running. Current playback continues."
+            self.log_event(self.request_status_message)
+            self.refresh_session_view()
+            return
+        cleaned = prompt.strip()
+        if not cleaned or self.store is None:
+            self.create_session(
+                prompt,
+                history_source_session_id=history_source_session_id,
+            )
+            return
+        self.refresh_readiness()
+        if readiness_blocks_session(self.readiness):
+            self.create_session(
+                cleaned,
+                history_source_session_id=history_source_session_id,
+            )
+            return
+        settings = config.load_config()
+        if not self.llm_ready(settings):
+            self.create_session(
+                cleaned,
+                history_source_session_id=history_source_session_id,
+            )
+            return
+        self.request_busy = True
+        self.request_status_message = "Planning next path in background; current playback continues."
+        prompt_input = self.query_one("#prompt-input", Input)
+        prompt_input.value = cleaned
+        prompt_input.blur()
+        self.log_event(self.request_status_message)
+        self.refresh_session_view()
+        self.run_worker(
+            partial(
+                self.request_planning_job,
+                cleaned,
+                settings,
+                history_source_session_id,
+            ),
+            name="request-plan",
+            group="request",
+            description=self.request_status_message,
+            exit_on_error=False,
+            exclusive=True,
+            thread=True,
+        )
+
+    def request_planning_job(
+        self,
+        prompt: str,
+        settings: config.TonepathConfig,
+        history_source_session_id: int | None,
+    ) -> RequestWorkerResult:
+        """Parse one Smart request without touching TUI or SQLite state."""
+
+        plan, note = smart_plan_session(prompt, settings)
+        return RequestWorkerResult(
+            prompt=prompt,
+            plan=plan,
+            intent_note=note,
+            history_source_session_id=history_source_session_id,
+        )
+
+    def finish_request_worker(self, worker: Worker[Any], state: WorkerState) -> None:
+        """Finish background request planning without replacing state on failure."""
+
+        self.request_busy = False
+        if state == WorkerState.SUCCESS and isinstance(worker.result, RequestWorkerResult):
+            self.activate_session(worker.result)
+            return
+        if state == WorkerState.ERROR:
+            self.request_status_message = f"Request planning failed: {worker.error}. Current path is unchanged."
+        elif state == WorkerState.CANCELLED:
+            self.request_status_message = "Request planning was cancelled. Current path is unchanged."
+        else:
+            self.request_status_message = "Request planning returned an unreadable result. Current path is unchanged."
+        self.log_event(self.request_status_message)
+        self.refresh_session_view()
+
+    def create_session(
+        self,
+        prompt: str,
+        *,
+        history_source_session_id: int | None = None,
+    ) -> None:
         """Create a local session from a user prompt and refresh the TUI."""
 
         cleaned = prompt.strip()
@@ -815,23 +976,56 @@ class TonepathApp(App[None]):
             self.log_event(self.readiness_action)
             self.query_one("#prompt-input", Input).focus()
             return
+        settings = config.load_config()
+        plan, note = smart_plan_session(cleaned, settings)
+        self.activate_session(
+            RequestWorkerResult(
+                prompt=cleaned,
+                plan=plan,
+                intent_note=note,
+                history_source_session_id=history_source_session_id,
+            )
+        )
+
+    def activate_session(self, result: RequestWorkerResult) -> None:
+        """Persist and activate a completed request plan without autoplay."""
+
+        if self.store is None:
+            self.request_status_message = "Local store is unavailable. Current path is unchanged."
+            self.log_event(self.request_status_message)
+            self.refresh_session_view()
+            return
+        try:
+            new_runner = SessionRunner(self.store, result.prompt, plan=result.plan)
+        except (RuntimeError, ValueError, OSError, sqlite3.Error) as exc:
+            self.request_status_message = (
+                f"Could not activate planned path: {exc}. Current path is unchanged."
+            )
+            self.log_event(self.request_status_message)
+            self.refresh_session_view()
+            return
         if self.playback is not None:
             self.playback.stop_current()
         self.playback_started_at = None
         self.pulse_tick = 0
         self.right_panel = "why"
-        settings = config.load_config()
-        plan, note = smart_plan_session(cleaned, settings)
-        self.intent_note = note
-        self.runner = SessionRunner(self.store, cleaned, plan=plan)
+        self.intent_note = result.intent_note
+        self.runner = new_runner
         self.playback = self.playback or PlaybackController(self.store)
         self.playback_status = "Ready"
         prompt_input = self.query_one("#prompt-input", Input)
-        prompt_input.value = cleaned
+        prompt_input.value = result.prompt
         prompt_input.blur()
-        if note:
-            self.log_event(note)
-        self.log_event(f"Ready. Press Space to play. Session: {cleaned}")
+        if result.intent_note:
+            self.log_event(result.intent_note)
+        if result.history_source_session_id is None:
+            self.request_status_message = f"Ready. Press Space to play. Session: {result.prompt}"
+        else:
+            self.request_status_message = (
+                f"Reran Request from session {result.history_source_session_id} with current "
+                "recommendation logic. Press Space to play."
+            )
+        self.log_event(self.request_status_message)
         self.refresh_session_view()
 
     def start_current_playback(self, mark_previous_skipped: bool = False) -> None:
@@ -906,7 +1100,8 @@ class TonepathApp(App[None]):
             return
 
         self.apply_panel_titles()
-        self.query_one("#status-bar", Static).update(self.status_bar_text())
+        planning = "Planning next path" if self.request_busy else None
+        self.query_one("#status-bar", Static).update(self.status_bar_text(extra=planning))
         self.query_one("#timeline", Static).update(self.timeline_renderable())
         self.query_one("#now-playing", Static).update(self.now_playing_renderable())
         self.refresh_right_panel()
@@ -1106,6 +1301,7 @@ class TonepathApp(App[None]):
                 "+          too loud; lower upcoming energy",
                 "-          too slow; raise upcoming energy",
                 "Tools",
+                "Ctrl+L     listening history",
                 "Ctrl+O     memory notes panel (Control + letter o, not zero)",
                 "Ctrl+S     save memory locally",
                 "Ctrl+Enter save memory and update profile",
@@ -1193,7 +1389,8 @@ class TonepathApp(App[None]):
         else:
             guidance = "Ready for playback. How are you feeling? What should music help you become?"
         self.apply_panel_titles()
-        self.query_one("#status-bar", Static).update(self.status_bar_text(extra="Enter to plan"))
+        status_extra = "Planning next path" if self.request_busy else "Enter to plan"
+        self.query_one("#status-bar", Static).update(self.status_bar_text(extra=status_extra))
         self.query_one("#timeline", Static).update("No session yet · feeling → path → feedback → memory")
         self.query_one("#command-bar", Static).update(self.command_bar_renderable(prompt_focused=True))
         self.query_one("#now-playing", Static).update(
@@ -1325,6 +1522,7 @@ class TonepathApp(App[None]):
             ("s", "Skip"),
             ("l", "Like"),
             ("m", "Mode"),
+            ("Ctrl+L", "History"),
             ("Ctrl+O", "Memory"),
             ("t", "Theme"),
             ("?", "Help"),
@@ -1519,8 +1717,8 @@ class TonepathApp(App[None]):
         self.log_event(f"Memory saved: {record['id']}. Current queue is unchanged.")
         return True
 
-    def llm_ready_for_memory(self, settings: config.TonepathConfig) -> bool:
-        """Return whether TUI memory learning may call the configured LLM."""
+    def llm_ready(self, settings: config.TonepathConfig) -> bool:
+        """Return whether the TUI may call its configured LLM."""
 
         if not settings.privacy.send_to_llm:
             return False
