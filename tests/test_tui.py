@@ -2,9 +2,9 @@ import json
 import os
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from tonepath import config
@@ -12,6 +12,7 @@ from tonepath.db import TonepathStore
 from tonepath.memory import memory_log_path, memory_profile_path
 from tonepath.models import CandidateScore, SessionPhase, Track, TrackFeatures
 from tonepath.playback import MpvAdapter
+from tonepath.playback_controller import PlaybackState
 from tonepath.planner import plan_session
 from tonepath.profile import build_profile_evidence, deterministic_suggestions, save_suggestions
 from tonepath.tui import (
@@ -21,6 +22,7 @@ from tonepath.tui import (
     energy_meter,
     fit_cell,
     format_clock,
+    playback_symbol,
     progress_bar,
     profile_learning_hint,
     pulse_meter,
@@ -29,6 +31,7 @@ from tonepath.tui import (
 )
 from tonepath.tui_theme import PALETTE_BY_KEY, PALETTES
 from textual.theme import Theme
+from textual.worker import WorkerState
 from textual.widgets import Input, Static, TextArea
 
 
@@ -58,6 +61,29 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
         self.ipc_ready = patch.object(MpvAdapter, "wait_for_ipc")
         self.ipc_ready.start()
         self.addCleanup(self.ipc_ready.stop)
+        self.mpv_properties: dict[str, object] = {
+            "pause": False,
+            "time-pos": 12.0,
+            "duration": 180.0,
+            "volume": 100.0,
+        }
+        self.mpv_commands: list[list[object]] = []
+
+        def send_command(_adapter: MpvAdapter, _ipc_path: Path, command: list[object]) -> object:
+            self.mpv_commands.append(command)
+            if command[0] == "get_property":
+                return self.mpv_properties[str(command[1])]
+            if command[0] == "set_property":
+                self.mpv_properties[str(command[1])] = command[2]
+                return None
+            if command[0] == "seek":
+                self.mpv_properties["time-pos"] = float(self.mpv_properties["time-pos"]) + float(command[1])
+                return None
+            raise AssertionError(f"Unexpected mpv command: {command}")
+
+        self.ipc_commands = patch.object(MpvAdapter, "send_command", autospec=True, side_effect=send_command)
+        self.ipc_commands.start()
+        self.addCleanup(self.ipc_commands.stop)
 
     async def wait_for_memory_idle(self, app: TonepathApp, pilot: object) -> None:
         for _ in range(80):
@@ -398,6 +424,7 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(energy_meter(0.42), "▮▮▯▯▯")
                     self.assertEqual(format_clock(64.9), "1:04")
                     self.assertEqual(progress_bar(60.0, 180.0), "━━━━────────")
+                    self.assertEqual(playback_symbol("Paused"), "Ⅱ")
                     self.assertNotEqual(pulse_meter(0.5, 0), pulse_meter(0.5, 1))
                     self.assertEqual(queue_marker("now"), "▶")
                     self.assertEqual(queue_marker("+1"), "1")
@@ -431,6 +458,92 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                         await pilot.press("space")
                         await pilot.press("q")
                 self.assertEqual(start.call_count, 1)
+
+    async def test_tui_space_pauses_and_resumes_without_restarting_or_new_play(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                with patch.object(MpvAdapter, "start", return_value=FakeProcess()) as start:
+                    async with app.run_test() as pilot:
+                        await pilot.press("space")
+                        self.assertEqual(app.playback_status, "Playing")
+                        self.mpv_commands.clear()
+                        await pilot.press("space")
+                        self.assertEqual(app.playback_status, "Paused")
+                        self.assertEqual(self.mpv_commands, [["set_property", "pause", True]])
+                        self.mpv_commands.clear()
+                        await pilot.press("space")
+                        self.assertEqual(app.playback_status, "Playing")
+                        self.assertEqual(self.mpv_commands, [["set_property", "pause", False]])
+                        self.assertEqual(start.call_count, 1)
+                        await pilot.press("q")
+
+                store = TonepathStore()
+                self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM plays").fetchone()[0], 1)
+                store.close()
+
+    async def test_tui_arrow_keys_seek_and_adjust_volume_without_changing_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "b.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                with patch.object(MpvAdapter, "start", return_value=FakeProcess()):
+                    async with app.run_test() as pilot:
+                        await pilot.press("space")
+                        original_queue = list(app.runner.queue) if app.runner is not None else []
+                        await pilot.press("right")
+                        await pilot.press("left")
+                        await pilot.press("up")
+                        await pilot.press("down")
+                        self.assertIn(["seek", 10.0, "relative+exact"], self.mpv_commands)
+                        self.assertIn(["seek", -10.0, "relative+exact"], self.mpv_commands)
+                        self.assertIn(["set_property", "volume", 100.0], self.mpv_commands)
+                        self.assertIn(["set_property", "volume", 95.0], self.mpv_commands)
+                        self.assertEqual(app.runner.queue if app.runner is not None else [], original_queue)
+                        await pilot.press("q")
+
+                store = TonepathStore()
+                self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0], 0)
+                store.close()
+
+    async def test_tui_arrow_keys_do_not_control_player_while_prompt_is_focused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                with patch.object(MpvAdapter, "start", return_value=FakeProcess()):
+                    async with app.run_test() as pilot:
+                        await pilot.press("space")
+                        await pilot.press("/")
+                        prompt_input = app.query_one("#prompt-input", Input)
+                        prompt_input.value = "focus"
+                        prompt_input.cursor_position = 3
+                        before_controls = [
+                            command for command in self.mpv_commands if command[0] in {"seek", "set_property"}
+                        ]
+                        await pilot.press("left")
+                        await pilot.press("right")
+                        await pilot.press("up")
+                        await pilot.press("down")
+                        after_controls = [
+                            command for command in self.mpv_commands if command[0] in {"seek", "set_property"}
+                        ]
+                        self.assertEqual(after_controls, before_controls)
+                        self.assertEqual(prompt_input.value, "focus")
+                        await pilot.press("ctrl+q")
 
     async def test_tui_quit_stops_playback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1056,7 +1169,7 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(config.load_config().ui.theme, "high-contrast")
                     await pilot.press("q")
 
-    async def test_tui_progress_text_uses_local_playback_clock(self) -> None:
+    async def test_tui_progress_text_uses_live_mpv_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
                 store = TonepathStore()
@@ -1067,12 +1180,64 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
 
                 app = TonepathApp("from irritated to focus in 30 minutes")
                 async with app.run_test() as pilot:
-                    self.assertIn("--:--", app.progress_text(None))
-                    app.playback_status = "Playing"
-                    app.playback_started_at = time.monotonic() - 64.0
-                    self.assertIn("1:04", app.progress_text(180.0))
-                    self.assertIn("3:00", app.progress_text(180.0))
-                    self.assertIn("━", app.progress_text(180.0))
+                    self.assertIn("--:--", app.progress_text())
+                    app.live_playback_state = PlaybackState(True, False, 64.0, 180.0, 75.0)
+                    self.assertIn("1:04", app.progress_text())
+                    self.assertIn("3:00", app.progress_text())
+                    self.assertIn("━", app.progress_text())
+                    self.assertIn("pause / resume", app.help_panel_text())
+                    self.assertIn("Left/Right", app.help_panel_text())
+                    self.assertIn("Up/Down", app.help_panel_text())
+                    await pilot.press("q")
+
+    async def test_tui_transient_telemetry_failure_does_not_stop_playback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                with patch.object(MpvAdapter, "start", return_value=FakeProcess()), patch.object(
+                    MpvAdapter, "stop_process"
+                ) as stop:
+                    async with app.run_test() as pilot:
+                        await pilot.press("space")
+                        worker = SimpleNamespace(error=RuntimeError("timeout"), result=None)
+                        app.playback_state_busy = True
+                        app.finish_playback_state_worker(worker, WorkerState.ERROR)  # type: ignore[arg-type]
+                        self.assertEqual(app.playback_status, "Playing")
+                        self.assertEqual(app.playback_poll_failures, 1)
+                        stop.assert_not_called()
+                        app.finish_playback_state_worker(worker, WorkerState.ERROR)  # type: ignore[arg-type]
+                        self.assertEqual(app.playback_status, "Playing")
+                        app.finish_playback_state_worker(worker, WorkerState.ERROR)  # type: ignore[arg-type]
+                        self.assertEqual(app.playback_status, "Stopped")
+                        stop.assert_called_once()
+                        await pilot.press("q")
+
+    async def test_tui_now_panel_keeps_progress_visible_in_five_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}):
+                store = TonepathStore()
+                track_id = self.add_ready_track(store, tmp, "a.mp3")
+                store.conn.execute(
+                    "UPDATE tracks SET artist = ? WHERE id = ?",
+                    ("An intentionally very long artist and orchestra display name", track_id),
+                )
+                store.conn.commit()
+                store.close()
+
+                app = TonepathApp("from irritated to focus in 30 minutes")
+                async with app.run_test() as pilot:
+                    app.live_playback_state = PlaybackState(True, False, 64.0, 180.0, 75.0)
+                    lines = app.now_playing_text().splitlines()
+                    self.assertEqual(len(lines), 5)
+                    self.assertIn("E 0.50", lines[3])
+                    self.assertIn("1:04", lines[4])
+                    self.assertIn("vol 75%", lines[4])
+                    self.assertLessEqual(len(lines[1]), 38)
+                    self.assertLessEqual(len(lines[2]), 38)
                     await pilot.press("q")
 
     async def test_tui_repeat_one_restarts_same_track_on_finish(self) -> None:

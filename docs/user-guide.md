@@ -70,7 +70,7 @@ The TUI has a small built-in theme pack: `Warmline`, `Midnight`, `High Contrast`
 
 These palettes are fixed local Tonepath palettes inspired by mature terminal color systems such as Solarized, Catppuccin, Dracula, and black/green music-player TUIs. Tonepath does not download external theme files and does not require Ghostty, iTerm, oh-my-zsh, or any terminal theme to be installed. Fonts are controlled by your terminal app, not Tonepath. Use a readable monospace font in Ghostty, iTerm, Terminal, or your preferred terminal.
 
-The bottom command bar stays visible while you type, so playback keys do not disappear when the Request input is focused. The Now panel shows an estimated progress bar when track duration is known. The pulse meter is a decorative energy visual derived from local features; it is not a real-time audio spectrum.
+The bottom command bar stays visible while you type, so playback keys do not disappear when the Request input is focused. The Now panel reads position, duration, pause state, and volume from the managed `mpv` process. The pulse meter is a decorative energy visual derived from local features; it is not a real-time audio spectrum.
 
 TUI keys:
 
@@ -78,7 +78,9 @@ TUI keys:
 /          focus prompt
 n          new prompt
 Enter      submit prompt when input is focused
-space / p  play current track
+space / p  play, pause, or resume
+Left/Right seek backward/forward 10 seconds
+Up/Down    raise/lower volume by 5%
 x          stop playback
 s          skip and record negative feedback
 >          next track without feedback
@@ -88,6 +90,7 @@ v          prefer less vocals
 +          too loud; lower upcoming energy
 -          too slow; raise upcoming energy
 m          cycle playback mode
+Ctrl+L     open listening history
 Ctrl+O     open or hide the memory notes panel (Control + letter o, not zero)
 Ctrl+S     save memory locally
 Ctrl+Enter save memory and update profile with AI Assist
@@ -102,8 +105,11 @@ w          write full why to events
 a          show Codex audit command
 r          show latest Codex rerank preview
 ?          show full help panel
-q          stop playback and quit
+q          stop playback and quit when Request is not focused
+Ctrl+Q     stop playback and quit at any time
 ```
+
+Arrow keys remain text-editing controls while the Request or Memory editor is focused, and remain History navigation controls inside Listening History. Volume is preserved while Tonepath switches tracks in the current TUI process, but Player Core v1 does not persist it across app restarts.
 
 Playback modes are TUI-local:
 

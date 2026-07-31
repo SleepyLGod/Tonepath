@@ -175,6 +175,26 @@ class HistoryScreenTest(unittest.IsolatedAsyncioTestCase):
         self.ipc_ready = patch.object(MpvAdapter, "wait_for_ipc")
         self.ipc_ready.start()
         self.addCleanup(self.ipc_ready.stop)
+        properties: dict[str, object] = {
+            "pause": False,
+            "time-pos": 12.0,
+            "duration": 180.0,
+            "volume": 100.0,
+        }
+
+        def send_command(_adapter: MpvAdapter, _ipc_path: Path, command: list[object]) -> object:
+            if command[0] == "get_property":
+                return properties[str(command[1])]
+            if command[0] == "set_property":
+                properties[str(command[1])] = command[2]
+                return None
+            if command[0] == "seek":
+                return None
+            raise AssertionError(f"Unexpected mpv command: {command}")
+
+        self.ipc_commands = patch.object(MpvAdapter, "send_command", autospec=True, side_effect=send_command)
+        self.ipc_commands.start()
+        self.addCleanup(self.ipc_commands.stop)
 
     async def wait_for_request_idle(self, app: TonepathApp, pilot: object) -> None:
         for _ in range(80):
@@ -242,8 +262,10 @@ class HistoryScreenTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual({session.id for session in screen.sessions}, {played_id, saved_id})
                     self.assertNotIn(hidden_id, {session.id for session in screen.sessions})
                     first_id = screen.selected_session_id
-                    await pilot.press("j")
+                    await pilot.press("down")
                     self.assertNotEqual(screen.selected_session_id, first_id)
+                    await pilot.press("up")
+                    self.assertEqual(screen.selected_session_id, first_id)
                     await pilot.press("escape")
                     await pilot.press("ctrl+q")
 
@@ -266,6 +288,10 @@ class HistoryScreenTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(stop.call_count, 0)
                         pulse_before_poll = app.pulse_tick
                         app.poll_playback_finished()
+                        for _ in range(20):
+                            if not app.playback_state_busy:
+                                break
+                            await pilot.pause(0.01)
                         self.assertIsInstance(app.screen, HistoryScreen)
                         self.assertGreater(app.pulse_tick, pulse_before_poll)
 

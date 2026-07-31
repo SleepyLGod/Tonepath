@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
-import time
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
@@ -28,7 +27,7 @@ from tonepath.memory import (
 )
 from tonepath.model_runtime import model_runtime_status
 from tonepath.models import CandidateScore, FeedbackType, SessionPlan
-from tonepath.playback_controller import PlaybackController
+from tonepath.playback_controller import PlaybackController, PlaybackState
 from tonepath.profile import apply_suggestion, apply_suggestion_group, list_pending_suggestions, pending_suggestion_groups, profile_learning_hint, save_suggestions
 from tonepath.readiness import LibraryStatus, library_status, readiness_blocks_session, readiness_label, status_next_action
 from tonepath.session import SessionRunner
@@ -68,6 +67,14 @@ class RequestWorkerResult:
     plan: SessionPlan
     intent_note: str | None
     history_source_session_id: int | None
+
+
+@dataclass(frozen=True)
+class PlaybackPollResult:
+    """Live mpv state read for one playback generation."""
+
+    generation: int
+    state: PlaybackState
 
 
 class TonepathApp(App[None]):
@@ -217,6 +224,10 @@ class TonepathApp(App[None]):
         Binding("n", "new_prompt", "New", show=False),
         Binding("space", "play", "Play", key_display="Space"),
         Binding("p", "play", "Play", show=False),
+        Binding("left", "seek_backward", "Back 10s", show=False, priority=True),
+        Binding("right", "seek_forward", "Forward 10s", show=False, priority=True),
+        Binding("up", "volume_up", "Volume up", show=False, priority=True),
+        Binding("down", "volume_down", "Volume down", show=False, priority=True),
         Binding("x", "stop_playback", "Stop", show=False),
         Binding(">", "next_track", "Next", key_display=">"),
         Binding("<", "previous_track", "Prev", key_display="<"),
@@ -258,7 +269,10 @@ class TonepathApp(App[None]):
         self.playback: PlaybackController | None = None
         self.playback_status = "Ready"
         self.playback_timer: Any | None = None
-        self.playback_started_at: float | None = None
+        self.live_playback_state = PlaybackState(False, False, None, None, None)
+        self.playback_generation = 0
+        self.playback_state_busy = False
+        self.playback_poll_failures = 0
         self.model_runtime_ready = False
         self.library_status: LibraryStatus | None = None
         self.readiness = "Needs setup"
@@ -400,7 +414,7 @@ class TonepathApp(App[None]):
             self.log_event("No next track." if direction > 0 else "No previous track.")
             return
         if not was_playing:
-            self.playback_started_at = None
+            self.live_playback_state = PlaybackState(False, False, None, None, None)
             self.pulse_tick = 0
         candidate = self.runner.current()
         if candidate is None:
@@ -415,13 +429,134 @@ class TonepathApp(App[None]):
         self.refresh_session_view()
 
     def action_play(self) -> None:
-        """Start playback for the current candidate."""
+        """Start, pause, or resume playback for the current candidate."""
 
         if self.runner is None:
             self.log_event("Enter a listening goal first.")
             self.query_one("#prompt-input", Input).focus()
             return
+        if self.playback is not None and self.playback_status in {"Playing", "Paused"}:
+            try:
+                if self.playback_status == "Playing":
+                    self.playback.pause()
+                    paused = True
+                else:
+                    self.playback.resume()
+                    paused = False
+            except RuntimeError as exc:
+                self.handle_playback_control_error(exc)
+                return
+            self.playback_status = "Paused" if paused else "Playing"
+            self.live_playback_state = PlaybackState(
+                True,
+                paused,
+                self.live_playback_state.position_sec,
+                self.live_playback_state.duration_sec,
+                self.live_playback_state.volume,
+            )
+            self.log_event("Paused playback." if paused else "Resumed playback.")
+            self.refresh_session_view()
+            return
         self.start_current_playback()
+
+    def action_seek_backward(self) -> None:
+        """Seek backward ten seconds when the player surface has focus."""
+
+        if self.forward_directional_key("left"):
+            return
+        self.seek_playback(-10.0)
+
+    def action_seek_forward(self) -> None:
+        """Seek forward ten seconds when the player surface has focus."""
+
+        if self.forward_directional_key("right"):
+            return
+        self.seek_playback(10.0)
+
+    def seek_playback(self, seconds: float) -> None:
+        """Seek managed playback without changing queue or feedback state."""
+
+        if self.playback is None or self.playback_status not in {"Playing", "Paused"}:
+            self.log_event("Start playback before seeking.")
+            return
+        try:
+            self.playback.seek_relative(seconds)
+            self.live_playback_state = self.playback.state()
+        except RuntimeError as exc:
+            self.handle_playback_control_error(exc)
+            return
+        direction = "forward" if seconds > 0 else "back"
+        self.log_event(f"Sought {direction} {abs(int(seconds))} seconds.")
+        self.refresh_session_view()
+
+    def action_volume_up(self) -> None:
+        """Raise managed playback volume by five percent."""
+
+        if self.forward_directional_key("up"):
+            return
+        self.adjust_playback_volume(5.0)
+
+    def action_volume_down(self) -> None:
+        """Lower managed playback volume by five percent."""
+
+        if self.forward_directional_key("down"):
+            return
+        self.adjust_playback_volume(-5.0)
+
+    def adjust_playback_volume(self, delta: float) -> None:
+        """Adjust managed playback volume without changing queue state."""
+
+        if self.playback is None or self.playback_status not in {"Playing", "Paused"}:
+            self.log_event("Start playback before changing volume.")
+            return
+        try:
+            volume = self.playback.adjust_volume(delta)
+        except RuntimeError as exc:
+            self.handle_playback_control_error(exc)
+            return
+        self.live_playback_state = PlaybackState(
+            True,
+            self.playback_status == "Paused",
+            self.live_playback_state.position_sec,
+            self.live_playback_state.duration_sec,
+            volume,
+        )
+        self.log_event(f"Volume: {volume:.0f}%.")
+        self.refresh_session_view()
+
+    def forward_directional_key(self, direction: str) -> bool:
+        """Keep arrow-key behavior inside text editors and History."""
+
+        if isinstance(self.screen, HistoryScreen):
+            if direction == "up":
+                self.screen.action_previous_history()
+            elif direction == "down":
+                self.screen.action_next_history()
+            return True
+        focused = self.focused
+        if isinstance(focused, Input):
+            if direction == "left":
+                focused.action_cursor_left()
+            elif direction == "right":
+                focused.action_cursor_right()
+            return True
+        if isinstance(focused, TextArea):
+            getattr(focused, f"action_cursor_{direction}")()
+            return True
+        return False
+
+    def handle_playback_control_error(self, exc: RuntimeError) -> None:
+        """Stop playback that can no longer be controlled and report why."""
+
+        if self.playback is not None:
+            self.playback.stop_current()
+        self.playback_generation += 1
+        self.playback_state_busy = False
+        self.playback_poll_failures = 0
+        self.playback_status = "Stopped"
+        self.live_playback_state = PlaybackState(False, False, None, None, None)
+        self.log_event(f"Playback control failed; stopped mpv: {exc}")
+        self.refresh_session_view()
 
     def action_stop_playback(self) -> None:
         """Stop active playback without exiting the TUI."""
@@ -430,8 +565,11 @@ class TonepathApp(App[None]):
             self.log_event("No playback controller.")
             return
         stopped = self.playback.stop_current()
+        self.playback_generation += 1
+        self.playback_state_busy = False
+        self.playback_poll_failures = 0
         self.playback_status = "Stopped"
-        self.playback_started_at = None
+        self.live_playback_state = PlaybackState(False, False, None, None, None)
         self.pulse_tick = 0
         self.log_event("Stopped playback." if stopped else "No active Tonepath playback.")
         self.refresh_session_view()
@@ -528,7 +666,7 @@ class TonepathApp(App[None]):
         self.intent_note = None
         self.playback = self.playback or PlaybackController(self.store)
         self.playback_status = "Ready"
-        self.playback_started_at = None
+        self.live_playback_state = PlaybackState(False, False, None, None, None)
         self.pulse_tick = 0
         self.right_panel = "why"
         prompt_input = self.query_one("#prompt-input", Input)
@@ -693,6 +831,9 @@ class TonepathApp(App[None]):
         if worker.group == "request":
             self.finish_request_worker(worker, event.state)
             return
+        if worker.group == "playback-state":
+            self.finish_playback_state_worker(worker, event.state)
+            return
         if worker.group != "memory":
             return
         self.memory_busy = False
@@ -785,7 +926,7 @@ class TonepathApp(App[None]):
             self.playback.stop_current()
         self.runner = None
         self.playback_status = "Ready"
-        self.playback_started_at = None
+        self.live_playback_state = PlaybackState(False, False, None, None, None)
         self.pulse_tick = 0
         prompt_input = self.query_one("#prompt-input", Input)
         prompt_input.value = ""
@@ -1006,7 +1147,7 @@ class TonepathApp(App[None]):
             return
         if self.playback is not None:
             self.playback.stop_current()
-        self.playback_started_at = None
+        self.live_playback_state = PlaybackState(False, False, None, None, None)
         self.pulse_tick = 0
         self.right_panel = "why"
         self.intent_note = result.intent_note
@@ -1049,8 +1190,14 @@ class TonepathApp(App[None]):
         except RuntimeError as exc:
             self.log_event(str(exc))
             return
+        self.playback_generation += 1
+        self.playback_poll_failures = 0
         self.playback_status = "Playing"
-        self.playback_started_at = time.monotonic()
+        try:
+            self.live_playback_state = self.playback.state()
+        except RuntimeError as exc:
+            self.handle_playback_control_error(exc)
+            return
         self.pulse_tick = 0
         self.log_event(f"Playing: {fallback_track_label(candidate.track.title, candidate.track.path.name)}")
         self.ensure_playback_polling()
@@ -1068,10 +1215,22 @@ class TonepathApp(App[None]):
         if self.playback is None:
             return
         if not self.playback.finish_if_exited():
-            if self.playback_status == "Playing" and self.runner is not None:
-                self.pulse_tick += 1
-                self.query_one("#now-playing", Static).update(self.now_playing_renderable())
-                self.query_one("#command-bar", Static).update(self.command_bar_renderable())
+            if (
+                self.playback_status in {"Playing", "Paused"}
+                and self.runner is not None
+                and not self.playback_state_busy
+            ):
+                self.playback_state_busy = True
+                generation = self.playback_generation
+                self.run_worker(
+                    partial(self.read_playback_state_job, generation),
+                    name="playback-state",
+                    group="playback-state",
+                    description="Reading mpv playback state",
+                    exit_on_error=False,
+                    exclusive=True,
+                    thread=True,
+                )
             return
         if self.runner is not None and self.playback_mode == "Repeat One":
             self.log_event("Repeating current track.")
@@ -1087,10 +1246,48 @@ class TonepathApp(App[None]):
                 self.start_current_playback()
                 return
         self.playback_status = "Finished"
-        self.playback_started_at = None
+        self.live_playback_state = PlaybackState(False, False, None, None, None)
         self.pulse_tick = 0
         self.log_event("Playback finished.")
         self.refresh_session_view()
+
+    def read_playback_state_job(self, generation: int) -> PlaybackPollResult:
+        """Read live mpv state without blocking the Textual event loop."""
+
+        if self.playback is None:
+            raise RuntimeError("No playback controller is active.")
+        return PlaybackPollResult(generation=generation, state=self.playback.state())
+
+    def finish_playback_state_worker(self, worker: Worker[Any], state: WorkerState) -> None:
+        """Apply one background telemetry result without overreacting to a transient timeout."""
+
+        self.playback_state_busy = False
+        if self.playback_status not in {"Playing", "Paused"}:
+            return
+        if state == WorkerState.SUCCESS and isinstance(worker.result, PlaybackPollResult):
+            result = worker.result
+            if result.generation != self.playback_generation:
+                return
+            self.playback_poll_failures = 0
+            self.live_playback_state = result.state
+            self.playback_status = "Paused" if result.state.paused else "Playing"
+            if self.playback_status == "Playing":
+                self.pulse_tick += 1
+            self.refresh_playback_surfaces()
+            return
+        if state == WorkerState.ERROR:
+            self.playback_poll_failures += 1
+            if self.playback_poll_failures >= 3:
+                error = worker.error
+                detail = error if isinstance(error, RuntimeError) else RuntimeError(str(error))
+                self.handle_playback_control_error(detail)
+
+    def refresh_playback_surfaces(self) -> None:
+        """Refresh only widgets driven by live playback telemetry."""
+
+        self.query_one("#now-playing", Static).update(self.now_playing_renderable())
+        self.query_one("#status-bar", Static).update(self.status_bar_text())
+        self.query_one("#command-bar", Static).update(self.command_bar_renderable())
 
     def refresh_session_view(self) -> None:
         """Refresh timeline, queue, why panel, and playback status."""
@@ -1173,18 +1370,18 @@ class TonepathApp(App[None]):
             return "Queue is empty. Run `tonepath scan` to add local music."
         features = self.store.get_features(candidate.track.id) if self.store is not None and candidate.track.id else None
         energy = "--" if features is None or features.energy is None else f"{features.energy:.2f}"
-        meter = energy_meter(features.energy if features is not None else None)
         loudness = "--" if features is None or features.loudness is None else f"{features.loudness:.1f} dBFS"
         bpm = bpm_text(features.bpm if features is not None else None)
         return "\n".join(
             [
                 f"{self.playback_status} · {candidate.phase.label} · {self.playback_mode} · {confidence_label(candidate.confidence)}",
-                truncate(fallback_track_label(candidate.track.title, candidate.track.path.name), 44),
-                display_artist(candidate.track),
-                f"energy {energy} {meter} · bpm {bpm}",
-                f"loudness {loudness}",
-                f"progress {self.progress_text(candidate.track.duration)}",
-                f"pulse {self.pulse_text(features.energy if features is not None else None, features.arousal_estimate if features is not None else None)}",
+                truncate(fallback_track_label(candidate.track.title, candidate.track.path.name), 38),
+                truncate(display_artist(candidate.track), 38),
+                (
+                    f"{self.pulse_text(features.energy if features is not None else None, features.arousal_estimate if features is not None else None)}"
+                    f" · E {energy} · {bpm} BPM · {loudness}"
+                ),
+                f"{self.progress_text()} · vol {self.volume_text()}",
             ]
         )
 
@@ -1210,15 +1407,21 @@ class TonepathApp(App[None]):
                 text.append(line, style=self.palette.muted)
         return text
 
-    def progress_text(self, duration: float | None) -> str:
-        """Return a local estimated playback progress label."""
+    def progress_text(self) -> str:
+        """Return the progress reported by the managed mpv process."""
 
-        if duration is None or duration <= 0:
+        duration = self.live_playback_state.duration_sec
+        elapsed = self.live_playback_state.position_sec
+        if duration is None or duration <= 0 or elapsed is None:
             return "--:-- ──────────── --:--"
-        elapsed = 0.0
-        if self.playback_status == "Playing" and self.playback_started_at is not None:
-            elapsed = min(max(time.monotonic() - self.playback_started_at, 0.0), duration)
+        elapsed = min(max(elapsed, 0.0), duration)
         return f"{format_clock(elapsed)} {progress_bar(elapsed, duration)} {format_clock(duration)}"
+
+    def volume_text(self) -> str:
+        """Return the volume reported by the managed mpv process."""
+
+        volume = self.live_playback_state.volume
+        return "--" if volume is None else f"{volume:.0f}%"
 
     def pulse_text(self, energy: float | None, arousal: float | None = None) -> str:
         """Return a decorative energy pulse, not a real-time audio spectrum."""
@@ -1289,7 +1492,9 @@ class TonepathApp(App[None]):
             [
                 "Help",
                 "Playback",
-                "Space / p  play current track",
+                "Space / p  play / pause / resume",
+                "Left/Right seek back / forward 10 seconds",
+                "Up/Down    volume up / down 5%",
                 ">          next track, no feedback",
                 "<          previous track, no feedback",
                 "x          stop playback",
@@ -1516,7 +1721,7 @@ class TonepathApp(App[None]):
         if prompt_focused is None:
             prompt_focused = bool(getattr(self.query_one("#prompt-input", Input), "has_focus", False))
         commands = [
-            ("Space", "Play"),
+            ("Space", "Play/Pause"),
             (">", "Next"),
             ("<", "Prev"),
             ("s", "Skip"),
@@ -1871,6 +2076,8 @@ def playback_symbol(status: str) -> str:
 
     if status == "Playing":
         return "●"
+    if status == "Paused":
+        return "Ⅱ"
     if status in {"Stopped", "Finished"}:
         return "■"
     if status.startswith("Need") or status == "No tracks":
@@ -1887,7 +2094,7 @@ def format_clock(seconds: float) -> str:
 
 
 def progress_bar(elapsed: float, duration: float, width: int = 12) -> str:
-    """Return a fixed-width progress bar for estimated playback progress."""
+    """Return a fixed-width progress bar for reported playback progress."""
 
     if duration <= 0:
         return "─" * width

@@ -21,7 +21,7 @@ Tonepath currently has a working local-first CLI/TUI prototype:
 - local audio feature analysis for duration, format, loudness, energy, BPM, vocalness, and tagging where available;
 - deterministic bilingual intent parsing for Chinese and English prompts;
 - deterministic path planning and selector scoring with explainable reasons;
-- controlled `mpv` playback with foreground stop, background stop, and TUI playback controls;
+- controlled `mpv` playback with local JSON IPC, real pause/resume, seek, volume, progress, and process cleanup;
 - saved-session queue snapshots, bookmarks, exact local replay, and JSON/M3U8 export;
 - Textual TUI with prompt intake, timeline, queue, now-playing state, why panel, private Memory, and event log;
 - feedback capture for like, skip, no-vocals, too-loud, and too-slow;
@@ -30,7 +30,15 @@ Tonepath currently has a working local-first CLI/TUI prototype:
 - optional DeepSeek/Qwen prompt parsing and packaged Codex audit skill;
 - GitHub CI and packaged resource checks.
 
-This is enough to prove the product direction. Profile and Memory loops now exist, but the personalized radio experience still needs real listening evidence and clearer history navigation before it can be called mature.
+This is enough to prove the product direction. Profile and Memory loops now exist; Saved Sessions, Listening History, and Player Core are also implemented. The personalized radio experience still needs real listening evidence before it can be called mature.
+
+Saved-session commands are available now:
+
+```bash
+uv run tonepath history list
+uv run tonepath history replay <session-id>
+uv run tonepath history export <session-id> --output <directory>
+```
 
 ## Product Gaps
 
@@ -282,14 +290,12 @@ Engineering rules:
 
 ## Immediate Next Step
 
-Validate Saved Sessions Core before adding its TUI surface:
+Design and implement a local Privacy Center that makes Tonepath's stored data and deletion boundaries visible before destructive actions:
 
 ```bash
-uv run tonepath history list
-uv run tonepath history show <session-id>
-uv run tonepath history save <session-id> --name "A useful path"
-uv run tonepath history replay <session-id> --dry-run
-uv run tonepath history export <session-id> --output /tmp/tonepath-session
+uv run tonepath privacy inspect
+uv run tonepath privacy export
+uv run tonepath privacy delete
 ```
 
-After the CLI persistence, replay, missing-file, and privacy boundaries are verified, design a separate TUI History panel. Do not mix that UI work with Player Core, Privacy Center, Setup Wizard, Session Host, or catalog handoff. The current selector remains local and evidence-first, and CLAP/hybrid remain evaluation tools until they show stable measured improvement.
+The Privacy Center should distinguish user-authored Memory, learned profile rules, listening history, audio evidence, model caches, and original music files. Deletion must remain explicit and previewable. Do not mix this work with Setup Wizard, Session Host, catalog handoff, or recommendation tuning. The current selector remains local and evidence-first, and CLAP/hybrid remain evaluation tools until they show stable measured improvement.
