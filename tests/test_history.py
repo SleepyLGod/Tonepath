@@ -512,7 +512,9 @@ class HistoryCliTest(unittest.TestCase):
                 source_id = HistoryDomainTest.save_queue(store, [first_id, second_id])
                 store.close()
 
-                with patch.object(MpvAdapter, "start", return_value=FakeProcess()):
+                with patch.object(MpvAdapter, "start", return_value=FakeProcess()), patch.object(
+                    MpvAdapter, "wait_for_ipc"
+                ):
                     result = CliRunner().invoke(
                         app,
                         ["history", "replay", str(source_id), "--background"],

@@ -43,7 +43,9 @@ class CliPlaybackTest(unittest.TestCase):
             tonepath_home = Path(tmp) / "home"
             with patch.dict(os.environ, {"TONEPATH_HOME": str(tonepath_home)}):
                 self.add_track(tmp)
-                with patch.object(MpvAdapter, "start", return_value=FakeProcess()):
+                with patch.object(MpvAdapter, "start", return_value=FakeProcess()), patch.object(
+                    MpvAdapter, "wait_for_ipc"
+                ):
                     result = CliRunner().invoke(app, ["start", "from irritated to focus in 30 minutes", "--background"])
                 self.assertEqual(result.exit_code, 0, result.output)
                 store = TonepathStore()

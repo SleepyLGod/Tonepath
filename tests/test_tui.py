@@ -54,6 +54,11 @@ class FinishedProcess(FakeProcess):
 
 
 class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.ipc_ready = patch.object(MpvAdapter, "wait_for_ipc")
+        self.ipc_ready.start()
+        self.addCleanup(self.ipc_ready.stop)
+
     async def wait_for_memory_idle(self, app: TonepathApp, pilot: object) -> None:
         for _ in range(80):
             if not app.memory_busy:

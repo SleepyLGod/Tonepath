@@ -4,6 +4,7 @@ from pathlib import Path
 
 from tonepath.db import TonepathStore
 from tonepath.models import Track
+from tonepath.playback import MpvCommandError
 from tonepath.playback_controller import CURRENT_MPV_PID_KEY, CURRENT_PLAY_ID_KEY, PlaybackController
 
 
@@ -19,15 +20,44 @@ class FakeProcess:
 
 class FakeAdapter:
     def __init__(self) -> None:
-        self.started: list[list[Path]] = []
+        self.started: list[tuple[list[Path], Path | None, float | None]] = []
         self.stopped_processes: list[FakeProcess] = []
         self.stopped_pids: list[int] = []
+        self.commands: list[list[object]] = []
         self.next_pid = 100
+        self.wait_error: RuntimeError | None = None
+        self.properties: dict[str, object] = {
+            "pause": False,
+            "time-pos": 12.5,
+            "duration": 180.0,
+            "volume": 100.0,
+        }
 
-    def start(self, paths: list[Path]) -> FakeProcess:
-        self.started.append(paths)
+    def start(
+        self,
+        paths: list[Path],
+        ipc_path: Path | None = None,
+        volume: float | None = None,
+    ) -> FakeProcess:
+        self.started.append((paths, ipc_path, volume))
         self.next_pid += 1
         return FakeProcess(self.next_pid)
+
+    def wait_for_ipc(self, ipc_path: Path, process: FakeProcess) -> None:
+        if self.wait_error is not None:
+            raise self.wait_error
+
+    def send_command(self, ipc_path: Path, command: list[object]) -> object:
+        self.commands.append(command)
+        if command[0] == "get_property":
+            return self.properties[str(command[1])]
+        if command[0] == "set_property":
+            self.properties[str(command[1])] = command[2]
+            return None
+        if command[0] == "seek":
+            self.properties["time-pos"] = float(self.properties["time-pos"]) + float(command[1])
+            return None
+        raise AssertionError(f"Unexpected command: {command}")
 
     def stop_process(self, process: FakeProcess) -> None:
         process.terminated = True
@@ -49,6 +79,100 @@ class PlaybackControllerTest(unittest.TestCase):
             controller = PlaybackController(store, adapter=adapter)  # type: ignore[arg-type]
             process = controller.start([Path("/tmp/a.mp3")])
             self.assertEqual(store.get_app_state(CURRENT_MPV_PID_KEY), str(process.pid))
+            self.assertIsNotNone(store.get_app_state("current_mpv_ipc_path"))
+            self.assertIsNotNone(adapter.started[0][1])
+            self.assertEqual(adapter.started[0][2], 100.0)
+            store.close()
+
+    def test_start_failure_stops_uncontrollable_process_and_clears_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            adapter = FakeAdapter()
+            adapter.wait_error = RuntimeError("socket unavailable")
+            controller = PlaybackController(store, adapter=adapter)  # type: ignore[arg-type]
+
+            with self.assertRaisesRegex(RuntimeError, "socket unavailable"):
+                controller.start([Path("/tmp/a.mp3")])
+
+            self.assertEqual(len(adapter.stopped_processes), 1)
+            self.assertIsNone(controller.process)
+            self.assertIsNone(store.get_app_state(CURRENT_MPV_PID_KEY))
+            self.assertIsNone(store.get_app_state("current_mpv_ipc_path"))
+            store.close()
+
+    def test_state_reads_live_mpv_properties(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            adapter = FakeAdapter()
+            controller = PlaybackController(store, adapter=adapter)  # type: ignore[arg-type]
+            controller.start([Path("/tmp/a.mp3")])
+
+            state = controller.state()
+
+            self.assertTrue(state.playing)
+            self.assertFalse(state.paused)
+            self.assertEqual(state.position_sec, 12.5)
+            self.assertEqual(state.duration_sec, 180.0)
+            self.assertEqual(state.volume, 100.0)
+            store.close()
+
+    def test_state_treats_temporarily_unavailable_numeric_properties_as_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            adapter = FakeAdapter()
+            controller = PlaybackController(store, adapter=adapter)  # type: ignore[arg-type]
+            controller.start([Path("/tmp/a.mp3")])
+            original_send_command = adapter.send_command
+
+            def send_command(ipc_path: Path, command: list[object]) -> object:
+                if command == ["get_property", "time-pos"]:
+                    raise MpvCommandError("property unavailable")
+                return original_send_command(ipc_path, command)
+
+            adapter.send_command = send_command  # type: ignore[method-assign]
+
+            state = controller.state()
+
+            self.assertTrue(state.playing)
+            self.assertIsNone(state.position_sec)
+            self.assertEqual(state.duration_sec, 180.0)
+            store.close()
+
+    def test_pause_resume_seek_and_volume_do_not_create_new_play_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            track_id = self.add_track(store, tmp)
+            adapter = FakeAdapter()
+            controller = PlaybackController(store, adapter=adapter)  # type: ignore[arg-type]
+            controller.start([Path(tmp) / "song.mp3"], track_id=track_id)
+
+            controller.pause()
+            controller.resume()
+            controller.seek_relative(10.0)
+            volume = controller.adjust_volume(-35.0)
+
+            play_count = store.conn.execute("SELECT COUNT(*) FROM plays").fetchone()[0]
+            feedback_count = store.conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0]
+            self.assertEqual(play_count, 1)
+            self.assertEqual(feedback_count, 0)
+            self.assertEqual(volume, 65.0)
+            self.assertIn(["set_property", "pause", True], adapter.commands)
+            self.assertIn(["set_property", "pause", False], adapter.commands)
+            self.assertIn(["seek", 10.0, "relative+exact"], adapter.commands)
+            self.assertIn(["set_property", "volume", 65.0], adapter.commands)
+            store.close()
+
+    def test_replace_preserves_controller_volume(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            adapter = FakeAdapter()
+            controller = PlaybackController(store, adapter=adapter)  # type: ignore[arg-type]
+            controller.start([Path("/tmp/a.mp3")])
+            controller.adjust_volume(-35.0)
+
+            controller.replace([Path("/tmp/b.mp3")])
+
+            self.assertEqual(adapter.started[-1][2], 65.0)
             store.close()
 
     def test_stop_current_clears_pid(self) -> None:

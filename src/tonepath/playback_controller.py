@@ -3,14 +3,29 @@
 from __future__ import annotations
 
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
+from tonepath import config
 from tonepath.db import TonepathStore
-from tonepath.playback import MpvAdapter
+from tonepath.playback import MpvAdapter, MpvCommandError
 
 
 CURRENT_MPV_PID_KEY = "current_mpv_pid"
 CURRENT_PLAY_ID_KEY = "current_play_id"
+CURRENT_MPV_IPC_PATH_KEY = "current_mpv_ipc_path"
+
+
+@dataclass(frozen=True)
+class PlaybackState:
+    """Live state reported by the managed mpv process."""
+
+    playing: bool
+    paused: bool
+    position_sec: float | None
+    duration_sec: float | None
+    volume: float | None
 
 
 class PlaybackController:
@@ -20,6 +35,8 @@ class PlaybackController:
         self.store = store
         self.adapter = adapter or MpvAdapter()
         self.process: subprocess.Popen[bytes] | None = None
+        self.ipc_path: Path | None = None
+        self.volume = 100.0
 
     def start(
         self,
@@ -29,13 +46,83 @@ class PlaybackController:
     ) -> subprocess.Popen[bytes]:
         """Start playback and store the managed process PID."""
 
-        process = self.adapter.start(paths)
+        ipc_path = new_ipc_path()
+        process = self.adapter.start(paths, ipc_path=ipc_path, volume=self.volume)
+        try:
+            self.adapter.wait_for_ipc(ipc_path, process)
+        except RuntimeError:
+            self.adapter.stop_process(process)
+            self.process = None
+            self.ipc_path = None
+            self.clear()
+            raise
         self.process = process
+        self.ipc_path = ipc_path
         self.store.set_app_state(CURRENT_MPV_PID_KEY, str(process.pid))
+        self.store.set_app_state(CURRENT_MPV_IPC_PATH_KEY, str(ipc_path))
         if track_id is not None:
             play_id = self.store.start_play(session_id=session_id, track_id=track_id)
             self.store.set_app_state(CURRENT_PLAY_ID_KEY, str(play_id))
         return process
+
+    def state(self) -> PlaybackState:
+        """Return live playback properties from mpv."""
+
+        ipc_path = self.active_ipc_path()
+        if ipc_path is None or (self.process is not None and self.process.poll() is not None):
+            return PlaybackState(False, False, None, None, None)
+        paused = bool(self.adapter.send_command(ipc_path, ["get_property", "pause"]))
+        position = optional_float(read_optional_property(self.adapter, ipc_path, "time-pos"))
+        duration = optional_float(read_optional_property(self.adapter, ipc_path, "duration"))
+        volume = optional_float(read_optional_property(self.adapter, ipc_path, "volume"))
+        if volume is not None:
+            self.volume = volume
+        return PlaybackState(True, paused, position, duration, volume)
+
+    def pause(self) -> None:
+        """Pause the active mpv process without ending its play record."""
+
+        self.adapter.send_command(self.require_ipc_path(), ["set_property", "pause", True])
+
+    def resume(self) -> None:
+        """Resume the active mpv process without creating another play record."""
+
+        self.adapter.send_command(self.require_ipc_path(), ["set_property", "pause", False])
+
+    def toggle_pause(self) -> bool:
+        """Toggle pause and return whether playback is now paused."""
+
+        paused = self.state().paused
+        self.adapter.send_command(self.require_ipc_path(), ["set_property", "pause", not paused])
+        return not paused
+
+    def seek_relative(self, seconds: float) -> None:
+        """Seek relative to the current position without changing queue state."""
+
+        self.adapter.send_command(self.require_ipc_path(), ["seek", seconds, "relative+exact"])
+
+    def adjust_volume(self, delta: float) -> float:
+        """Adjust managed mpv volume and return the clamped value."""
+
+        self.volume = min(max(self.volume + delta, 0.0), 100.0)
+        self.adapter.send_command(self.require_ipc_path(), ["set_property", "volume", self.volume])
+        return self.volume
+
+    def active_ipc_path(self) -> Path | None:
+        """Return the active process IPC path, including recorded state."""
+
+        if self.ipc_path is not None:
+            return self.ipc_path
+        value = self.store.get_app_state(CURRENT_MPV_IPC_PATH_KEY)
+        return Path(value) if value else None
+
+    def require_ipc_path(self) -> Path:
+        """Return the active IPC path or fail with a user-facing error."""
+
+        ipc_path = self.active_ipc_path()
+        if ipc_path is None:
+            raise RuntimeError("No controllable Tonepath playback is active.")
+        return ipc_path
 
     def replace(
         self,
@@ -109,8 +196,10 @@ class PlaybackController:
         if play_id is not None:
             self.store.end_play(play_id, skipped=mark_skipped)
         self.process = None
+        self.ipc_path = None
         self.store.delete_app_state(CURRENT_MPV_PID_KEY)
         self.store.delete_app_state(CURRENT_PLAY_ID_KEY)
+        self.store.delete_app_state(CURRENT_MPV_IPC_PATH_KEY)
 
 
 def parse_int(value: str | None) -> int | None:
@@ -122,3 +211,33 @@ def parse_int(value: str | None) -> int | None:
         return int(value)
     except ValueError:
         return None
+
+
+def optional_float(value: object) -> float | None:
+    """Convert one mpv property to a float when available."""
+
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise RuntimeError(f"mpv returned a non-numeric playback property: {value!r}") from None
+
+
+def read_optional_property(adapter: MpvAdapter, ipc_path: Path, name: str) -> object:
+    """Read an mpv property that may be unavailable while media is loading."""
+
+    try:
+        return adapter.send_command(ipc_path, ["get_property", name])
+    except MpvCommandError as exc:
+        if exc.error == "property unavailable":
+            return None
+        raise
+
+
+def new_ipc_path() -> Path:
+    """Return a unique workspace-local mpv IPC socket path."""
+
+    run_dir = config.ensure_data_dir() / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir / f"mpv-{uuid4().hex}.sock"
