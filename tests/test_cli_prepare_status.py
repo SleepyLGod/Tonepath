@@ -46,8 +46,8 @@ class CliPrepareStatusTest(unittest.TestCase):
                 runner = CliRunner()
                 self.assertEqual(runner.invoke(app, ["config", "init"]).exit_code, 0)
                 self.assertEqual(runner.invoke(app, ["config", "add-music-dir", str(music)]).exit_code, 0)
-                with patch("tonepath.cli.model_runtime_status", return_value=SimpleNamespace(ready=True, affect_ready=True)), patch(
-                    "tonepath.cli.analyze_library",
+                with patch("tonepath.preparation.model_runtime_status", return_value=SimpleNamespace(ready=True, affect_ready=True)), patch(
+                    "tonepath.preparation.analyze_library",
                     side_effect=[(1, 0), (1, 0), (1, 0)],
                 ) as analyze:
                     result = runner.invoke(app, ["prepare", "--limit", "5"])
@@ -76,8 +76,8 @@ class CliPrepareStatusTest(unittest.TestCase):
                 runner = CliRunner()
                 self.assertEqual(runner.invoke(app, ["config", "init"]).exit_code, 0)
                 self.assertEqual(runner.invoke(app, ["config", "add-music-dir", str(music)]).exit_code, 0)
-                with patch("tonepath.cli.model_runtime_status", return_value=SimpleNamespace(ready=False)), patch(
-                    "tonepath.cli.analyze_library",
+                with patch("tonepath.preparation.model_runtime_status", return_value=SimpleNamespace(ready=False)), patch(
+                    "tonepath.preparation.analyze_library",
                     return_value=(1, 0),
                 ) as analyze:
                     result = runner.invoke(app, ["prepare"])
@@ -97,8 +97,8 @@ class CliPrepareStatusTest(unittest.TestCase):
                 runner = CliRunner()
                 self.assertEqual(runner.invoke(app, ["config", "init"]).exit_code, 0)
                 self.assertEqual(runner.invoke(app, ["config", "add-music-dir", str(music)]).exit_code, 0)
-                with patch("tonepath.cli.model_runtime_status", return_value=SimpleNamespace(ready=False)), patch(
-                    "tonepath.cli.analyze_library",
+                with patch("tonepath.preparation.model_runtime_status", return_value=SimpleNamespace(ready=False)), patch(
+                    "tonepath.preparation.analyze_library",
                     return_value=(1, 0),
                 ) as analyze:
                     result = runner.invoke(app, ["prepare", "--full"])
@@ -118,11 +118,11 @@ class CliPrepareStatusTest(unittest.TestCase):
                 runner = CliRunner()
                 self.assertEqual(runner.invoke(app, ["config", "init"]).exit_code, 0)
                 self.assertEqual(runner.invoke(app, ["config", "add-music-dir", str(music)]).exit_code, 0)
-                with patch("tonepath.cli.model_runtime_status", return_value=SimpleNamespace(ready=False)), patch(
-                    "tonepath.cli.setup_essentia_tf_runtime",
+                with patch("tonepath.preparation.model_runtime_status", return_value=SimpleNamespace(ready=False)), patch(
+                    "tonepath.preparation.setup_essentia_tf_runtime",
                     return_value=SimpleNamespace(ready=True, affect_ready=True),
                 ) as setup, patch(
-                    "tonepath.cli.analyze_library",
+                    "tonepath.preparation.analyze_library",
                     side_effect=[(1, 0), (1, 0), (1, 0)],
                 ) as analyze:
                     result = runner.invoke(app, ["prepare", "--full", "--setup-models"])
@@ -144,8 +144,8 @@ class CliPrepareStatusTest(unittest.TestCase):
                 runner = CliRunner()
                 self.assertEqual(runner.invoke(app, ["config", "init"]).exit_code, 0)
                 self.assertEqual(runner.invoke(app, ["config", "add-music-dir", str(music)]).exit_code, 0)
-                with patch("tonepath.cli.model_runtime_status", return_value=SimpleNamespace(ready=True)), patch(
-                    "tonepath.cli.analyze_library",
+                with patch("tonepath.preparation.model_runtime_status", return_value=SimpleNamespace(ready=True)), patch(
+                    "tonepath.preparation.analyze_library",
                     return_value=(1, 0),
                 ) as analyze:
                     result = runner.invoke(app, ["prepare", "--fast"])
@@ -171,8 +171,8 @@ class CliPrepareStatusTest(unittest.TestCase):
                 runner = CliRunner()
                 self.assertEqual(runner.invoke(app, ["config", "init"]).exit_code, 0)
                 self.assertEqual(runner.invoke(app, ["config", "add-music-dir", str(music)]).exit_code, 0)
-                with patch("tonepath.cli.model_runtime_status", return_value=SimpleNamespace(ready=True)), patch(
-                    "tonepath.cli.analyze_library",
+                with patch("tonepath.preparation.model_runtime_status", return_value=SimpleNamespace(ready=True)), patch(
+                    "tonepath.preparation.analyze_library",
                     side_effect=fake_analyze,
                 ), patch("tonepath.cli.audio_probe_diagnostic", return_value="invalid audio: no MPEG frames found"):
                     result = runner.invoke(app, ["prepare"])

@@ -29,6 +29,7 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual(settings.models.preferred_tagger, "essentia-tf")
                 self.assertEqual(settings.models.separator_fallback, "off")
                 self.assertEqual(settings.experience.mode, "private")
+                self.assertEqual(settings.llm.provider, "deepseek")
                 self.assertEqual(settings.ui.theme, "warmline")
 
     def test_default_home_is_workspace_local_when_not_overridden(self) -> None:
@@ -79,7 +80,7 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual(settings.models.mode, "balanced")
                 self.assertFalse(settings.models.allow_online)
 
-    def test_preset_config_music_dir_replaces_existing_dirs(self) -> None:
+    def test_preset_config_music_dir_preserves_existing_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             first = Path(tmp) / "first"
@@ -88,7 +89,7 @@ class ConfigTest(unittest.TestCase):
                 config.write_config(replace(config.default_config(), music_dirs=(str(first), str(second))))
                 settings = config.preset_config("private", music_dir=first)
 
-                self.assertEqual(settings.music_dirs, (str(first),))
+                self.assertEqual(settings.music_dirs, (str(first), str(second)))
 
     def test_preset_config_smart_is_opt_in_intelligent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -97,10 +98,27 @@ class ConfigTest(unittest.TestCase):
 
                 self.assertEqual(settings.experience.mode, "smart")
                 self.assertEqual(settings.network_mode, "online-opt-in")
-                self.assertTrue(settings.privacy.send_to_llm)
+                self.assertFalse(settings.privacy.send_to_llm)
                 self.assertEqual(settings.models.mode, "full")
                 self.assertTrue(settings.models.allow_online)
                 self.assertFalse(settings.models.allow_setup)
+
+    def test_llm_provider_round_trips_without_storing_a_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
+                settings = replace(
+                    config.default_config(),
+                    llm=config.LlmConfig(provider="qwen"),
+                )
+                config.write_config(settings)
+
+                loaded = config.load_config()
+
+                self.assertEqual(loaded.llm.provider, "qwen")
+                rendered = (home / "config.toml").read_text(encoding="utf-8")
+                self.assertIn('[llm]\nprovider = "qwen"', rendered)
+                self.assertNotIn("API_KEY", rendered)
 
     def test_ui_theme_loads_and_invalid_theme_falls_back(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

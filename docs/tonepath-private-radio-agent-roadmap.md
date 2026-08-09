@@ -291,7 +291,7 @@ Engineering rules:
 
 ## Immediate Next Step
 
-Turn the existing setup presets into a clearer first-run Setup Wizard:
+The guided Setup Core is now available in the CLI:
 
 ```bash
 uv run tonepath setup
@@ -299,4 +299,4 @@ uv run tonepath setup --preset private
 uv run tonepath setup --preset smart
 ```
 
-Privacy Center is now available in both CLI and TUI without moving the underlying data. The next checkpoint should make first-run choices understandable: music location, Private versus Smart behavior, optional local models, and explicit external-processing consent. It must not silently download models, enable network calls, expose secrets, or mix setup work with Session Host, catalog handoff, or recommendation tuning.
+It keeps the normal path to Music, Experience, and Review, while selective reconfiguration and scriptable presets remain available. The next checkpoint is the matching TUI Setup screen with first-run auto-entry and background preparation. It must preserve the same consent, no-secret, no-silent-download, and current-queue boundaries.

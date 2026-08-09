@@ -17,6 +17,7 @@ For detailed usage, model setup, evaluation, profile learning, and privacy notes
 ## What It Does
 
 - prepares a local music library with source-attributed metadata and audio evidence;
+- guides first-time setup through Music, Experience, and Review without storing API keys;
 - turns Chinese or English listening goals into state-transition phases;
 - selects a short local listening path with confidence, reasons, and low-stimulation safety checks;
 - keeps replayable local session history with bookmarks and JSON/M3U8 export bundles;
@@ -28,7 +29,7 @@ For detailed usage, model setup, evaluation, profile learning, and privacy notes
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| CLI workflow | Implemented | `prepare`, `status`, `listen`, `start`, `history`, `profile`, `eval`, `doctor`, and related commands. |
+| CLI workflow | Implemented | Guided `setup`, plus `prepare`, `status`, `listen`, `history`, `profile`, `privacy`, `eval`, and related commands. |
 | Local library | Implemented | Scans local audio metadata, stores tracks/features/sessions/feedback in SQLite under `TONEPATH_HOME`. |
 | Planning | Implemented | Deterministic Chinese/English prompt parsing and state-transition phase planning. |
 | Selection | Implemented | Explainable deterministic scoring with confidence labels, profile-rule support, low-stimulation semantic safety, and gentle-uplift affect handling. |
@@ -60,9 +61,7 @@ git clone https://github.com/SleepyLGod/Tonepath.git
 cd Tonepath
 uv sync
 cp .env.example .env
-uv run tonepath setup --preset private
-uv run tonepath config add-music-dir ~/Music
-uv run tonepath prepare
+uv run tonepath setup
 uv run tonepath status
 uv run tonepath listen "from tired to focused in 30 minutes, no vocals" --dry-run
 ```
@@ -70,10 +69,10 @@ uv run tonepath listen "from tired to focused in 30 minutes, no vocals" --dry-ru
 The normal workflow is:
 
 ```text
-setup -> add music -> prepare -> listen or tonepath
+setup -> prepare -> listen or tonepath
 ```
 
-`setup` chooses a Private, Smart, or Custom experience preset. `prepare` scans and analyzes your local library. `status` tells you whether the library is ready and what to do next. `listen` is the smart default CLI path; `tonepath` opens the TUI workbench.
+`setup` asks for your music folder, a Private or Smart experience, and a final review. It can prepare the library after a separate confirmation. `status` tells you whether the library is ready and what to do next. `listen` is the smart default CLI path; `tonepath` opens the TUI workbench.
 
 ## Common Commands
 

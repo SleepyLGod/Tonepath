@@ -8,8 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Annotated
 
@@ -47,7 +46,7 @@ from tonepath.history import (
     load_history,
     prepare_replay,
 )
-from tonepath.llm import llm_doctor, parse_prompt_with_llm
+from tonepath.llm import llm_doctor, parse_prompt_with_llm, provider_config
 from tonepath.library import clear_metadata_override, library_issues, set_metadata_override
 from tonepath.memory import (
     add_memory_log,
@@ -71,6 +70,8 @@ from tonepath.models import CandidateScore, SessionPlan, Track
 from tonepath.planner import plan_session, request_constraints
 from tonepath.playback import MpvAdapter
 from tonepath.playback_controller import PlaybackController
+from tonepath import preparation as tonepath_preparation
+from tonepath.preparation import AnalysisFailure, PreparationEvent, PreparationOptions, ScanSummary
 from tonepath.profile import (
     active_rule_payload,
     apply_suggestion_group,
@@ -110,8 +111,8 @@ from tonepath.readiness import (
     readiness_label,
     status_next_action,
 )
-from tonepath.scanner import scan_directory
 from tonepath.selector import select_path
+from tonepath.setup import SetupDraft, setup_review, setup_summary, validate_music_directories
 from tonepath.tui import run_tui
 from tonepath import config as tonepath_config
 
@@ -150,25 +151,6 @@ app.add_typer(history_app, name="history")
 console = Console()
 
 
-@dataclass(frozen=True)
-class ScanSummary:
-    """Summary of one scan pass."""
-
-    total: int
-    scanned_dirs: int
-    skipped: int
-    pruned: int
-
-
-@dataclass(frozen=True)
-class AnalysisFailure:
-    """One failed analysis item from a prepare run."""
-
-    stage: str
-    track: Track
-    error: str
-
-
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context) -> None:
     """Open the TUI when no subcommand is provided."""
@@ -195,20 +177,21 @@ def setup(
     music_dir: Annotated[Path | None, typer.Option("--music-dir", help="Music directory to save in config.")] = None,
     allow_model_setup: Annotated[bool | None, typer.Option("--allow-model-setup/--no-allow-model-setup", help="Allow prepare to set up local model runtimes.")] = None,
     send_to_llm: Annotated[bool | None, typer.Option("--send-to-llm/--no-send-to-llm", help="Allow opt-in LLM profile reflection when configured.")] = None,
+    llm_provider: Annotated[str | None, typer.Option("--llm-provider", help="AI Assist provider: deepseek or qwen. No key is stored.")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Show the config that would be written.")] = False,
 ) -> None:
-    """Guide first-run setup around Private, Smart, or Custom experience presets."""
+    """Configure Tonepath through guided setup or a scriptable preset."""
 
-    chosen = preset.strip().lower() if preset else ""
-    if not chosen:
-        console.print("Tonepath setup presets: private, smart, custom")
-        chosen = typer.prompt("Choose preset", default="private").strip().lower()
+    if preset is None:
+        run_guided_setup(dry_run=dry_run)
+        return
     try:
         settings = tonepath_config.preset_config(
-            chosen,
+            preset,
             music_dir=music_dir,
             allow_model_setup=allow_model_setup,
             send_to_llm=send_to_llm,
+            llm_provider=llm_provider,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -220,6 +203,186 @@ def setup(
     path = tonepath_config.write_config(settings)
     console.print(f"Configured Tonepath {settings.experience.mode.title()} experience: {path}")
     console.print(setup_next_step(settings))
+
+
+def run_guided_setup(*, dry_run: bool) -> None:
+    """Run first-time or selective interactive setup without writing before review."""
+
+    current = tonepath_config.load_config()
+    first_run = not tonepath_config.config_path().exists()
+    draft = SetupDraft.from_config(current)
+    prepare_requested = False
+    if first_run:
+        console.print("[bold]Getting Started[/bold]")
+        console.print("Step 1 of 3 · Music")
+        music_value = typer.prompt("Music directory", default=draft.music_dirs[0] if draft.music_dirs else "~/Music")
+        draft = draft.replace_music_dirs((music_value,))
+        try:
+            validate_music_directories(draft.music_dirs)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        console.print("Step 2 of 3 · Experience")
+        draft = prompt_experience(draft)
+    else:
+        console.print(setup_summary_for_draft(draft))
+        draft, prepare_requested = prompt_setup_sections(draft)
+
+    console.print("Step 3 of 3 · Review & Start" if first_run else "Review changes")
+    console.print(setup_review_for_draft(draft))
+    if not typer.confirm("Save this setup?", default=False):
+        console.print("Setup cancelled; no changes were saved.")
+        return
+
+    settings = draft.to_config(current)
+    rendered = tonepath_config.render_config(settings)
+    if dry_run:
+        console.print(f"Would write config: {tonepath_config.config_path()}")
+        console.print(rendered, markup=False, end="")
+        return
+
+    path = tonepath_config.write_config(settings)
+    console.print(f"Configured Tonepath {settings.experience.mode.title()} experience: {path}")
+    prepare_now = typer.confirm("Prepare library now?", default=prepare_requested)
+    if not prepare_now:
+        console.print(setup_next_step(settings))
+        return
+
+    runtime = model_runtime_status()
+    setup_models_now = False
+    if not bool(runtime.ready) or not bool(getattr(runtime, "affect_ready", runtime.ready)):
+        setup_models_now = typer.confirm(
+            "Set up optional local models for tags and emotion evidence?",
+            default=False,
+        )
+    try:
+        run_cli_preparation(
+            settings,
+            limit=None,
+            mode=settings.models.mode,
+            setup_models=setup_models_now,
+        )
+    except (RuntimeError, ValueError) as exc:
+        console.print(f"Setup was saved, but preparation failed: {exc}")
+        console.print("Retry with `uv run tonepath prepare`.")
+        raise typer.Exit(code=1) from exc
+
+
+def prompt_setup_sections(draft: SetupDraft) -> tuple[SetupDraft, bool]:
+    """Let an existing user edit only selected setup sections."""
+
+    prepare_requested = False
+    while True:
+        section = prompt_choice(
+            "Change (music/experience/models/local-data/prepare/done)",
+            {"music", "experience", "models", "local-data", "prepare", "done"},
+            default="done",
+        )
+        if section == "done":
+            return draft, prepare_requested
+        if section == "music":
+            draft = prompt_music_directories(draft)
+        elif section == "experience":
+            draft = prompt_experience(draft)
+        elif section == "models":
+            mode = prompt_choice("Analysis mode (fast/balanced/full)", {"fast", "balanced", "full"}, draft.model_mode)
+            allow_setup = typer.confirm("Allow explicit local model setup when requested?", default=draft.allow_model_setup)
+            draft = draft.with_models(mode, allow_setup=allow_setup)
+        elif section == "local-data":
+            history = typer.confirm("Store playback history locally?", default=draft.store_play_history)
+            draft = draft.with_local_history(history)
+            if draft.experience_mode != "private":
+                consent = typer.confirm(
+                    "Allow Request and Memory text to be sent for opted-in AI tasks?",
+                    default=draft.send_to_llm,
+                )
+                draft = draft.with_experience(
+                    draft.experience_mode,
+                    send_to_llm=consent,
+                    provider=draft.llm_provider,
+                )
+        else:
+            prepare_requested = True
+
+
+def prompt_music_directories(draft: SetupDraft) -> SetupDraft:
+    """Add or remove one music directory without silently replacing the list."""
+
+    console.print("Music directories:")
+    for path in draft.music_dirs:
+        console.print(f"- {path}")
+    operation = prompt_choice("Music action (keep/add/remove)", {"keep", "add", "remove"}, "keep")
+    if operation == "keep":
+        return draft
+    raw_path = typer.prompt("Music directory")
+    if operation == "add":
+        try:
+            validate_music_directories((raw_path,))
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        return draft.add_music_dir(Path(raw_path))
+    updated = draft.remove_music_dir(Path(raw_path))
+    try:
+        validate_music_directories(updated.music_dirs)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    return updated
+
+
+def prompt_experience(draft: SetupDraft) -> SetupDraft:
+    """Collect one simple experience choice and explicit external-text consent."""
+
+    mode = prompt_choice("Experience (private/smart/custom)", tonepath_config.EXPERIENCE_PRESETS, draft.experience_mode)
+    if mode == "private":
+        return draft.with_experience("private", send_to_llm=False, provider=draft.llm_provider)
+    if mode == "smart":
+        consent = typer.confirm("Allow Request and Memory text to use AI Assist?", default=False)
+        return draft.with_experience("smart", send_to_llm=consent, provider=draft.llm_provider)
+
+    model_mode = prompt_choice("Analysis mode (fast/balanced/full)", {"fast", "balanced", "full"}, draft.model_mode)
+    provider = prompt_choice("AI provider (deepseek/qwen)", tonepath_config.LLM_PROVIDERS, draft.llm_provider)
+    consent = typer.confirm("Allow Request and Memory text to use AI Assist?", default=draft.send_to_llm)
+    history = typer.confirm("Store playback history locally?", default=draft.store_play_history)
+    allow_setup = typer.confirm("Allow explicit local model setup when requested?", default=draft.allow_model_setup)
+    return (
+        draft.with_experience("custom", send_to_llm=consent, provider=provider)
+        .with_models(model_mode, allow_setup=allow_setup)
+        .with_local_history(history)
+    )
+
+
+def prompt_choice(label: str, choices: set[str], default: str) -> str:
+    """Prompt until the user enters one supported lowercase choice."""
+
+    while True:
+        value = typer.prompt(label, default=default).strip().lower()
+        if value in choices:
+            return value
+        console.print(f"Choose one of: {', '.join(sorted(choices))}")
+
+
+def setup_review_for_draft(draft: SetupDraft) -> str:
+    """Return a setup review with current non-secret runtime readiness."""
+
+    runtime = model_runtime_status()
+    provider_ready = provider_config(draft.llm_provider).configured
+    return setup_review(
+        draft,
+        model_ready=bool(runtime.ready) and bool(getattr(runtime, "affect_ready", runtime.ready)),
+        provider_key_ready=provider_ready,
+    )
+
+
+def setup_summary_for_draft(draft: SetupDraft) -> str:
+    """Return a current setup summary with non-secret runtime readiness."""
+
+    runtime = model_runtime_status()
+    provider_ready = provider_config(draft.llm_provider).configured
+    settings = draft.to_config(tonepath_config.load_config())
+    return setup_summary(
+        settings,
+        model_ready=bool(runtime.ready) and bool(getattr(runtime, "affect_ready", runtime.ready)),
+        provider_key_ready=provider_ready,
+    )
 
 
 @app.command()
@@ -263,10 +426,12 @@ def scan(path: Annotated[Path | None, typer.Argument(help="Optional local music 
     paths = resolve_scan_paths(path)
     store = TonepathStore()
     try:
-        summary = scan_paths(store, paths)
+        summary = tonepath_preparation.scan_library(store, paths)
     finally:
         store.close()
 
+    for message in summary.skipped_messages:
+        console.print(message)
     print_scan_summary(summary)
     if summary.skipped and summary.scanned_dirs == 0:
         raise typer.Exit(code=1)
@@ -288,72 +453,41 @@ def prepare(
     """Prepare local music for normal Tonepath use."""
 
     settings = tonepath_config.load_config()
-    mode = prepare_mode(settings, fast=fast, full=full)
-    paths = resolve_scan_paths(None)
-    store = TonepathStore()
     try:
-        scan_summary = scan_paths(store, paths)
-        console.print("Prepare: scan")
-        print_scan_summary(scan_summary)
-
-        failures: list[AnalysisFailure] = []
-        mir_analyzed, mir_skipped = analyze_library(
-            store,
-            features="mir",
-            method="essentia",
-            changed_only=True,
+        mode = tonepath_preparation.resolve_prepare_mode(settings.models.mode, fast=fast, full=full)
+        run_cli_preparation(
+            settings,
             limit=limit,
-            progress=collect_analysis_failures("MIR", failures),
+            mode=mode,
+            setup_models=setup_models or settings.models.allow_setup,
         )
-        console.print(f"Prepare: MIR analyzed {mir_analyzed} track(s); skipped {mir_skipped} track(s).")
-
-        runtime_status = model_runtime_status()
-        runtime_ready = runtime_status.ready
-        affect_ready = bool(getattr(runtime_status, "affect_ready", runtime_ready))
-        if mode != "fast" and (not runtime_ready or not affect_ready) and (setup_models or settings.models.allow_setup):
-            console.print("Prepare: setting up workspace-local Essentia-TF runtime.")
-            runtime_status = setup_essentia_tf_runtime()
-            runtime_ready = runtime_status.ready
-            affect_ready = bool(getattr(runtime_status, "affect_ready", runtime_ready))
-
-        if mode == "fast":
-            console.print("Prepare: skipped TensorFlow tags (--fast).")
-        elif runtime_ready:
-            tag_analyzed, tag_skipped = analyze_library(
-                store,
-                features="tags",
-                method="essentia-tf",
-                changed_only=True,
-                limit=limit,
-                progress=collect_analysis_failures("tags", failures),
-            )
-            console.print(f"Prepare: tags analyzed {tag_analyzed} track(s); skipped {tag_skipped} track(s).")
-            if affect_ready:
-                affect_analyzed, affect_skipped = analyze_library(
-                    store,
-                    features="affect",
-                    method="essentia-tf",
-                    changed_only=True,
-                    limit=limit,
-                    progress=collect_analysis_failures("affect", failures),
-                )
-                console.print(f"Prepare: affect analyzed {affect_analyzed} track(s); skipped {affect_skipped} track(s).")
-            else:
-                console.print("Prepare: affect skipped. Run `uv run tonepath models setup essentia-tf` for emotion models.")
-        elif mode == "full":
-            console.print(
-                "Prepare: full tagging requires Essentia-TF. "
-                "Run `uv run tonepath models setup essentia-tf` or `uv run tonepath prepare --full --setup-models`."
-            )
-        else:
-            console.print("Prepare: tags skipped. Run `uv run tonepath models setup essentia-tf` for vocalness tagging.")
-
-        print_analysis_failure_summary(failures)
-        print_status_summary(library_status(store), runtime_ready=runtime_ready)
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
-    finally:
-        store.close()
+
+
+def run_cli_preparation(
+    settings: tonepath_config.TonepathConfig,
+    *,
+    limit: int | None,
+    mode: str,
+    setup_models: bool,
+) -> None:
+    """Run shared preparation and render its progress for CLI users."""
+
+    def render_event(event: PreparationEvent) -> None:
+        console.print(event.message)
+
+    result = tonepath_preparation.run_preparation(
+        PreparationOptions(
+            paths=settings.expanded_music_dirs(),
+            mode=mode,
+            limit=limit,
+            setup_models=setup_models,
+        ),
+        on_event=render_event,
+    )
+    print_analysis_failure_summary(list(result.failures))
+    print_status_summary(result.status, runtime_ready=result.runtime_ready)
 
 
 @app.command("status")
@@ -720,16 +854,6 @@ def print_analysis_progress(event: AnalysisProgress) -> None:
         f"source={event.result.feature_source} "
         f"confidence={event.result.confidence} runtime={runtime:.1f}s"
     )
-
-
-def collect_analysis_failures(stage: str, failures: list[AnalysisFailure]) -> Callable[[AnalysisProgress], None]:
-    """Return a progress callback that records failed prepare analysis items."""
-
-    def collect(event: AnalysisProgress) -> None:
-        if event.error is not None:
-            failures.append(AnalysisFailure(stage=stage, track=event.track, error=event.error))
-
-    return collect
 
 
 def print_analysis_failure_summary(failures: list[AnalysisFailure], limit: int = 5) -> None:
@@ -1629,28 +1753,6 @@ def resolve_scan_paths(path: Path | None) -> tuple[Path, ...]:
     return tonepath_config.load_config().expanded_music_dirs()
 
 
-def scan_paths(store: TonepathStore, paths: tuple[Path, ...]) -> ScanSummary:
-    """Scan local paths into an existing store and prune missing files."""
-
-    total = 0
-    scanned_dirs = 0
-    skipped = 0
-    pruned = 0
-    for music_dir in paths:
-        try:
-            tracks = scan_directory(music_dir)
-        except (FileNotFoundError, NotADirectoryError) as exc:
-            skipped += 1
-            console.print(f"Skipping {music_dir}: {exc}")
-            continue
-        for track in tracks:
-            store.upsert_track(track)
-        pruned += store.prune_missing_tracks_under(music_dir, {track.path for track in tracks})
-        total += len(tracks)
-        scanned_dirs += 1
-    return ScanSummary(total=total, scanned_dirs=scanned_dirs, skipped=skipped, pruned=pruned)
-
-
 def print_scan_summary(summary: ScanSummary) -> None:
     """Print a scan summary."""
 
@@ -1738,21 +1840,6 @@ def render_library_issues(payload: dict[str, object]) -> None:
             console.print(table)
     else:
         console.print("Duplicate candidates: none")
-
-
-def prepare_mode(settings: tonepath_config.TonepathConfig, fast: bool, full: bool) -> str:
-    """Return the requested prepare mode after validating CLI/config policy."""
-
-    if fast and full:
-        raise typer.BadParameter("--fast and --full cannot be used together")
-    if fast:
-        return "fast"
-    if full:
-        return "full"
-    mode = settings.models.mode
-    if mode not in {"fast", "balanced", "full"}:
-        raise typer.BadParameter("models.mode must be one of: fast, balanced, full")
-    return mode
 
 
 def render_plan(candidates: list[CandidateScore]) -> None:

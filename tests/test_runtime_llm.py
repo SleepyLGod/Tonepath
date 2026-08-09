@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 
 from tonepath import config
 from tonepath.cli import app
-from tonepath.llm import llm_doctor, parse_prompt_with_llm
+from tonepath.llm import active_provider, llm_doctor, parse_prompt_with_llm
 from tonepath.model_runtime import clap_runtime_status, model_runtime_status, setup_clap_runtime, setup_essentia_tf_runtime
 
 
@@ -65,6 +65,27 @@ class RuntimeAndLlmTest(unittest.TestCase):
         self.assertIn("DEEPSEEK_API_KEY (configured)", report)
         self.assertIn("Secrets: not displayed", report)
         self.assertNotIn("secret", report)
+
+    def test_active_provider_uses_config_with_environment_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                config.write_config(
+                    config.TonepathConfig(
+                        music_dirs=("~/Music",),
+                        data_dir=str(home),
+                        player="mpv",
+                        network_mode="offline",
+                        privacy=config.PrivacyConfig(),
+                        models=config.ModelConfig(),
+                        experience=config.ExperienceConfig(),
+                        llm=config.LlmConfig(provider="qwen"),
+                    )
+                )
+                self.assertEqual(active_provider(), "qwen")
+
+                with patch.dict(os.environ, {"TONEPATH_LLM_PROVIDER": "deepseek"}):
+                    self.assertEqual(active_provider(), "deepseek")
 
     def test_llm_parse_sends_only_prompt_and_returns_structured_intent(self) -> None:
         body = {

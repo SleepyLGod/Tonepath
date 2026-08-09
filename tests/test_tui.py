@@ -177,7 +177,7 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             with patch.dict(os.environ, {"TONEPATH_HOME": str(home), "TONEPATH_LLM_PROVIDER": "deepseek"}, clear=True):
-                config.write_config(config.preset_config("smart"))
+                config.write_config(config.preset_config("smart", send_to_llm=True))
                 store = TonepathStore()
                 self.add_ready_track(store, tmp, "a.mp3")
                 store.close()

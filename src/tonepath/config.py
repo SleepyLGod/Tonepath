@@ -14,6 +14,7 @@ APP_DIR_NAME = ".tonepath"
 CONFIG_FILENAME = "config.toml"
 DB_FILENAME = "tonepath.db"
 EXPERIENCE_PRESETS = {"private", "smart", "custom"}
+LLM_PROVIDERS = {"deepseek", "qwen"}
 
 
 def repo_root() -> Path:
@@ -99,6 +100,13 @@ class UiConfig:
 
 
 @dataclass(frozen=True)
+class LlmConfig:
+    """Non-secret provider selection for optional AI Assist."""
+
+    provider: str = "deepseek"
+
+
+@dataclass(frozen=True)
 class TonepathConfig:
     """User-editable local Tonepath configuration."""
 
@@ -110,6 +118,7 @@ class TonepathConfig:
     models: ModelConfig
     experience: ExperienceConfig
     ui: UiConfig = field(default_factory=UiConfig)
+    llm: LlmConfig = field(default_factory=LlmConfig)
 
     def expanded_music_dirs(self) -> tuple[Path, ...]:
         """Return configured music directories with `~` expanded."""
@@ -150,6 +159,7 @@ def default_config() -> TonepathConfig:
         models=ModelConfig(),
         experience=ExperienceConfig(),
         ui=UiConfig(),
+        llm=LlmConfig(),
     )
 
 
@@ -166,6 +176,7 @@ def load_config() -> TonepathConfig:
     models_data = data.get("models", {})
     experience_data = data.get("experience", {})
     ui_data = data.get("ui", {})
+    llm_data = data.get("llm", {})
     data_dir_override = os.environ.get("TONEPATH_HOME")
     return TonepathConfig(
         music_dirs=tuple(str(item) for item in data.get("music_dirs", defaults.music_dirs)),
@@ -188,6 +199,9 @@ def load_config() -> TonepathConfig:
         ),
         ui=UiConfig(
             theme=normalize_theme(str(ui_data.get("theme", defaults.ui.theme))),
+        ),
+        llm=LlmConfig(
+            provider=normalize_llm_provider(str(llm_data.get("provider", defaults.llm.provider))),
         ),
     )
 
@@ -226,6 +240,7 @@ def add_music_dir(path: Path) -> TonepathConfig:
         models=current.models,
         experience=current.experience,
         ui=current.ui,
+        llm=current.llm,
     )
     write_config(updated)
     return updated
@@ -236,6 +251,7 @@ def preset_config(
     music_dir: Path | None = None,
     allow_model_setup: bool | None = None,
     send_to_llm: bool | None = None,
+    llm_provider: str | None = None,
 ) -> TonepathConfig:
     """Return a config for one normal-user experience preset."""
 
@@ -243,10 +259,12 @@ def preset_config(
     if mode not in EXPERIENCE_PRESETS:
         raise ValueError("preset must be one of: private, smart, custom")
     current = load_config()
+    selected_provider = current.llm.provider if llm_provider is None else normalize_llm_provider(llm_provider)
     music_dirs = current.music_dirs
     if music_dir is not None:
         value = str(music_dir.expanduser())
-        music_dirs = (value,)
+        existing = current.music_dirs if config_path().exists() else ()
+        music_dirs = tuple(dict.fromkeys((*existing, value)))
     if mode == "private":
         privacy = PrivacyConfig(send_to_llm=False, store_play_history=current.privacy.store_play_history)
         models = ModelConfig(
@@ -258,7 +276,7 @@ def preset_config(
         )
         network_mode = "offline"
     elif mode == "smart":
-        privacy = PrivacyConfig(send_to_llm=True if send_to_llm is None else send_to_llm, store_play_history=current.privacy.store_play_history)
+        privacy = PrivacyConfig(send_to_llm=False if send_to_llm is None else send_to_llm, store_play_history=current.privacy.store_play_history)
         models = ModelConfig(
             mode="full",
             allow_setup=bool(allow_model_setup) if allow_model_setup is not None else False,
@@ -289,6 +307,7 @@ def preset_config(
         models=models,
         experience=ExperienceConfig(mode=mode),
         ui=current.ui,
+        llm=LlmConfig(provider=selected_provider),
     )
 
 
@@ -320,8 +339,20 @@ def render_config(config: TonepathConfig) -> str:
             "[ui]",
             f"theme = {quote_string(normalize_theme(config.ui.theme))}",
             "",
+            "[llm]",
+            f"provider = {quote_string(normalize_llm_provider(config.llm.provider))}",
+            "",
         ]
     )
+
+
+def normalize_llm_provider(value: str) -> str:
+    """Return a supported optional AI provider name."""
+
+    provider = value.strip().lower()
+    if provider not in LLM_PROVIDERS:
+        raise ValueError("llm provider must be one of: deepseek, qwen")
+    return provider
 
 
 def quote_string(value: str) -> str:

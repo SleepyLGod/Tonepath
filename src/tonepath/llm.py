@@ -38,7 +38,15 @@ class LlmProviderConfig:
 def active_provider() -> str:
     """Return the configured LLM provider name."""
 
-    return os.environ.get("TONEPATH_LLM_PROVIDER", "deepseek").strip().lower() or "deepseek"
+    override = os.environ.get("TONEPATH_LLM_PROVIDER", "").strip()
+    if override:
+        from tonepath.config import normalize_llm_provider
+
+        return normalize_llm_provider(override)
+
+    from tonepath.config import load_config
+
+    return load_config().llm.provider
 
 
 def provider_config(provider: str | None = None) -> LlmProviderConfig:

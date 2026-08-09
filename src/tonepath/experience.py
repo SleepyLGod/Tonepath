@@ -14,8 +14,8 @@ def setup_next_step(settings: config.TonepathConfig) -> str:
     """Return concise guidance after applying an experience preset."""
 
     if settings.experience.mode == "smart":
-        return "Next: add a music directory, run `uv run tonepath prepare --full`, then `uv run tonepath listen \"...\"`."
-    return "Next: add a music directory, run `uv run tonepath prepare`, then `uv run tonepath listen \"...\"`."
+        return "Next: run `uv run tonepath prepare --full`, then `uv run tonepath listen \"...\"`."
+    return "Next: run `uv run tonepath prepare`, then `uv run tonepath listen \"...\"`."
 
 
 def listen_intelligence_summary(settings: config.TonepathConfig, runtime_ready: bool) -> str:

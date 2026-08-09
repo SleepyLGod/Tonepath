@@ -7,7 +7,7 @@ This guide covers daily usage, advanced analysis, evaluation, profile learning, 
 The normal user flow is:
 
 ```text
-config add-music-dir -> prepare -> status -> tonepath
+setup -> prepare -> status -> listen or tonepath
 ```
 
 Start from a project-local environment:
@@ -15,14 +15,30 @@ Start from a project-local environment:
 ```bash
 uv sync
 cp .env.example .env
-uv run tonepath setup --preset private
-uv run tonepath config add-music-dir ~/Music
-uv run tonepath prepare
+uv run tonepath setup
 uv run tonepath status
 uv run tonepath listen "我现在很烦，想写论文，低刺激，不要人声" --dry-run
 ```
 
-`tonepath setup` offers three normal-user experience presets. `Private` is local-first and offline by default. `Smart` enables opt-in LLM/profile reflection when API keys are configured, while still avoiding silent profile-rule changes. `Custom` marks the config for advanced tuning while preserving existing safety defaults.
+On first use, `tonepath setup` asks only three things:
+
+1. **Music**: choose an existing local music directory.
+2. **Experience**: choose `Private` or `Smart`; `Custom` exposes advanced choices.
+3. **Review & Start**: read what stays local, confirm the config, then separately choose whether to prepare the library and whether to set up optional local models.
+
+`Private` keeps Request and Memory text local. `Smart` still analyzes audio locally and asks separately whether optional AI Assist may receive Request or Memory text. Choosing Smart alone does not grant that consent. Setup detects whether the selected provider key exists, but it never asks for, prints, or stores the key.
+
+Run `tonepath setup` again to see the current Music Library, Experience & AI, Local Models, Local Data, and Prepare Library settings. Choose only the section you want to change. Adding a music directory preserves the existing list; removing one is explicit.
+
+For scripts and reproducible environments, presets remain available:
+
+```bash
+uv run tonepath setup --preset private --music-dir ~/Music
+uv run tonepath setup --preset smart --music-dir ~/Music --send-to-llm --llm-provider deepseek
+uv run tonepath setup --preset custom --llm-provider qwen --dry-run
+```
+
+`--preset smart` does not send text unless `--send-to-llm` is also present. Provider selection is non-secret configuration; keys remain in environment variables or the local `.env`. `TONEPATH_LLM_PROVIDER` can still override the saved provider for one process.
 
 `tonepath prepare` scans configured music directories, prunes missing tracks, analyzes missing or changed features, and follows the configured model policy. The default `balanced` policy uses the workspace-local Essentia-TF runtime for vocalness/tagging when that runtime is ready. If the tagging runtime is missing, `prepare` prints the setup command and still leaves the local library usable.
 
@@ -410,6 +426,12 @@ separator_fallback = "off"
 
 [experience]
 mode = "private"
+
+[ui]
+theme = "warmline"
+
+[llm]
+provider = "deepseek"
 ```
 
 Useful commands:
@@ -417,6 +439,7 @@ Useful commands:
 ```bash
 uv run tonepath config show
 uv run tonepath config add-music-dir /path/to/music
+uv run tonepath setup --preset smart --llm-provider qwen --dry-run
 uv run tonepath doctor
 ```
 
