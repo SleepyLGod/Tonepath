@@ -44,6 +44,12 @@ except ImportError as exc:  # pragma: no cover - exercised before dependency ins
     raise RuntimeError("Textual is not installed. Run `uv sync` before launching the TUI.") from exc
 
 from tonepath.tui_history import HistoryLoadResult, HistoryRerunRequest, HistoryScreen
+from tonepath.tui_privacy import (
+    PrivacyDataDeleted,
+    PrivacyScreen,
+    category_delete_completed,
+    database_records_cleared,
+)
 
 
 PROMPT_PLACEHOLDER = "我现在很烦，想半小时后进入写代码状态，不要人声"
@@ -235,6 +241,7 @@ class TonepathApp(App[None]):
         Binding("l", "like", "Like"),
         Binding("m", "cycle_playback_mode", "Mode"),
         Binding("ctrl+l", "history", "History", key_display="Ctrl+L", show=False, priority=True),
+        Binding("d", "privacy", "Data & Privacy", key_display="d", show=False),
         Binding("ctrl+o", "toggle_memory", "Memory", key_display="Ctrl+O", show=False, priority=True),
         Binding("shift+m", "toggle_memory", "Memory", key_display="M", show=False, priority=True),
         Binding("ctrl+s", "save_memory", "Save memory", show=False, priority=True),
@@ -533,6 +540,12 @@ class TonepathApp(App[None]):
             elif direction == "down":
                 self.screen.action_next_history()
             return True
+        if isinstance(self.screen, PrivacyScreen):
+            if direction == "up":
+                self.screen.action_previous_category()
+            elif direction == "down":
+                self.screen.action_next_category()
+            return True
         focused = self.focused
         if isinstance(focused, Input):
             if direction == "left":
@@ -645,6 +658,64 @@ class TonepathApp(App[None]):
             self.log_event("Local store is unavailable.")
             return
         self.push_screen(HistoryScreen(self.store), self.on_history_loaded)
+
+    def action_privacy(self) -> None:
+        """Open the local Data & Privacy browser outside text input focus."""
+
+        if isinstance(self.screen, PrivacyScreen):
+            return
+        self.push_screen(PrivacyScreen())
+
+    def on_privacy_data_deleted(self, event: PrivacyDataDeleted) -> None:
+        """Reconcile in-memory player state with components actually deleted."""
+
+        result = event.result
+        changed = set(result.changed_categories)
+        memory_cleared = category_delete_completed(result, "memory")
+        personalization_cleared = category_delete_completed(result, "personalization")
+        if memory_cleared:
+            self.memory_draft = ""
+            self.memory_status_message = "Memory was deleted from Tonepath active storage."
+            self.query_one("#memory-input", TextArea).load_text("")
+            if self.right_panel in {"memory", "memory_profile"}:
+                self.right_panel = "why"
+        if personalization_cleared:
+            self.memory_suggestions = []
+            self.selected_memory_suggestion_index = 0
+            if self.right_panel == "memory_suggestions":
+                self.right_panel = "why"
+        if database_records_cleared(result, "history"):
+            if self.playback is not None:
+                self.playback.stop_current()
+            self.playback_generation += 1
+            self.playback_state_busy = False
+            self.playback_poll_failures = 0
+            self.live_playback_state = PlaybackState(False, False, None, None, None)
+            self.runner = None
+            self.intent_note = None
+            self.request_status_message = "Listening History was deleted. Enter a new Request to create a path."
+            self.playback_status = "Ready"
+            self.pulse_tick = 0
+            self.right_panel = "why"
+            prompt_input = self.query_one("#prompt-input", Input)
+            prompt_input.value = ""
+            prompt_input.blur()
+            self.render_intake()
+            self.log_event("Listening History deleted; playback stopped and the current queue was cleared.")
+        elif changed or memory_cleared or personalization_cleared:
+            affected = changed | {
+                category
+                for category, completed in (
+                    ("memory", memory_cleared),
+                    ("personalization", personalization_cleared),
+                )
+                if completed
+            }
+            self.refresh_right_panel()
+            self.query_one("#command-bar", Static).update(self.command_bar_renderable())
+            self.log_event(
+                f"Privacy deletion updated {', '.join(sorted(affected))}. Current queue is unchanged."
+            )
 
     def on_history_loaded(
         self,
@@ -1507,6 +1578,7 @@ class TonepathApp(App[None]):
                 "-          too slow; raise upcoming energy",
                 "Tools",
                 "Ctrl+L     listening history",
+                "d          Data & Privacy (outside Request or Memory input)",
                 "Ctrl+O     memory notes panel (Control + letter o, not zero)",
                 "Ctrl+S     save memory locally",
                 "Ctrl+Enter save memory and update profile",
@@ -1728,6 +1800,7 @@ class TonepathApp(App[None]):
             ("l", "Like"),
             ("m", "Mode"),
             ("Ctrl+L", "History"),
+            ("d", "Data"),
             ("Ctrl+O", "Memory"),
             ("t", "Theme"),
             ("?", "Help"),

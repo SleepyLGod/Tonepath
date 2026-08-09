@@ -36,7 +36,7 @@ For detailed usage, model setup, evaluation, profile learning, and privacy notes
 | TUI | MVP | Textual workbench for prompt intake, playback control, queue, why panel, feedback, and event log. |
 | Audio analysis | Basic + optional models | Default lightweight analysis plus optional MIR, Essentia-TF tagging/affect, experimental CLAP bake-off, and separator fallback paths. |
 | Profile learning | Early-stage | Feedback, suggestions, Markdown memory/evidence, rule apply, and profile comparison are available. |
-| Data & Privacy | CLI implemented | Five-category local inventory, sanitized personal-data export, and preview-before-delete controls. |
+| Data & Privacy | CLI + TUI implemented | Five-category local inventory, sanitized export, and typed preview-before-delete controls. |
 | LLM/Codex | Opt-in | Used for intent parsing, audit, and profile suggestions only when explicitly invoked. |
 
 ## Requirements

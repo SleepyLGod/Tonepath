@@ -91,6 +91,7 @@ v          prefer less vocals
 -          too slow; raise upcoming energy
 m          cycle playback mode
 Ctrl+L     open listening history
+d          open Data & Privacy outside Request or Memory input
 Ctrl+O     open or hide the memory notes panel (Control + letter o, not zero)
 Ctrl+S     save memory locally
 Ctrl+Enter save memory and update profile with AI Assist
@@ -109,7 +110,7 @@ q          stop playback and quit when Request is not focused
 Ctrl+Q     stop playback and quit at any time
 ```
 
-Arrow keys remain text-editing controls while the Request or Memory editor is focused, and remain History navigation controls inside Listening History. Volume is preserved while Tonepath switches tracks in the current TUI process, but Player Core v1 does not persist it across app restarts.
+Arrow keys remain text-editing controls while the Request or Memory editor is focused, and navigate rows inside Listening History or Data & Privacy. A typed `d` remains ordinary text while either editor is focused. Volume is preserved while Tonepath switches tracks in the current TUI process, but Player Core v1 does not persist it across app restarts.
 
 Playback modes are TUI-local:
 
@@ -469,6 +470,10 @@ uv run tonepath privacy delete --all-personal
 After reading the exact delete/keep list, rerun the same command with `--confirm`. `--all-personal` removes Memory, Personalization, and Listening History while preserving config, tracks, audio features, model/runtime storage, caches outside those personal categories, and original music.
 
 Deleting Memory by itself keeps active profile rules, which may continue to affect future recommendations. Deleting History while preserving Personalization detaches feedback from deleted sessions. Deletion enables SQLite secure deletion, but Tonepath cannot promise removal from system backups, APFS snapshots, or SSD forensic recovery.
+
+The same controls are available in the TUI. Outside the Request and Memory editors, press `d` to open **Data & Privacy**. Use `Up/Down` or `j/k` to browse, `e` to export, and `d` to open a deletion preview. Deletion runs only after you type the exact lowercase word `delete`; `Esc` returns without changing data. Inventory, export, preview, and deletion work run in the background so the interface remains responsive.
+
+Browsing, exporting, or previewing never changes the current path. Deleting Memory or Personalization leaves the current queue alone because applied changes affect future Requests. Deleting Listening History or All Personal Data stops playback and clears the current queue only after the history database records are actually removed. Library Evidence and Models & Storage are visible but read-only in this first version.
 
 The older command remains available and now uses the same category helpers:
 

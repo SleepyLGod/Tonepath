@@ -24,7 +24,7 @@ Tonepath currently has a working local-first CLI/TUI prototype:
 - controlled `mpv` playback with local JSON IPC, real pause/resume, seek, volume, progress, and process cleanup;
 - saved-session queue snapshots, bookmarks, exact local replay, and JSON/M3U8 export;
 - five-category local privacy inventory, sanitized personal-data export, and preview-before-delete CLI controls;
-- Textual TUI with prompt intake, timeline, queue, now-playing state, why panel, private Memory, and event log;
+- Textual TUI with prompt intake, timeline, queue, now-playing state, why panel, private Memory, Listening History, Data & Privacy, and event log;
 - feedback capture for like, skip, no-vocals, too-loud, and too-slow;
 - profile comparison plus deterministic and LLM/Codex-assisted pending suggestions;
 - benchmark/eval commands for intent, selection, suite checks, diagnostics, CLAP/hybrid bake-off, audit packs, Codex audit, and rerank preview;
@@ -73,7 +73,7 @@ uv run tonepath history export <session-id> --output <directory>
 
 ### Privacy and Trust
 
-- Privacy boundaries are visible in CLI status, inventory, export, deletion previews, and docs; the same controls still need a first-class TUI surface.
+- Privacy boundaries are visible in CLI and TUI inventory, export, deletion previews, and docs; real-user comprehension still needs validation.
 - LLM profile evidence packs need continuous privacy tests.
 - Users should see what can leave the machine, what stays local, and what evidence supports each suggestion.
 
@@ -291,12 +291,12 @@ Engineering rules:
 
 ## Immediate Next Step
 
-Add the TUI surface for the implemented local Privacy Center contracts:
+Turn the existing setup presets into a clearer first-run Setup Wizard:
 
 ```bash
-uv run tonepath privacy inspect
-uv run tonepath privacy export --output <directory>
-uv run tonepath privacy delete --all-personal
+uv run tonepath setup
+uv run tonepath setup --preset private
+uv run tonepath setup --preset smart
 ```
 
-The CLI now distinguishes Memory, Personalization, Listening History, Library Evidence, and Models & Storage without moving the underlying data. The next checkpoint should expose that same inventory in a themed full-screen TUI browser with background export, explicit typed deletion confirmation, stale-plan detection, and safe player-state reset after History deletion. Do not mix this work with Setup Wizard, Session Host, catalog handoff, or recommendation tuning.
+Privacy Center is now available in both CLI and TUI without moving the underlying data. The next checkpoint should make first-run choices understandable: music location, Private versus Smart behavior, optional local models, and explicit external-processing consent. It must not silently download models, enable network calls, expose secrets, or mix setup work with Session Host, catalog handoff, or recommendation tuning.
