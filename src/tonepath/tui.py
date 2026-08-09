@@ -10,7 +10,7 @@ from typing import Any
 
 from rich.text import Text
 
-from tonepath import config
+from tonepath import config, preparation as tonepath_preparation
 from tonepath.db import TonepathStore
 from tonepath.display import display_artist, fallback_track_label
 from tonepath.experience import smart_plan_session
@@ -28,6 +28,7 @@ from tonepath.memory import (
 from tonepath.model_runtime import model_runtime_status
 from tonepath.models import CandidateScore, FeedbackType, SessionPlan
 from tonepath.playback_controller import PlaybackController, PlaybackState
+from tonepath.preparation import PreparationEvent, PreparationOptions, PreparationResult
 from tonepath.profile import apply_suggestion, apply_suggestion_group, list_pending_suggestions, pending_suggestion_groups, profile_learning_hint, save_suggestions
 from tonepath.readiness import LibraryStatus, library_status, readiness_blocks_session, readiness_label, status_next_action
 from tonepath.session import SessionRunner
@@ -50,6 +51,7 @@ from tonepath.tui_privacy import (
     category_delete_completed,
     database_records_cleared,
 )
+from tonepath.tui_setup import SetupOutcome, SetupScreen
 
 
 PROMPT_PLACEHOLDER = "我现在很烦，想半小时后进入写代码状态，不要人声"
@@ -242,6 +244,7 @@ class TonepathApp(App[None]):
         Binding("m", "cycle_playback_mode", "Mode"),
         Binding("ctrl+l", "history", "History", key_display="Ctrl+L", show=False, priority=True),
         Binding("d", "privacy", "Data & Privacy", key_display="d", show=False),
+        Binding("c", "setup", "Setup", key_display="c", show=False),
         Binding("ctrl+o", "toggle_memory", "Memory", key_display="Ctrl+O", show=False, priority=True),
         Binding("shift+m", "toggle_memory", "Memory", key_display="M", show=False, priority=True),
         Binding("ctrl+s", "save_memory", "Save memory", show=False, priority=True),
@@ -296,6 +299,9 @@ class TonepathApp(App[None]):
         self.selected_memory_suggestion_index = 0
         self.request_busy = False
         self.request_status_message = ""
+        self.setup_prepare_busy = False
+        self.setup_prepare_status = ""
+        self.auto_setup_needed = should_auto_open_setup()
         self.pulse_tick = 0
         self.theme_key = normalize_theme(config.load_config().ui.theme)
         self.palette = PALETTE_BY_KEY[self.theme_key]
@@ -340,6 +346,10 @@ class TonepathApp(App[None]):
 
         self.model_runtime_ready = model_runtime_status().ready
         self.refresh_readiness()
+        if self.auto_setup_needed:
+            self.show_empty_library()
+            self.push_setup_screen(first_run=True)
+            return
         if not self.store.list_tracks():
             self.show_empty_library()
             return
@@ -546,6 +556,12 @@ class TonepathApp(App[None]):
             elif direction == "down":
                 self.screen.action_next_category()
             return True
+        if isinstance(self.screen, SetupScreen):
+            if direction == "up":
+                self.screen.action_previous_option()
+            elif direction == "down":
+                self.screen.action_next_option()
+            return True
         focused = self.focused
         if isinstance(focused, Input):
             if direction == "left":
@@ -612,6 +628,7 @@ class TonepathApp(App[None]):
                 models=settings.models,
                 experience=settings.experience,
                 ui=config.UiConfig(theme=self.theme_key),
+                llm=settings.llm,
             )
         )
         self.log_event(f"Theme: {self.palette.label}.")
@@ -665,6 +682,98 @@ class TonepathApp(App[None]):
         if isinstance(self.screen, PrivacyScreen):
             return
         self.push_screen(PrivacyScreen())
+
+    def action_setup(self) -> None:
+        """Open setup outside text input focus without changing the current path."""
+
+        if isinstance(self.screen, SetupScreen):
+            return
+        if self.setup_prepare_busy:
+            self.log_event("Library preparation is already running. Wait for it to finish before changing setup.")
+            return
+        self.push_setup_screen(first_run=not config.config_path().exists())
+
+    def push_setup_screen(self, *, first_run: bool) -> None:
+        """Open the guided setup screen with current non-secret runtime state."""
+
+        if self.right_panel == "memory":
+            self.sync_memory_draft()
+        runtime = model_runtime_status()
+        model_ready = bool(runtime.ready) and bool(getattr(runtime, "affect_ready", runtime.ready))
+        self.push_screen(
+            SetupScreen(
+                config.load_config(),
+                first_run=first_run,
+                model_ready=model_ready,
+            ),
+            self.on_setup_complete,
+        )
+
+    def on_setup_complete(self, outcome: SetupOutcome | None) -> None:
+        """Persist confirmed setup and optionally start background preparation."""
+
+        if outcome is None:
+            self.log_event("Setup closed without saving changes.")
+            self.refresh_session_view()
+            return
+        try:
+            config.write_config(outcome.settings)
+        except OSError as exc:
+            self.log_event(f"Could not save setup: {exc}")
+            self.refresh_session_view()
+            return
+        self.log_event(f"Setup saved: {outcome.settings.experience.mode.title()} experience.")
+        self.refresh_readiness()
+        if not outcome.prepare_requested:
+            if self.runner is None and self.library_count() == 0:
+                self.show_empty_library()
+            else:
+                self.refresh_session_view()
+            return
+        self.start_setup_preparation(outcome)
+
+    def start_setup_preparation(self, outcome: SetupOutcome) -> None:
+        """Run one confirmed library preparation task outside the Textual event loop."""
+
+        if self.setup_prepare_busy:
+            self.log_event("Library preparation is already running.")
+            return
+        self.setup_prepare_busy = True
+        self.setup_prepare_status = "Preparing library in background; playback and the current queue continue."
+        self.log_event(self.setup_prepare_status)
+        self.refresh_session_view()
+        options = PreparationOptions(
+            paths=outcome.settings.expanded_music_dirs(),
+            mode=outcome.settings.models.mode,
+            setup_models=outcome.setup_models,
+        )
+        self.run_worker(
+            partial(self.setup_preparation_job, options),
+            name="setup-prepare",
+            group="setup-prepare",
+            description=self.setup_prepare_status,
+            exit_on_error=False,
+            exclusive=True,
+            thread=True,
+        )
+
+    def setup_preparation_job(self, options: PreparationOptions) -> PreparationResult:
+        """Run shared preparation and forward stage messages to the TUI thread."""
+
+        return tonepath_preparation.run_preparation(
+            options,
+            on_event=lambda event: self.call_from_thread(self.on_setup_preparation_event, event),
+        )
+
+    def on_setup_preparation_event(self, event: PreparationEvent) -> None:
+        """Show one background preparation stage without modifying the current queue."""
+
+        self.setup_prepare_status = event.message
+        self.log_event(event.message)
+        if self.runner is None:
+            self.render_intake()
+        else:
+            self.query_one("#status-bar", Static).update(self.status_bar_text(extra="Preparing library"))
 
     def on_privacy_data_deleted(self, event: PrivacyDataDeleted) -> None:
         """Reconcile in-memory player state with components actually deleted."""
@@ -905,6 +1014,9 @@ class TonepathApp(App[None]):
         if worker.group == "playback-state":
             self.finish_playback_state_worker(worker, event.state)
             return
+        if worker.group == "setup-prepare":
+            self.finish_setup_preparation_worker(worker, event.state)
+            return
         if worker.group != "memory":
             return
         self.memory_busy = False
@@ -926,6 +1038,36 @@ class TonepathApp(App[None]):
             self.memory_status_message = "Memory task was cancelled. Current queue is unchanged."
             self.log_event(self.memory_status_message)
         self.refresh_session_view()
+
+    def finish_setup_preparation_worker(self, worker: Worker[Any], state: WorkerState) -> None:
+        """Apply completed preparation without replacing the active path."""
+
+        self.setup_prepare_busy = False
+        if state == WorkerState.SUCCESS:
+            if isinstance(worker.result, PreparationResult):
+                result = worker.result
+                self.model_runtime_ready = result.runtime_ready
+                self.library_status = result.status
+                settings = config.load_config()
+                self.readiness = readiness_label(result.status, result.runtime_ready, settings)
+                self.readiness_action = status_next_action(result.status, result.runtime_ready, settings)
+                failure_note = f" {len(result.failures)} file(s) need review." if result.failures else ""
+                self.setup_prepare_status = f"Library preparation finished: {self.readiness}.{failure_note}"
+            else:
+                self.setup_prepare_status = (
+                    "Library preparation returned an unreadable result. Retry with `uv run tonepath prepare`."
+                )
+        elif state == WorkerState.ERROR:
+            self.setup_prepare_status = (
+                f"Library preparation failed: {worker.error}. Retry with `uv run tonepath prepare`."
+            )
+        else:
+            self.setup_prepare_status = "Library preparation was cancelled. Retry with `uv run tonepath prepare`."
+        self.log_event(self.setup_prepare_status)
+        if self.runner is None and self.library_count() == 0:
+            self.show_empty_library()
+        else:
+            self.refresh_session_view()
 
     def action_next_memory_suggestion(self) -> None:
         """Move down in the memory suggestion list."""
@@ -1368,7 +1510,10 @@ class TonepathApp(App[None]):
             return
 
         self.apply_panel_titles()
-        planning = "Planning next path" if self.request_busy else None
+        if self.setup_prepare_busy:
+            planning = "Preparing library"
+        else:
+            planning = "Planning next path" if self.request_busy else None
         self.query_one("#status-bar", Static).update(self.status_bar_text(extra=planning))
         self.query_one("#timeline", Static).update(self.timeline_renderable())
         self.query_one("#now-playing", Static).update(self.now_playing_renderable())
@@ -1577,6 +1722,7 @@ class TonepathApp(App[None]):
                 "+          too loud; lower upcoming energy",
                 "-          too slow; raise upcoming energy",
                 "Tools",
+                "c          Setup / Getting Started",
                 "Ctrl+L     listening history",
                 "d          Data & Privacy (outside Request or Memory input)",
                 "Ctrl+O     memory notes panel (Control + letter o, not zero)",
@@ -1666,7 +1812,10 @@ class TonepathApp(App[None]):
         else:
             guidance = "Ready for playback. How are you feeling? What should music help you become?"
         self.apply_panel_titles()
-        status_extra = "Planning next path" if self.request_busy else "Enter to plan"
+        if self.setup_prepare_busy:
+            status_extra = "Preparing library"
+        else:
+            status_extra = "Planning next path" if self.request_busy else "Enter to plan"
         self.query_one("#status-bar", Static).update(self.status_bar_text(extra=status_extra))
         self.query_one("#timeline", Static).update("No session yet · feeling → path → feedback → memory")
         self.query_one("#command-bar", Static).update(self.command_bar_renderable(prompt_focused=True))
@@ -1805,6 +1954,8 @@ class TonepathApp(App[None]):
             ("t", "Theme"),
             ("?", "Help"),
         ]
+        if not config.config_path().exists() or readiness_blocks_session(self.readiness):
+            commands.insert(6, ("c", "Setup"))
         if self.right_panel == "memory":
             commands.insert(0, ("Ctrl+S", "Save"))
             commands.insert(1, ("Ctrl+Enter", "Save+Learn"))
@@ -1906,7 +2057,7 @@ class TonepathApp(App[None]):
         self.query_one("#status-bar", Static).update(self.status_bar_text(extra="setup required"))
         self.query_one("#prompt-input", Input).value = ""
         self.query_one("#now-playing", Static).update(
-            "No scanned tracks.\n\nRun:\nuv run tonepath setup --preset private\nuv run tonepath config add-music-dir /path/to/music\nuv run tonepath prepare"
+            "No scanned tracks.\n\nPress c for Setup, or run:\nuv run tonepath setup"
         )
         self.refresh_right_panel()
         self.query_one("#command-bar", Static).update(self.command_bar_renderable(prompt_focused=True))
@@ -2221,3 +2372,17 @@ def confidence_label(confidence: str) -> str:
     if confidence == "medium":
         return "med"
     return confidence
+
+
+def should_auto_open_setup() -> bool:
+    """Return whether this looks like a truly new home without saved setup."""
+
+    if config.config_path().exists():
+        return False
+    home = config.app_home()
+    if not home.exists():
+        return True
+    try:
+        return not any(home.iterdir())
+    except OSError:
+        return False

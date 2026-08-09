@@ -24,7 +24,7 @@ Tonepath currently has a working local-first CLI/TUI prototype:
 - controlled `mpv` playback with local JSON IPC, real pause/resume, seek, volume, progress, and process cleanup;
 - saved-session queue snapshots, bookmarks, exact local replay, and JSON/M3U8 export;
 - five-category local privacy inventory, sanitized personal-data export, and preview-before-delete CLI controls;
-- Textual TUI with prompt intake, timeline, queue, now-playing state, why panel, private Memory, Listening History, Data & Privacy, and event log;
+- Textual TUI with first-run Setup, prompt intake, timeline, queue, now-playing state, why panel, private Memory, Listening History, Data & Privacy, and event log;
 - feedback capture for like, skip, no-vocals, too-loud, and too-slow;
 - profile comparison plus deterministic and LLM/Codex-assisted pending suggestions;
 - benchmark/eval commands for intent, selection, suite checks, diagnostics, CLAP/hybrid bake-off, audit packs, Codex audit, and rerank preview;
@@ -291,7 +291,7 @@ Engineering rules:
 
 ## Immediate Next Step
 
-The guided Setup Core is now available in the CLI:
+Guided Setup is now available in both CLI and TUI:
 
 ```bash
 uv run tonepath setup
@@ -299,4 +299,4 @@ uv run tonepath setup --preset private
 uv run tonepath setup --preset smart
 ```
 
-It keeps the normal path to Music, Experience, and Review, while selective reconfiguration and scriptable presets remain available. The next checkpoint is the matching TUI Setup screen with first-run auto-entry and background preparation. It must preserve the same consent, no-secret, no-silent-download, and current-queue boundaries.
+The TUI opens Getting Started only for a genuinely new local home, keeps `c Setup` available for later changes, and runs explicitly confirmed preparation in the background without replacing the current path. The immediate work is fresh-home and existing-config product validation, not another setup abstraction. Model downloads, external text consent, and library preparation remain separate decisions.

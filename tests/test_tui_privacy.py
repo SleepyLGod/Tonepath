@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from textual.widgets import Input, TextArea
 
+from tonepath import config
 from tonepath.db import TonepathStore
 from tonepath.models import SessionPlan, SessionRequest
 from tonepath.planner import build_phases, plan_session
@@ -61,6 +62,7 @@ class PrivacyScreenTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                config.write_config(config.default_config())
                 app = TonepathApp()
                 async with app.run_test() as pilot:
                     prompt = app.query_one("#prompt-input", Input)
@@ -88,6 +90,7 @@ class PrivacyScreenTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                config.write_config(config.default_config())
                 app = TonepathApp()
                 async with app.run_test() as pilot:
                     runner = SimpleNamespace(queue=["first", "second"])
@@ -123,6 +126,7 @@ class PrivacyScreenTest(unittest.IsolatedAsyncioTestCase):
                 "tonepath.tui_privacy.default_privacy_export_path",
                 return_value=output,
             ), patch("tonepath.tui_privacy.export_personal_data", side_effect=slow_export):
+                config.write_config(config.default_config())
                 app = TonepathApp()
                 async with app.run_test() as pilot:
                     runner = SimpleNamespace(queue=["current"])
@@ -329,6 +333,7 @@ class PrivacyScreenTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                config.write_config(config.default_config())
                 app = TonepathApp()
                 async with app.run_test() as pilot:
                     screen = await self.open_privacy(app, pilot)
@@ -420,10 +425,12 @@ class PrivacyScreenTest(unittest.IsolatedAsyncioTestCase):
     def test_delete_is_blocked_while_related_background_writers_are_active(self) -> None:
         memory_app = SimpleNamespace(memory_busy=True, request_busy=False)
         request_app = SimpleNamespace(memory_busy=False, request_busy=True)
+        preparation_app = SimpleNamespace(memory_busy=False, request_busy=False, setup_prepare_busy=True)
 
         self.assertIn("Memory learning", deletion_task_blocker(memory_app, ("memory",)))
         self.assertIn("Memory learning", deletion_task_blocker(memory_app, ("personalization",)))
         self.assertIn("Request planning", deletion_task_blocker(request_app, ("history",)))
+        self.assertIn("preparation is still running", deletion_task_blocker(preparation_app, ("history",)))
         self.assertIsNone(deletion_task_blocker(memory_app, ("history",)))
 
     def test_category_delete_completed_requires_no_failed_components(self) -> None:

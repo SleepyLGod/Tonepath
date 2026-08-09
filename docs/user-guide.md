@@ -80,7 +80,11 @@ uv run tonepath scan /path/to/music
 
 ## TUI and Playback
 
-The TUI opens as a local workbench. Run `uv run tonepath` or `uv run tonepath tui`, type a listening goal, and press Enter to create a session. Passing a prompt to `tonepath tui "..."` creates the session immediately, but still does not autoplay. Playback events are recorded locally in SQLite for future preference learning.
+The TUI opens as a local workbench. On a genuinely new `TONEPATH_HOME`, it first opens **Getting Started** so you can choose Music, Experience, and Review & Start without learning the advanced config names. Once a config exists, setup no longer opens automatically. Press `c` outside Request or Memory input whenever you want to review or change one setup area.
+
+Run `uv run tonepath` or `uv run tonepath tui`, type a listening goal, and press Enter to create a session. Passing a prompt to `tonepath tui "..."` creates the session immediately, but still does not autoplay. Playback events are recorded locally in SQLite for future preference learning.
+
+Setup saves configuration only after the review step. Preparing the library and downloading optional local models are separate confirmations. TUI preparation runs in the background: Help, themes, and playback remain responsive, and the current queue does not change. Newly scanned evidence is used by the next Request. Privacy deletion is unavailable until preparation finishes so the two tasks cannot rewrite the same local state concurrently.
 
 The TUI has a small built-in theme pack: `Warmline`, `Midnight`, `High Contrast`, `Solarized Dark`, `Solarized Light`, `Catppuccin Mocha`, `Catppuccin Latte`, `Dracula`, and `Jukebox`. Press `t` to cycle themes; Tonepath stores the choice in `config.toml` under `[ui] theme = "..."`.
 
@@ -106,6 +110,7 @@ v          prefer less vocals
 +          too loud; lower upcoming energy
 -          too slow; raise upcoming energy
 m          cycle playback mode
+c          open Setup outside Request or Memory input
 Ctrl+L     open listening history
 d          open Data & Privacy outside Request or Memory input
 Ctrl+O     open or hide the memory notes panel (Control + letter o, not zero)
@@ -126,7 +131,7 @@ q          stop playback and quit when Request is not focused
 Ctrl+Q     stop playback and quit at any time
 ```
 
-Arrow keys remain text-editing controls while the Request or Memory editor is focused, and navigate rows inside Listening History or Data & Privacy. A typed `d` remains ordinary text while either editor is focused. Volume is preserved while Tonepath switches tracks in the current TUI process, but Player Core v1 does not persist it across app restarts.
+Arrow keys remain text-editing controls while the Request or Memory editor is focused, and navigate rows inside Setup, Listening History, or Data & Privacy. Typed `c` and `d` remain ordinary text while either editor is focused. Volume is preserved while Tonepath switches tracks in the current TUI process, but Player Core v1 does not persist it across app restarts.
 
 Playback modes are TUI-local:
 

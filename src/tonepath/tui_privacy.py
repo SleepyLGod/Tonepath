@@ -560,6 +560,8 @@ class PrivacyScreen(Screen[None]):
 def deletion_task_blocker(app: Any, categories: tuple[str, ...]) -> str | None:
     """Refuse deletion while an active worker could recreate the same data."""
 
+    if bool(getattr(app, "setup_prepare_busy", False)):
+        return "Library preparation is still running. Wait for it to finish before deleting local data."
     if any(category in {"memory", "personalization"} for category in categories) and bool(
         getattr(app, "memory_busy", False)
     ):
