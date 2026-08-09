@@ -40,6 +40,23 @@ class CliListenSetupTest(unittest.TestCase):
                 self.assertIn('mode = "smart"', result.output)
                 self.assertFalse((home / "config.toml").exists())
 
+    def test_guided_setup_rejects_scripted_options_without_preset(self) -> None:
+        option_sets = (
+            ("--music-dir", "/tmp/music"),
+            ("--allow-model-setup",),
+            ("--send-to-llm",),
+            ("--llm-provider", "qwen"),
+        )
+        for options in option_sets:
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp) / "home"
+                with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
+                    result = CliRunner().invoke(app, ["setup", *options])
+
+                    self.assertEqual(result.exit_code, 2, result.output)
+                    self.assertIn("requires --preset", result.output)
+                    self.assertFalse(config.config_path().exists())
+
     def test_first_run_setup_uses_three_step_guidance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"

@@ -25,7 +25,7 @@ class SetupDraft:
         """Build a setup draft from current persisted settings."""
 
         return cls(
-            music_dirs=settings.music_dirs,
+            music_dirs=tuple(str(Path(path).expanduser()) for path in settings.music_dirs),
             experience_mode=settings.experience.mode,
             model_mode=settings.models.mode,
             allow_model_setup=settings.models.allow_setup,
@@ -37,6 +37,8 @@ class SetupDraft:
     def replace_music_dirs(self, paths: tuple[str, ...]) -> SetupDraft:
         """Return a draft with an explicit ordered music directory list."""
 
+        if any(not path.strip() for path in paths):
+            raise ValueError("Music directory cannot be empty.")
         normalized = tuple(dict.fromkeys(str(Path(path).expanduser()) for path in paths))
         return replace(self, music_dirs=normalized)
 
@@ -90,7 +92,15 @@ class SetupDraft:
     def to_config(self, base: config.TonepathConfig) -> config.TonepathConfig:
         """Build final config while preserving settings outside setup's ownership."""
 
-        network_mode = "offline" if self.experience_mode == "private" else "online-opt-in"
+        if self.experience_mode == "private":
+            network_mode = "offline"
+            allow_online = False
+        elif self.experience_mode == "smart":
+            network_mode = "online-opt-in"
+            allow_online = True
+        else:
+            network_mode = base.network_mode
+            allow_online = base.models.allow_online
         return replace(
             base,
             music_dirs=self.music_dirs,
@@ -103,7 +113,7 @@ class SetupDraft:
                 base.models,
                 mode=self.model_mode,
                 allow_setup=self.allow_model_setup,
-                allow_online=self.experience_mode != "private",
+                allow_online=allow_online,
             ),
             experience=config.ExperienceConfig(mode=self.experience_mode),
             llm=config.LlmConfig(provider=config.normalize_llm_provider(self.llm_provider)),
@@ -117,6 +127,8 @@ def validate_music_directories(paths: tuple[str, ...]) -> tuple[Path, ...]:
         raise ValueError("At least one music directory is required.")
     validated: list[Path] = []
     for raw_path in paths:
+        if not raw_path.strip():
+            raise ValueError("Music directory cannot be empty.")
         path = Path(raw_path).expanduser()
         if not path.exists():
             raise ValueError(f"Music directory does not exist: {path}")

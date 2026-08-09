@@ -17,6 +17,30 @@ from tonepath.scanner import read_track
 
 
 class CliPrepareStatusTest(unittest.TestCase):
+    def test_prepare_rejects_fast_and_full_as_a_parameter_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
+                result = CliRunner().invoke(app, ["prepare", "--fast", "--full"])
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("Invalid value", result.output)
+        self.assertNotIn("Preparation failed", result.output)
+
+    def test_prepare_runtime_failure_is_not_reported_as_bad_parameter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}), patch(
+                "tonepath.cli.run_cli_preparation",
+                side_effect=RuntimeError("analysis runtime failed"),
+            ):
+                result = CliRunner().invoke(app, ["prepare"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("Preparation failed: analysis runtime failed", result.output)
+        self.assertNotIn("Invalid value", result.output)
+        self.assertNotIn("Traceback", result.output)
+
     def test_suggested_music_dir_handles_commonpath_value_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             track = Track(

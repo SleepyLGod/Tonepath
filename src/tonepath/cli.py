@@ -174,15 +174,30 @@ def tui_command(
 @app.command()
 def setup(
     preset: Annotated[str | None, typer.Option("--preset", help="Experience preset: private, smart, or custom.")] = None,
-    music_dir: Annotated[Path | None, typer.Option("--music-dir", help="Music directory to save in config.")] = None,
-    allow_model_setup: Annotated[bool | None, typer.Option("--allow-model-setup/--no-allow-model-setup", help="Allow prepare to set up local model runtimes.")] = None,
-    send_to_llm: Annotated[bool | None, typer.Option("--send-to-llm/--no-send-to-llm", help="Allow opt-in LLM profile reflection when configured.")] = None,
-    llm_provider: Annotated[str | None, typer.Option("--llm-provider", help="AI Assist provider: deepseek or qwen. No key is stored.")] = None,
+    music_dir: Annotated[Path | None, typer.Option("--music-dir", help="Music directory for scripted --preset setup.")] = None,
+    allow_model_setup: Annotated[bool | None, typer.Option("--allow-model-setup/--no-allow-model-setup", help="Allow local model setup for scripted --preset setup.")] = None,
+    send_to_llm: Annotated[bool | None, typer.Option("--send-to-llm/--no-send-to-llm", help="Allow external text processing for scripted --preset setup.")] = None,
+    llm_provider: Annotated[str | None, typer.Option("--llm-provider", help="AI provider for scripted --preset setup; no key is stored.")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Show the config that would be written.")] = False,
 ) -> None:
     """Configure Tonepath through guided setup or a scriptable preset."""
 
     if preset is None:
+        scripted_options = [
+            name
+            for name, value in (
+                ("--music-dir", music_dir),
+                ("--allow-model-setup", allow_model_setup),
+                ("--send-to-llm", send_to_llm),
+                ("--llm-provider", llm_provider),
+            )
+            if value is not None
+        ]
+        if scripted_options:
+            names = ", ".join(scripted_options)
+            noun = "Option" if len(scripted_options) == 1 else "Options"
+            verb = "requires" if len(scripted_options) == 1 else "require"
+            raise typer.BadParameter(f"{noun} {names} {verb} --preset private, smart, or custom")
         run_guided_setup(dry_run=dry_run)
         return
     try:
@@ -455,6 +470,9 @@ def prepare(
     settings = tonepath_config.load_config()
     try:
         mode = tonepath_preparation.resolve_prepare_mode(settings.models.mode, fast=fast, full=full)
+    except (RuntimeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    try:
         run_cli_preparation(
             settings,
             limit=limit,
@@ -462,7 +480,8 @@ def prepare(
             setup_models=setup_models or settings.models.allow_setup,
         )
     except (RuntimeError, ValueError) as exc:
-        raise typer.BadParameter(str(exc)) from exc
+        console.print(f"Preparation failed: {exc}")
+        raise typer.Exit(code=1) from exc
 
 
 def run_cli_preparation(

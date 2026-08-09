@@ -62,6 +62,7 @@ cd Tonepath
 uv sync
 cp .env.example .env
 uv run tonepath setup
+uv run tonepath prepare
 uv run tonepath status
 uv run tonepath listen "from tired to focused in 30 minutes, no vocals" --dry-run
 ```
