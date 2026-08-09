@@ -21,6 +21,7 @@ For detailed usage, model setup, evaluation, profile learning, and privacy notes
 - selects a short local listening path with confidence, reasons, and low-stimulation safety checks;
 - keeps replayable local session history with bookmarks and JSON/M3U8 export bundles;
 - records feedback locally so profile rules can be reviewed before they affect selection;
+- inventories, exports, and selectively deletes local personal data through explicit privacy previews;
 - keeps optional model, LLM, Codex, and online workflows explicit and opt-in.
 
 ## Status
@@ -35,6 +36,7 @@ For detailed usage, model setup, evaluation, profile learning, and privacy notes
 | TUI | MVP | Textual workbench for prompt intake, playback control, queue, why panel, feedback, and event log. |
 | Audio analysis | Basic + optional models | Default lightweight analysis plus optional MIR, Essentia-TF tagging/affect, experimental CLAP bake-off, and separator fallback paths. |
 | Profile learning | Early-stage | Feedback, suggestions, Markdown memory/evidence, rule apply, and profile comparison are available. |
+| Data & Privacy | CLI implemented | Five-category local inventory, sanitized personal-data export, and preview-before-delete controls. |
 | LLM/Codex | Opt-in | Used for intent parsing, audit, and profile suggestions only when explicitly invoked. |
 
 ## Requirements
@@ -85,7 +87,7 @@ uv run tonepath eval suite --limit 5
 uv run tonepath eval diagnose --limit 8
 uv run tonepath history list
 uv run tonepath profile inspect
-uv run tonepath privacy status
+uv run tonepath privacy inspect
 ```
 
 Actual playback uses local files through `mpv`:

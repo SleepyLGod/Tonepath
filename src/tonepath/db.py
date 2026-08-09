@@ -796,18 +796,46 @@ class TonepathStore:
     def delete_profile_data(self) -> None:
         """Delete user profile, play, feedback, and session data while keeping scanned tracks."""
 
-        for table in (
-            "profile_rules",
-            "feedback",
-            "plays",
-            "session_bookmarks",
-            "session_queue_items",
-            "session_phases",
-            "sessions",
-        ):
-            self.conn.execute(f"DELETE FROM {table}")
-        self.conn.execute("DELETE FROM app_state WHERE key = 'current_session_id'")
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute("PRAGMA secure_delete = ON")
+            self.conn.execute("DELETE FROM profile_rules")
+            self.conn.execute("DELETE FROM feedback")
+            for table in (
+                "plays",
+                "session_bookmarks",
+                "session_queue_items",
+                "session_phases",
+                "sessions",
+            ):
+                self.conn.execute(f"DELETE FROM {table}")
+            self.conn.execute("DELETE FROM app_state WHERE key = 'current_session_id'")
+
+    def delete_personalization_data(self) -> None:
+        """Delete feedback and active profile rules while preserving sessions."""
+
+        with self.conn:
+            self.conn.execute("PRAGMA secure_delete = ON")
+            self.conn.execute("DELETE FROM profile_rules")
+            self.conn.execute("DELETE FROM feedback")
+
+    def delete_history_data(self, preserve_feedback: bool = True) -> None:
+        """Delete session history, optionally preserving detached feedback."""
+
+        with self.conn:
+            self.conn.execute("PRAGMA secure_delete = ON")
+            if preserve_feedback:
+                self.conn.execute("UPDATE feedback SET session_id = NULL")
+            else:
+                self.conn.execute("DELETE FROM feedback")
+            for table in (
+                "plays",
+                "session_bookmarks",
+                "session_queue_items",
+                "session_phases",
+                "sessions",
+            ):
+                self.conn.execute(f"DELETE FROM {table}")
+            self.conn.execute("DELETE FROM app_state WHERE key = 'current_session_id'")
 
 
 def track_from_row(row: sqlite3.Row) -> Track:

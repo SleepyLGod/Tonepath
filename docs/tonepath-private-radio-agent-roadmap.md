@@ -23,6 +23,7 @@ Tonepath currently has a working local-first CLI/TUI prototype:
 - deterministic path planning and selector scoring with explainable reasons;
 - controlled `mpv` playback with local JSON IPC, real pause/resume, seek, volume, progress, and process cleanup;
 - saved-session queue snapshots, bookmarks, exact local replay, and JSON/M3U8 export;
+- five-category local privacy inventory, sanitized personal-data export, and preview-before-delete CLI controls;
 - Textual TUI with prompt intake, timeline, queue, now-playing state, why panel, private Memory, and event log;
 - feedback capture for like, skip, no-vocals, too-loud, and too-slow;
 - profile comparison plus deterministic and LLM/Codex-assisted pending suggestions;
@@ -72,7 +73,7 @@ uv run tonepath history export <session-id> --output <directory>
 
 ### Privacy and Trust
 
-- Privacy boundaries need to be visible in status, TUI, and docs, not only implementation.
+- Privacy boundaries are visible in CLI status, inventory, export, deletion previews, and docs; the same controls still need a first-class TUI surface.
 - LLM profile evidence packs need continuous privacy tests.
 - Users should see what can leave the machine, what stays local, and what evidence supports each suggestion.
 
@@ -290,12 +291,12 @@ Engineering rules:
 
 ## Immediate Next Step
 
-Design and implement a local Privacy Center that makes Tonepath's stored data and deletion boundaries visible before destructive actions:
+Add the TUI surface for the implemented local Privacy Center contracts:
 
 ```bash
 uv run tonepath privacy inspect
-uv run tonepath privacy export
-uv run tonepath privacy delete
+uv run tonepath privacy export --output <directory>
+uv run tonepath privacy delete --all-personal
 ```
 
-The Privacy Center should distinguish user-authored Memory, learned profile rules, listening history, audio evidence, model caches, and original music files. Deletion must remain explicit and previewable. Do not mix this work with Setup Wizard, Session Host, catalog handoff, or recommendation tuning. The current selector remains local and evidence-first, and CLAP/hybrid remain evaluation tools until they show stable measured improvement.
+The CLI now distinguishes Memory, Personalization, Listening History, Library Evidence, and Models & Storage without moving the underlying data. The next checkpoint should expose that same inventory in a themed full-screen TUI browser with background export, explicit typed deletion confirmation, stale-plan detection, and safe player-state reset after History deletion. Do not mix this work with Setup Wizard, Session Host, catalog handoff, or recommendation tuning.

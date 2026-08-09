@@ -427,28 +427,56 @@ TONEPATH_HOME=/tmp/tonepath-demo uv run tonepath config init
 
 ## Data and Privacy
 
-Tonepath is offline by default. v0 does not upload audio files, full library data, or playback history.
+Tonepath is offline by default. Audio files, full library data, Memory, and playback history stay local unless an optional online action is explicitly enabled.
 
-Development local data path:
+Privacy Center groups local data into five understandable categories:
 
-```text
-/Users/von/Projects/music-agents/.tonepath/tonepath.db
-```
+| Category | What it contains | Privacy Center v1 |
+| --- | --- | --- |
+| Memory | private notes, `memory/profile.md`, consolidation evidence | inspect, export, delete |
+| Personalization | feedback, active rules, profile evidence, pending suggestions | inspect, export, delete |
+| Listening History | Requests, paths, queue snapshots, bookmarks, plays, audit evidence | inspect, export, delete |
+| Library Evidence | tracks, audio features, enrichment, embeddings, separated evidence | inspect only |
+| Models & Storage | model files, isolated runtimes, package caches | inspect only |
 
-Inspect local storage:
+Inspect without creating a database or cache:
 
 ```bash
 uv run tonepath privacy status
+uv run tonepath privacy inspect
+uv run tonepath privacy inspect --json
 uv run tonepath profile inspect
 ```
 
-Delete local profile rules, pending suggestions, editable profile Markdown, session, feedback, and play data:
+`privacy inspect` reports records and known local file sizes. SQLite is shared by several categories, so Tonepath reports the database size once instead of inventing a per-category database size. It does not follow symlinks or scan the size of configured music directories.
+
+Export an owner-only, sanitized personal-data package:
+
+```bash
+uv run tonepath privacy export --output ~/tonepath-personal-data
+```
+
+The bundle contains Memory, personalization, feedback, listening history, and sanitized settings. It excludes API keys, absolute music paths, raw SQLite, audio files, models, runtimes, and rebuildable caches. Tonepath shows the current external-processing policy, provider, and whether a key exists, but it does not record a transmission history.
+
+Deletion is preview-first. Without `--confirm`, nothing is changed:
+
+```bash
+uv run tonepath privacy delete --category memory
+uv run tonepath privacy delete --category personalization --category history
+uv run tonepath privacy delete --all-personal
+```
+
+After reading the exact delete/keep list, rerun the same command with `--confirm`. `--all-personal` removes Memory, Personalization, and Listening History while preserving config, tracks, audio features, model/runtime storage, caches outside those personal categories, and original music.
+
+Deleting Memory by itself keeps active profile rules, which may continue to affect future recommendations. Deleting History while preserving Personalization detaches feedback from deleted sessions. Deletion enables SQLite secure deletion, but Tonepath cannot promise removal from system backups, APFS snapshots, or SSD forensic recovery.
+
+The older command remains available and now uses the same category helpers:
 
 ```bash
 uv run tonepath profile delete --all
 ```
 
-This keeps scanned tracks, audio features, model cache, separated audio cache, and music files.
+It removes Personalization and Listening History, but preserves raw Memory notes and `memory/profile.md` as well as scanned tracks, audio features, model storage, and music files.
 
 Local test music and secrets belong outside git. The repository ignores `songs/`, `.venv/`, `.env`, caches, and local database files. Commit `.env.example`, never `.env`.
 

@@ -76,8 +76,6 @@ from tonepath.profile import (
     apply_suggestion_group,
     apply_suggestion,
     build_profile_evidence,
-    delete_profile_cache,
-    delete_profile_markdown,
     deterministic_suggestions,
     list_pending_suggestions,
     memory_context_text,
@@ -93,7 +91,17 @@ from tonepath.profile import (
     write_profile_evidence_markdown,
     write_profile_memory,
 )
-from tonepath.privacy import delete_profile, privacy_status
+from tonepath.privacy import (
+    ALL_PERSONAL_CATEGORIES,
+    build_privacy_inventory,
+    execute_privacy_delete,
+    export_personal_data,
+    plan_privacy_delete,
+    privacy_status,
+    render_delete_plan,
+    render_delete_result,
+    render_privacy_inventory,
+)
 from tonepath.readiness import (
     LibraryStatus,
     library_status,
@@ -1404,11 +1412,13 @@ def profile_delete(all_data: Annotated[bool, typer.Option("--all", help="Delete 
         raise typer.Exit(code=1)
     store = TonepathStore()
     try:
-        delete_profile(store)
+        plan = plan_privacy_delete(("personalization", "history"), store=store)
+        result = execute_privacy_delete(plan, store=store)
     finally:
         store.close()
-    delete_profile_cache()
-    delete_profile_markdown()
+    if result.failed:
+        console.print(render_delete_result(result))
+        raise typer.Exit(code=1)
     console.print("Deleted local profile rules, feedback, sessions, plays, profile Markdown/evidence, and pending suggestions.")
 
 
@@ -1516,8 +1526,68 @@ def memory_suggest(
 def privacy_status_command() -> None:
     """Show local privacy status."""
 
-    store = TonepathStore()
-    console.print(privacy_status(store))
+    console.print(privacy_status())
+
+
+@privacy_app.command("inspect")
+def privacy_inspect_command(
+    as_json: Annotated[bool, typer.Option("--json", help="Print the stable privacy inventory JSON contract.")] = False,
+) -> None:
+    """Inspect all known local data categories without creating storage."""
+
+    inventory = build_privacy_inventory()
+    if as_json:
+        print_json_payload(inventory.to_payload())
+        return
+    console.print(render_privacy_inventory(inventory))
+
+
+@privacy_app.command("export")
+def privacy_export_command(
+    output: Annotated[Path, typer.Option("--output", help="New or empty owner-only output directory.")],
+) -> None:
+    """Export a sanitized copy of personal Tonepath data."""
+
+    try:
+        exported = export_personal_data(output)
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print(f"Exported personal data to {escape(str(exported))}.")
+    console.print("The bundle is owner-only and excludes API keys, music paths, audio, SQLite, models, and caches.")
+
+
+@privacy_app.command("delete")
+def privacy_delete_command(
+    categories: Annotated[
+        list[str] | None,
+        typer.Option("--category", help="Personal category to delete: memory, personalization, or history."),
+    ] = None,
+    all_personal: Annotated[
+        bool,
+        typer.Option("--all-personal", help="Delete Memory, Personalization, and History together."),
+    ] = False,
+    confirm: Annotated[bool, typer.Option("--confirm", help="Execute the displayed deletion plan.")] = False,
+) -> None:
+    """Preview or execute deletion of selected personal data categories."""
+
+    if all_personal and categories:
+        raise typer.BadParameter("Use either --all-personal or --category, not both.")
+    requested = ALL_PERSONAL_CATEGORIES if all_personal else tuple(categories or ())
+    try:
+        plan = plan_privacy_delete(requested)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print(render_delete_plan(plan))
+    if not confirm:
+        console.print("Preview only; nothing was deleted. Rerun with --confirm to execute this exact plan.")
+        return
+    try:
+        result = execute_privacy_delete(plan)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print(render_delete_result(result))
+    if result.failed:
+        raise typer.Exit(code=1)
 
 
 @explain_app.command("current")
