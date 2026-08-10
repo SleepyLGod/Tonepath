@@ -16,6 +16,7 @@ Start from a project-local environment:
 uv sync
 cp .env.example .env
 uv run tonepath setup
+uv run tonepath prepare
 uv run tonepath status
 uv run tonepath listen "我现在很烦，想写论文，低刺激，不要人声" --dry-run
 ```
@@ -538,7 +539,7 @@ Model preparation policy lives in config:
 | Setting | Default | Behavior |
 | --- | --- | --- |
 | `models.mode` | `balanced` | `fast` runs scan/MIR only; `balanced` runs tagging when ready; `full` asks for model-backed tagging. |
-| `models.allow_setup` | `false` | When true, `prepare` may create the workspace-local model runtime. The CLI flag `--setup-models` enables this per run. |
+| `models.allow_setup` | `false` | Persistent permission for local model setup. A run must also explicitly pass `prepare --setup-models`; permission alone never starts a download. |
 | `models.allow_online` | `false` | Reserved for future opt-in online identity/LLM workflows. Audio facts stay local. |
 | `models.preferred_tagger` | `essentia-tf` | Preferred local tagging runtime for voice/instrumental and music tags. |
 | `models.separator_fallback` | `off` | Keeps slow source separation out of the normal user flow unless an advanced user opts in. |

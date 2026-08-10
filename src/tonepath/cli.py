@@ -230,12 +230,17 @@ def run_guided_setup(*, dry_run: bool) -> None:
     if first_run:
         console.print("[bold]Getting Started[/bold]")
         console.print("Step 1 of 3 · Music")
-        music_value = typer.prompt("Music directory", default=draft.music_dirs[0] if draft.music_dirs else "~/Music")
-        draft = draft.replace_music_dirs((music_value,))
-        try:
-            validate_music_directories(draft.music_dirs)
-        except ValueError as exc:
-            raise typer.BadParameter(str(exc)) from exc
+        default_dir = draft.music_dirs[0] if draft.music_dirs else "~/Music"
+        while True:
+            music_value = typer.prompt("Music directory", default=default_dir)
+            try:
+                candidate = draft.replace_music_dirs((music_value,))
+                validate_music_directories(candidate.music_dirs)
+            except ValueError as exc:
+                console.print(str(exc))
+                continue
+            draft = candidate
+            break
         console.print("Step 2 of 3 · Experience")
         draft = prompt_experience(draft)
     else:
@@ -336,6 +341,9 @@ def prompt_music_directories(draft: SetupDraft) -> SetupDraft:
             raise typer.BadParameter(str(exc)) from exc
         return draft.add_music_dir(Path(raw_path))
     updated = draft.remove_music_dir(Path(raw_path))
+    if updated.music_dirs == draft.music_dirs:
+        console.print(f"No matching music directory was removed: {Path(raw_path).expanduser()}", markup=False)
+        return draft
     try:
         validate_music_directories(updated.music_dirs)
     except ValueError as exc:
@@ -472,12 +480,18 @@ def prepare(
         mode = tonepath_preparation.resolve_prepare_mode(settings.models.mode, fast=fast, full=full)
     except (RuntimeError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
+    if setup_models and not settings.models.allow_setup:
+        console.print(
+            "Model setup is disabled by the current config. Open `uv run tonepath setup`, "
+            "choose Local Models, allow explicit model setup, then rerun with `--setup-models`."
+        )
+        raise typer.Exit(code=1)
     try:
         run_cli_preparation(
             settings,
             limit=limit,
             mode=mode,
-            setup_models=setup_models or settings.models.allow_setup,
+            setup_models=setup_models and settings.models.allow_setup,
         )
     except (RuntimeError, ValueError) as exc:
         console.print(f"Preparation failed: {exc}")
@@ -1775,7 +1789,8 @@ def resolve_scan_paths(path: Path | None) -> tuple[Path, ...]:
 def print_scan_summary(summary: ScanSummary) -> None:
     """Print a scan summary."""
 
-    console.print(f"Scanned {summary.total} track(s) from {summary.scanned_dirs} director(y/ies).")
+    directory_label = "directory" if summary.scanned_dirs == 1 else "directories"
+    console.print(f"Scanned {summary.total} track(s) from {summary.scanned_dirs} {directory_label}.")
     if summary.pruned:
         console.print(f"Pruned {summary.pruned} missing track(s).")
 

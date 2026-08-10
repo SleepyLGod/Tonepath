@@ -38,6 +38,7 @@ class PreparationServiceTest(unittest.TestCase):
         self.assertEqual(analyze.call_args_list[2].kwargs["features"], "affect")
         self.assertTrue(result.runtime_ready)
         self.assertIn("Prepare: scan", events)
+        self.assertIn("Scanned 2 track(s) from 1 directory.", events)
         store.close.assert_called_once()
 
     def test_missing_models_still_runs_base_mir_without_download(self) -> None:

@@ -136,7 +136,8 @@ def run_preparation(
             emit("scan", message)
         emit(
             "scan",
-            f"Scanned {scan_summary.total} track(s) from {scan_summary.scanned_dirs} director(y/ies).",
+            f"Scanned {scan_summary.total} track(s) from {scan_summary.scanned_dirs} "
+            f"{'directory' if scan_summary.scanned_dirs == 1 else 'directories'}.",
         )
         if scan_summary.pruned:
             emit("scan", f"Pruned {scan_summary.pruned} missing track(s).")

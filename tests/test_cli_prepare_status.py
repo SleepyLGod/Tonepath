@@ -17,6 +17,35 @@ from tonepath.scanner import read_track
 
 
 class CliPrepareStatusTest(unittest.TestCase):
+    def test_prepare_model_setup_requires_permission_and_explicit_request(self) -> None:
+        cases = (
+            (False, False, 0, False),
+            (True, False, 0, False),
+            (False, True, 1, None),
+            (True, True, 0, True),
+        )
+        for allow_setup, request_setup, expected_exit, expected_effective in cases:
+            with self.subTest(allow_setup=allow_setup, request_setup=request_setup), tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp) / "home"
+                music = Path(tmp) / "music"
+                music.mkdir()
+                with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
+                    settings = config.preset_config("private", music_dir=music, allow_model_setup=allow_setup)
+                    config.write_config(settings)
+                    with patch("tonepath.cli.run_cli_preparation") as run_prepare:
+                        args = ["prepare", *(["--setup-models"] if request_setup else [])]
+                        result = CliRunner().invoke(app, args)
+
+                self.assertEqual(result.exit_code, expected_exit, result.output)
+                if expected_effective is None:
+                    run_prepare.assert_not_called()
+                    self.assertIn("Model setup is disabled", result.output)
+                    self.assertIn("Local Models", result.output)
+                    self.assertNotIn("Traceback", result.output)
+                else:
+                    run_prepare.assert_called_once()
+                    self.assertIs(run_prepare.call_args.kwargs["setup_models"], expected_effective)
+
     def test_prepare_rejects_fast_and_full_as_a_parameter_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
@@ -140,8 +169,7 @@ class CliPrepareStatusTest(unittest.TestCase):
             (music / "song.mp3").write_bytes(b"fake audio")
             with patch.dict(os.environ, {"TONEPATH_HOME": str(home), "HOME": str(Path(tmp) / "user-home")}):
                 runner = CliRunner()
-                self.assertEqual(runner.invoke(app, ["config", "init"]).exit_code, 0)
-                self.assertEqual(runner.invoke(app, ["config", "add-music-dir", str(music)]).exit_code, 0)
+                config.write_config(config.preset_config("private", music_dir=music, allow_model_setup=True))
                 with patch("tonepath.preparation.model_runtime_status", return_value=SimpleNamespace(ready=False)), patch(
                     "tonepath.preparation.setup_essentia_tf_runtime",
                     return_value=SimpleNamespace(ready=True, affect_ready=True),

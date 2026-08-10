@@ -95,14 +95,33 @@ class CliListenSetupTest(unittest.TestCase):
                 self.assertIn("Setup cancelled; no changes were saved.", result.output)
                 self.assertFalse(config.config_path().exists())
 
-    def test_first_run_setup_rejects_missing_music_directory_without_writing(self) -> None:
+    def test_first_run_setup_retries_blank_and_missing_music_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            missing = Path(tmp) / "missing"
+            music = Path(tmp) / "music"
+            music.mkdir()
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
+                result = CliRunner().invoke(
+                    app,
+                    ["setup"],
+                    input=f"   \n{missing}\n{music}\nprivate\nn\n",
+                )
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertIn("Music directory cannot be empty", result.output)
+                self.assertIn("Music directory does not exist", result.output)
+                self.assertIn("Setup cancelled; no changes were saved.", result.output)
+                self.assertFalse(config.config_path().exists())
+
+    def test_first_run_setup_eof_after_invalid_directory_writes_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             missing = Path(tmp) / "missing"
             with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
                 result = CliRunner().invoke(app, ["setup"], input=f"{missing}\n")
 
-                self.assertEqual(result.exit_code, 2, result.output)
+                self.assertNotEqual(result.exit_code, 0, result.output)
                 self.assertIn("Music directory does not exist", result.output)
                 self.assertFalse(config.config_path().exists())
 
@@ -161,6 +180,26 @@ class CliListenSetupTest(unittest.TestCase):
                 self.assertEqual(settings.music_dirs, (str(first),))
                 self.assertEqual(settings.experience.mode, "smart")
                 self.assertFalse(settings.privacy.send_to_llm)
+
+    def test_reconfigure_reports_when_music_directory_does_not_match(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            music = Path(tmp) / "music"
+            music.mkdir()
+            missing = Path(tmp) / "not-configured"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
+                original = config.preset_config("private", music_dir=music)
+                config.write_config(original)
+
+                result = CliRunner().invoke(
+                    app,
+                    ["setup"],
+                    input=f"music\nremove\n{missing}\ndone\nn\n",
+                )
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertIn("No matching music directory was removed", result.output)
+                self.assertEqual(config.load_config().music_dirs, original.music_dirs)
 
     def test_noninteractive_setup_adds_music_directory_without_clearing_existing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

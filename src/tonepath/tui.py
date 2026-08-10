@@ -544,6 +544,7 @@ class TonepathApp(App[None]):
     def forward_directional_key(self, direction: str) -> bool:
         """Keep arrow-key behavior inside text editors and History."""
 
+        focused = self.focused
         if isinstance(self.screen, HistoryScreen):
             if direction == "up":
                 self.screen.action_previous_history()
@@ -557,12 +558,16 @@ class TonepathApp(App[None]):
                 self.screen.action_next_category()
             return True
         if isinstance(self.screen, SetupScreen):
-            if direction == "up":
+            if direction == "up" and not isinstance(focused, Input):
                 self.screen.action_previous_option()
-            elif direction == "down":
+            elif direction == "down" and not isinstance(focused, Input):
                 self.screen.action_next_option()
+            elif isinstance(focused, Input):
+                if direction == "left":
+                    focused.action_cursor_left()
+                elif direction == "right":
+                    focused.action_cursor_right()
             return True
-        focused = self.focused
         if isinstance(focused, Input):
             if direction == "left":
                 focused.action_cursor_left()
@@ -1048,6 +1053,8 @@ class TonepathApp(App[None]):
                 result = worker.result
                 self.model_runtime_ready = result.runtime_ready
                 self.library_status = result.status
+                if self.runner is None and result.status.tracks > 0:
+                    self.playback_status = "Ready"
                 settings = config.load_config()
                 self.readiness = readiness_label(result.status, result.runtime_ready, settings)
                 self.readiness_action = status_next_action(result.status, result.runtime_ready, settings)

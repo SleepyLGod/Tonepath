@@ -285,8 +285,9 @@ class SetupScreen(Screen[SetupOutcome | None]):
         try:
             validate_music_directories(self.draft.music_dirs)
         except ValueError as exc:
-            self.status_message = str(exc)
             self.show_state("music-input")
+            self.status_message = str(exc)
+            self.refresh_details()
             return
         self.dismiss(
             SetupOutcome(
@@ -400,9 +401,11 @@ class SetupScreen(Screen[SetupOutcome | None]):
         """Return selectable rows and panel title for the active state."""
 
         if self.state == "summary":
+            directory_count = len(self.draft.music_dirs)
+            directory_label = "directory" if directory_count == 1 else "directories"
             return (
                 [
-                    ("music", "Music Library", f"{len(self.draft.music_dirs)} local director(y/ies)"),
+                    ("music", "Music Library", f"{directory_count} local {directory_label}"),
                     ("experience", "Experience & AI", self.draft.experience_mode.title()),
                     ("models", "Local Models", self.draft.model_mode.title()),
                     ("local-data", "Local Data", "Playback history and text consent"),

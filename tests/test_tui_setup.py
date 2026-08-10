@@ -2,11 +2,13 @@ import os
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from textual.widgets import Input, TextArea
+from textual.worker import WorkerState
 
 from tonepath import config
 from tonepath.preparation import PreparationResult, ScanSummary
@@ -137,6 +139,58 @@ class TuiSetupTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(screen.state, "music-input")
                     self.assertEqual(screen.query_one("#setup-music-input", Input).value, "")
 
+    async def test_setup_music_input_owns_arrows_without_seeking_player(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            music = Path(tmp) / "music"
+            music.mkdir()
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                config.write_config(config.preset_config("private", music_dir=music))
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    app.query_one("#prompt-input", Input).blur()
+                    await pilot.press("c")
+                    await self.wait_until(pilot, lambda: isinstance(app.screen, SetupScreen))
+                    screen = app.screen
+                    with patch.object(app, "seek_playback") as seek:
+                        await pilot.press("left")
+                        await pilot.press("right")
+                        seek.assert_not_called()
+
+                        await pilot.press("enter")
+                        await pilot.press("down")
+                        await pilot.press("enter")
+                        self.assertEqual(screen.state, "music-input")
+                        music_input = screen.query_one("#setup-music-input", Input)
+                        music_input.value = "abcd"
+                        music_input.cursor_position = 2
+
+                        await pilot.press("left")
+                        self.assertEqual(music_input.cursor_position, 1)
+                        await pilot.press("right")
+                        self.assertEqual(music_input.cursor_position, 2)
+                        await pilot.press("up")
+                        await pilot.press("down")
+                        seek.assert_not_called()
+
+    async def test_finish_setup_keeps_invalid_music_error_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            missing = Path(tmp) / "missing"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    await self.wait_until(pilot, lambda: isinstance(app.screen, SetupScreen))
+                    screen = app.screen
+                    screen.draft = screen.draft.replace_music_dirs((str(missing),))
+
+                    screen.finish_setup(prepare=False, setup_models=False)
+                    await pilot.pause()
+
+                    self.assertEqual(screen.state, "music-input")
+                    self.assertIn("does not exist", screen.status_message)
+                    self.assertIn("does not exist", screen.query_one("#setup-status").render().plain)
+
     async def test_first_run_private_flow_saves_only_after_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
@@ -223,6 +277,32 @@ class TuiSetupTest(unittest.IsolatedAsyncioTestCase):
                     await self.wait_until(pilot, lambda: not app.setup_prepare_busy)
                     self.assertIs(app.runner, runner)
 
+    async def test_background_prepare_restores_ready_status_after_finding_tracks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            music = Path(tmp) / "music"
+            music.mkdir()
+            status = LibraryStatus(1, 1, 0, 1, 0, 0, 0)
+            result = PreparationResult(
+                scan=ScanSummary(1, 1, 0, 0),
+                failures=(),
+                status=status,
+                runtime_ready=False,
+                affect_ready=False,
+            )
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                config.write_config(config.preset_config("private", music_dir=music))
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    app.playback_status = "No tracks"
+                    worker = SimpleNamespace(result=result)
+                    with patch.object(app, "library_count", return_value=1):
+                        app.finish_setup_preparation_worker(worker, WorkerState.SUCCESS)  # type: ignore[arg-type]
+                    await pilot.pause()
+
+                    self.assertEqual(app.playback_status, "Ready")
+                    self.assertIn("Library preparation finished", app.setup_prepare_status)
+
     async def test_help_always_lists_setup_and_command_bar_only_when_needed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
@@ -241,6 +321,17 @@ class TuiSetupTest(unittest.IsolatedAsyncioTestCase):
 
 
 class SetupOutcomeTest(unittest.TestCase):
+    def test_summary_uses_normal_directory_pluralization(self) -> None:
+        defaults = config.default_config()
+        one = SetupScreen(replace(defaults, music_dirs=("/one",)), first_run=False, model_ready=False)
+        two = SetupScreen(replace(defaults, music_dirs=("/one", "/two")), first_run=False, model_ready=False)
+
+        one_music = next(row for row in one.state_options()[0] if row[0] == "music")
+        two_music = next(row for row in two.state_options()[0] if row[0] == "music")
+
+        self.assertEqual(one_music[2], "1 local directory")
+        self.assertEqual(two_music[2], "2 local directories")
+
     def test_outcome_keeps_setup_choices_explicit(self) -> None:
         settings = SetupDraft.from_config(config.default_config()).to_config(config.default_config())
         outcome = SetupOutcome(settings=settings, prepare_requested=False, setup_models=False)
