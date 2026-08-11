@@ -333,13 +333,16 @@ def prompt_music_directories(draft: SetupDraft) -> SetupDraft:
     operation = prompt_choice("Music action (keep/add/remove)", {"keep", "add", "remove"}, "keep")
     if operation == "keep":
         return draft
-    raw_path = typer.prompt("Music directory")
     if operation == "add":
-        try:
-            validate_music_directories((raw_path,))
-        except ValueError as exc:
-            raise typer.BadParameter(str(exc)) from exc
-        return draft.add_music_dir(Path(raw_path))
+        while True:
+            raw_path = typer.prompt("Music directory")
+            try:
+                validate_music_directories((raw_path,))
+            except ValueError as exc:
+                console.print(str(exc))
+                continue
+            return draft.add_music_dir(Path(raw_path))
+    raw_path = typer.prompt("Music directory")
     updated = draft.remove_music_dir(Path(raw_path))
     if updated.music_dirs == draft.music_dirs:
         console.print(f"No matching music directory was removed: {Path(raw_path).expanduser()}", markup=False)
@@ -347,7 +350,8 @@ def prompt_music_directories(draft: SetupDraft) -> SetupDraft:
     try:
         validate_music_directories(updated.music_dirs)
     except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
+        console.print(str(exc))
+        return draft
     return updated
 
 

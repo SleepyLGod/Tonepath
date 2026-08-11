@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,15 @@ from tonepath.cli import app
 from tonepath.db import TonepathStore
 from tonepath.models import Track, TrackFeatures
 from tonepath.playback_controller import CURRENT_MPV_PID_KEY
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def strip_ansi(output: str) -> str:
+    """Remove terminal styling before asserting CLI text."""
+
+    return ANSI_RE.sub("", output)
 
 
 class CliListenSetupTest(unittest.TestCase):
@@ -51,10 +61,10 @@ class CliListenSetupTest(unittest.TestCase):
             with self.subTest(options=options), tempfile.TemporaryDirectory() as tmp:
                 home = Path(tmp) / "home"
                 with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
-                    result = CliRunner().invoke(app, ["setup", *options])
+                    result = CliRunner().invoke(app, ["setup", *options], color=True)
 
                     self.assertEqual(result.exit_code, 2, result.output)
-                    self.assertIn("requires --preset", result.output)
+                    self.assertIn("requires --preset", strip_ansi(result.output))
                     self.assertFalse(config.config_path().exists())
 
     def test_first_run_setup_uses_three_step_guidance(self) -> None:
@@ -199,6 +209,50 @@ class CliListenSetupTest(unittest.TestCase):
 
                 self.assertEqual(result.exit_code, 0, result.output)
                 self.assertIn("No matching music directory was removed", result.output)
+                self.assertEqual(config.load_config().music_dirs, original.music_dirs)
+
+    def test_reconfigure_retries_invalid_music_directory_additions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            original_music = Path(tmp) / "original"
+            original_music.mkdir()
+            missing = Path(tmp) / "missing"
+            not_directory = Path(tmp) / "song.mp3"
+            not_directory.write_bytes(b"fake audio")
+            added_music = Path(tmp) / "added"
+            added_music.mkdir()
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
+                config.write_config(config.preset_config("private", music_dir=original_music))
+
+                result = CliRunner().invoke(
+                    app,
+                    ["setup"],
+                    input=f"music\nadd\n   \n{missing}\n{not_directory}\n{added_music}\ndone\ny\nn\n",
+                )
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertIn("Music directory cannot be empty", result.output)
+                self.assertIn("Music directory does not exist", result.output)
+                self.assertIn("Music directory is not a directory", result.output)
+                self.assertEqual(config.load_config().music_dirs, (str(original_music), str(added_music)))
+
+    def test_reconfigure_cannot_remove_the_only_music_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            music = Path(tmp) / "music"
+            music.mkdir()
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
+                original = config.preset_config("private", music_dir=music)
+                config.write_config(original)
+
+                result = CliRunner().invoke(
+                    app,
+                    ["setup"],
+                    input=f"music\nremove\n{music}\ndone\ny\nn\n",
+                )
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertIn("At least one music directory is required", result.output)
                 self.assertEqual(config.load_config().music_dirs, original.music_dirs)
 
     def test_noninteractive_setup_adds_music_directory_without_clearing_existing(self) -> None:
