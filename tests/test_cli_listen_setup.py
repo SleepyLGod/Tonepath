@@ -2,6 +2,7 @@ import os
 import re
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -216,7 +217,7 @@ class CliListenSetupTest(unittest.TestCase):
             home = Path(tmp) / "home"
             original_music = Path(tmp) / "original"
             original_music.mkdir()
-            missing = Path(tmp) / "missing"
+            missing = Path(tmp) / "[bold]missing[/bold]"
             not_directory = Path(tmp) / "song.mp3"
             not_directory.write_bytes(b"fake audio")
             added_music = Path(tmp) / "added"
@@ -233,6 +234,7 @@ class CliListenSetupTest(unittest.TestCase):
                 self.assertEqual(result.exit_code, 0, result.output)
                 self.assertIn("Music directory cannot be empty", result.output)
                 self.assertIn("Music directory does not exist", result.output)
+                self.assertIn(f"Music directory does not exist: {missing}", result.output.replace("\n", ""))
                 self.assertIn("Music directory is not a directory", result.output)
                 self.assertEqual(config.load_config().music_dirs, (str(original_music), str(added_music)))
 
@@ -253,6 +255,29 @@ class CliListenSetupTest(unittest.TestCase):
 
                 self.assertEqual(result.exit_code, 0, result.output)
                 self.assertIn("At least one music directory is required", result.output)
+                self.assertEqual(config.load_config().music_dirs, original.music_dirs)
+
+    def test_reconfigure_preserves_markup_characters_in_remove_validation_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            missing = Path(tmp) / "[bold]missing[/bold]"
+            removable = Path(tmp) / "removable"
+            removable.mkdir()
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}):
+                original = replace(
+                    config.preset_config("private", music_dir=missing),
+                    music_dirs=(str(missing), str(removable)),
+                )
+                config.write_config(original)
+
+                result = CliRunner().invoke(
+                    app,
+                    ["setup"],
+                    input=f"music\nremove\n{removable}\ndone\nn\n",
+                )
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertIn(f"Music directory does not exist: {missing}", result.output.replace("\n", ""))
                 self.assertEqual(config.load_config().music_dirs, original.music_dirs)
 
     def test_noninteractive_setup_adds_music_directory_without_clearing_existing(self) -> None:

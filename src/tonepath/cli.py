@@ -339,7 +339,7 @@ def prompt_music_directories(draft: SetupDraft) -> SetupDraft:
             try:
                 validate_music_directories((raw_path,))
             except ValueError as exc:
-                console.print(str(exc))
+                console.print(str(exc), markup=False)
                 continue
             return draft.add_music_dir(Path(raw_path))
     raw_path = typer.prompt("Music directory")
@@ -350,7 +350,7 @@ def prompt_music_directories(draft: SetupDraft) -> SetupDraft:
     try:
         validate_music_directories(updated.music_dirs)
     except ValueError as exc:
-        console.print(str(exc))
+        console.print(str(exc), markup=False)
         return draft
     return updated
 
