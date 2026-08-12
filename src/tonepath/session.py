@@ -6,7 +6,7 @@ from dataclasses import replace
 
 from tonepath.db import TonepathStore
 from tonepath.explanation import explain_candidate
-from tonepath.models import CandidateScore, FeedbackType, SessionPhase, SessionPlan
+from tonepath.models import CandidateScore, FeedbackType, SessionPhase, SessionPlan, TrackReaction
 from tonepath.planner import plan_session
 from tonepath.selector import select_path
 
@@ -87,6 +87,9 @@ class SessionRunner:
     def apply_feedback(self, feedback_type: FeedbackType) -> str:
         """Record feedback and update subsequent recommendations."""
 
+        if feedback_type == "like":
+            return self.toggle_track_reaction("liked")
+
         candidate = self.current()
         track_id = candidate.track.id if candidate and candidate.track.id is not None else None
         self.store.record_feedback(feedback_type, session_id=self.session_id, track_id=track_id)
@@ -108,10 +111,22 @@ class SessionRunner:
             self.energy_delta = min(self.energy_delta + 0.1, 0.3)
             self.rebuild_future()
             return "Raised upcoming energy target."
-        if feedback_type == "like":
-            self.rebuild_future()
-            return "Stored like feedback."
         raise ValueError(f"Unsupported feedback type: {feedback_type}")
+
+    def toggle_track_reaction(self, reaction: TrackReaction) -> str:
+        """Toggle a stable reaction without changing the active path."""
+
+        candidate = self.current()
+        if candidate is None or candidate.track.id is None:
+            raise RuntimeError("No current track to react to.")
+        current = self.store.get_track_reaction(candidate.track.id)
+        if current == reaction:
+            self.store.clear_track_reaction(candidate.track.id)
+            return "Reaction cleared."
+        self.store.set_track_reaction(candidate.track.id, reaction)
+        if reaction == "liked":
+            return "Liked; future Requests will remember this track."
+        return "Disliked; future Requests will hide this track."
 
     def rebuild_future(self) -> None:
         """Re-select upcoming tracks while keeping already reached tracks stable."""

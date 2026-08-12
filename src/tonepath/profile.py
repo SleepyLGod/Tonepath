@@ -103,6 +103,7 @@ def build_profile_evidence(store: TonepathStore, limit: int = 80) -> dict[str, o
             }
         )
     run_id = uuid.uuid4().hex
+    reactions = profile_reactions(store)
     return {
         "run_id": run_id,
         "kind": "tonepath-profile-evidence",
@@ -113,8 +114,43 @@ def build_profile_evidence(store: TonepathStore, limit: int = 80) -> dict[str, o
             "contains_full_library": False,
         },
         "summary": store.profile_summary(),
+        "current_reactions_are_authoritative": True,
+        "track_reactions": reactions,
         "feedback_events": list(reversed(events)),
     }
+
+
+def profile_reactions(store: TonepathStore) -> list[dict[str, object]]:
+    """Return current reactions with privacy-safe track evidence."""
+
+    reactions: list[dict[str, object]] = []
+    for row in store.list_track_reactions():
+        track_id = int(row["track_id"])
+        track = store.get_track(track_id, effective_metadata=True)
+        if track is None:
+            continue
+        features = store.get_features(track_id)
+        reactions.append(
+            {
+                "track_id": track_id,
+                "reaction": row["reaction"],
+                "title": display_title(track),
+                "artist": display_artist(track),
+                "label": display_label(track),
+                "genre": track.genre,
+                "duration": track.duration,
+                "updated_at": row["updated_at"],
+                "features": {
+                    "bpm": features.bpm if features is not None else None,
+                    "loudness": features.loudness if features is not None else None,
+                    "energy": features.energy if features is not None else None,
+                    "vocalness": features.vocalness if features is not None else None,
+                    "source": features.feature_source if features is not None else None,
+                    "confidence": features.confidence if features is not None else None,
+                },
+            }
+        )
+    return reactions
 
 
 def write_profile_evidence(evidence: dict[str, object]) -> Path:
@@ -157,6 +193,10 @@ def write_profile_memory(store: TonepathStore) -> Path:
             "## Recent Feedback Evidence",
             "",
             markdown_feedback_table(evidence),
+            "",
+            "## Current Track Reactions",
+            "",
+            markdown_reaction_table(evidence),
         ]
     )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -194,6 +234,10 @@ def write_profile_evidence_markdown(
             "## Recent Feedback Events",
             "",
             markdown_feedback_table(evidence),
+            "",
+            "## Current Track Reactions",
+            "",
+            markdown_reaction_table(evidence),
             "",
             "## LLM Instructions",
             "",
@@ -268,11 +312,13 @@ def deterministic_suggestions(evidence: dict[str, object]) -> list[dict[str, obj
             )
         )
 
+    reactions = [reaction for reaction in evidence.get("track_reactions", []) if isinstance(reaction, dict)]
     liked_low_vocal = [
-        event
-        for event in events
-        if event.get("feedback_type") == "like"
-        and (feature_value(event, "vocalness") is not None and float(feature_value(event, "vocalness")) <= 0.35)
+        reaction
+        for reaction in reactions
+        if reaction.get("reaction") == "liked"
+        and reaction_feature_value(reaction, "vocalness") is not None
+        and float(reaction_feature_value(reaction, "vocalness")) <= 0.35
     ]
     no_vocals = [event for event in events if event.get("feedback_type") == "no-vocals"]
     if liked_low_vocal or no_vocals:
@@ -659,7 +705,7 @@ def profile_readiness(summary: dict[str, int], active_rules: list[dict[str, obje
         return "Active profile rules"
     if pending_suggestions:
         return "Suggestions pending"
-    if summary.get("feedback", 0) == 0:
+    if summary.get("feedback", 0) == 0 and summary.get("track_reactions", 0) == 0:
         return "No feedback yet"
     return "Feedback ready for suggestions"
 
@@ -955,6 +1001,29 @@ def markdown_feedback_table(evidence: dict[str, object]) -> str:
     return "\n".join(rows)
 
 
+def markdown_reaction_table(evidence: dict[str, object]) -> str:
+    """Render current stable track reactions as a Markdown table."""
+
+    reactions = [reaction for reaction in evidence.get("track_reactions", []) if isinstance(reaction, dict)]
+    if not reactions:
+        return "_No track reactions yet._"
+    rows = ["| Reaction | Track | Vocalness | Updated |", "|---|---|---:|---|"]
+    for reaction in reactions[:20]:
+        rows.append(
+            "| "
+            + " | ".join(
+                [
+                    markdown_cell(reaction.get("reaction")),
+                    markdown_cell(reaction.get("label")),
+                    markdown_number(reaction_feature_value(reaction, "vocalness")),
+                    markdown_cell(reaction.get("updated_at")),
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(rows)
+
+
 def markdown_cell(value: object) -> str:
     """Return a safe Markdown table cell."""
 
@@ -981,6 +1050,15 @@ def feature_value(event: dict[str, object], field: str) -> object | None:
     if not isinstance(track, dict):
         return None
     features = track.get("features")
+    if not isinstance(features, dict):
+        return None
+    return features.get(field)
+
+
+def reaction_feature_value(reaction: dict[str, object], field: str) -> object | None:
+    """Return a feature value from one stable reaction record."""
+
+    features = reaction.get("features")
     if not isinstance(features, dict):
         return None
     return features.get(field)

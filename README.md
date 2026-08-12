@@ -21,7 +21,7 @@ For detailed usage, model setup, evaluation, profile learning, and privacy notes
 - turns Chinese or English listening goals into state-transition phases;
 - selects a short local listening path with confidence, reasons, and low-stimulation safety checks;
 - keeps replayable local session history with bookmarks and JSON/M3U8 export bundles;
-- records feedback locally so profile rules can be reviewed before they affect selection;
+- remembers reversible Like/Dislike reactions and keeps contextual Skip feedback separate;
 - inventories, exports, and selectively deletes local personal data through explicit privacy previews;
 - keeps optional model, LLM, Codex, and online workflows explicit and opt-in.
 
@@ -34,9 +34,9 @@ For detailed usage, model setup, evaluation, profile learning, and privacy notes
 | Planning | Implemented | Deterministic Chinese/English prompt parsing and state-transition phase planning. |
 | Selection | Implemented | Explainable deterministic scoring with confidence labels, profile-rule support, low-stimulation semantic safety, and gentle-uplift affect handling. |
 | Playback | Implemented | Local `mpv` adapter with foreground, background, stop, and `--dry-run` preview. |
-| TUI | MVP | Textual workbench for prompt intake, playback control, queue, why panel, feedback, and event log. |
+| TUI | MVP | Textual workbench for prompt intake, playback, reactions, disliked-track preview, history, memory, privacy, and setup. |
 | Audio analysis | Basic + optional models | Default lightweight analysis plus optional MIR, Essentia-TF tagging/affect, experimental CLAP bake-off, and separator fallback paths. |
-| Profile learning | Early-stage | Feedback, suggestions, Markdown memory/evidence, rule apply, and profile comparison are available. |
+| Profile learning | Early-stage | Stable reactions, contextual feedback, suggestions, Markdown memory/evidence, rule apply, and profile comparison are available. |
 | Data & Privacy | CLI + TUI implemented | Five-category local inventory, sanitized export, and typed preview-before-delete controls. |
 | LLM/Codex | Opt-in | Used for intent parsing, audit, and profile suggestions only when explicitly invoked. |
 
@@ -86,6 +86,7 @@ uv run tonepath listen "from irritated to focused in 30 minutes, no vocals" --dr
 uv run tonepath eval suite --limit 5
 uv run tonepath eval diagnose --limit 8
 uv run tonepath history list
+uv run tonepath feedback reactions
 uv run tonepath profile inspect
 uv run tonepath privacy inspect
 ```

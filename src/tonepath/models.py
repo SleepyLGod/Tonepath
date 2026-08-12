@@ -8,6 +8,7 @@ from typing import Literal
 
 
 FeedbackType = Literal["like", "skip", "too-loud", "too-slow", "no-vocals"]
+TrackReaction = Literal["liked", "disliked"]
 EnrichmentTier = Literal["local", "features", "online"]
 
 

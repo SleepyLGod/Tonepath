@@ -63,6 +63,7 @@ class PrivacyInventoryTest(unittest.TestCase):
             self.assertEqual(categories["memory"].file_size_bytes, len(b"private"))
             self.assertEqual(categories["personalization"].records["feedback"], 1)
             self.assertEqual(categories["personalization"].records["profile_rules"], 1)
+            self.assertEqual(categories["personalization"].records["track_reactions"], 0)
             self.assertEqual(categories["history"].records["sessions"], 1)
             self.assertEqual(categories["library-evidence"].records["tracks"], 1)
             self.assertEqual(categories["models-storage"].file_size_bytes, len(b"model"))
@@ -112,6 +113,9 @@ class PrivacyExportTest(unittest.TestCase):
                 clear=True,
             ):
                 store = populated_store(home, track_path=audio)
+                track_id = int(store.conn.execute("SELECT id FROM tracks").fetchone()["id"])
+                store.upsert_metadata_override(track_id, "metadata:title", "Visible Song")
+                store.set_track_reaction(track_id, "disliked")
                 (home / "memory" / "logs").mkdir(parents=True)
                 (home / "memory" / "profile.md").write_text(
                     f"My path is {music} and token is {secret}.",
@@ -159,6 +163,18 @@ class PrivacyExportTest(unittest.TestCase):
             self.assertNotIn(str(root), exported)
             self.assertNotIn("tonepath.db", exported)
             self.assertNotIn("secret-song.mp3", exported)
+            personalization = json.loads((output / "personalization.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                personalization["track_reactions"],
+                [
+                    {
+                        "track_id": track_id,
+                        "reaction": "disliked",
+                        "title": "Visible Song",
+                        "artist": "Artist",
+                    }
+                ],
+            )
             self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o700)
             for path in output.rglob("*"):
                 expected = 0o700 if path.is_dir() else 0o600
@@ -171,6 +187,8 @@ class PrivacyDeleteTest(unittest.TestCase):
             home = Path(tmp) / "home"
             with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
                 store = populated_store(home)
+                track_id = int(store.conn.execute("SELECT id FROM tracks").fetchone()["id"])
+                store.set_track_reaction(track_id, "liked")
                 make_personal_files(home)
                 before = store.profile_summary()
 
@@ -212,6 +230,7 @@ class PrivacyDeleteTest(unittest.TestCase):
                 summary = store.profile_summary()
                 self.assertEqual(summary["feedback"], 0)
                 self.assertEqual(summary["profile_rules"], 0)
+                self.assertEqual(summary["track_reactions"], 0)
                 self.assertEqual(summary["sessions"], 1)
                 self.assertTrue((home / "memory" / "profile.md").exists())
                 self.assertFalse((home / "profile").exists())
@@ -223,6 +242,8 @@ class PrivacyDeleteTest(unittest.TestCase):
             home = Path(tmp) / "home"
             with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
                 store = populated_store(home)
+                track_id = int(store.conn.execute("SELECT id FROM tracks").fetchone()["id"])
+                store.set_track_reaction(track_id, "disliked")
                 make_personal_files(home)
                 plan = plan_privacy_delete(("history",), store=store)
 
@@ -233,6 +254,7 @@ class PrivacyDeleteTest(unittest.TestCase):
                 self.assertEqual(summary["session_phases"], 0)
                 self.assertEqual(summary["plays"], 0)
                 self.assertEqual(summary["feedback"], 1)
+                self.assertEqual(summary["track_reactions"], 1)
                 row = store.conn.execute("SELECT session_id FROM feedback").fetchone()
                 self.assertIsNone(row["session_id"])
                 self.assertFalse((home / "cache" / "audit").exists())
@@ -249,6 +271,8 @@ class PrivacyDeleteTest(unittest.TestCase):
             audio.write_bytes(b"audio")
             with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
                 store = populated_store(home, track_path=audio)
+                track_id = int(store.conn.execute("SELECT id FROM tracks").fetchone()["id"])
+                store.set_track_reaction(track_id, "liked")
                 make_personal_files(home)
                 (home / "config.toml").write_text("network_mode = \"offline\"\n", encoding="utf-8")
                 (home / "cache" / "models").mkdir(parents=True)
@@ -263,6 +287,7 @@ class PrivacyDeleteTest(unittest.TestCase):
                 self.assertEqual(summary["sessions"], 0)
                 self.assertEqual(summary["feedback"], 0)
                 self.assertEqual(summary["profile_rules"], 0)
+                self.assertEqual(summary["track_reactions"], 0)
                 self.assertTrue((home / "config.toml").exists())
                 self.assertTrue((home / "cache" / "models" / "model.bin").exists())
                 self.assertTrue(audio.exists())
@@ -341,6 +366,7 @@ class PrivacyDeleteTest(unittest.TestCase):
             self.assertEqual(summary["sessions"], 0)
             self.assertEqual(summary["feedback"], 0)
             self.assertEqual(summary["profile_rules"], 0)
+            self.assertEqual(summary["track_reactions"], 0)
             self.assertEqual(summary["tracks"], 1)
             store.close()
 

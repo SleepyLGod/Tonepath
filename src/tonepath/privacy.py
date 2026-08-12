@@ -15,6 +15,7 @@ from urllib.parse import quote
 
 from tonepath import config
 from tonepath.db import TonepathStore
+from tonepath.display import METADATA_ARTIST_FIELD, METADATA_OVERRIDE_SOURCE, METADATA_TITLE_FIELD, clean_metadata_text
 from tonepath.llm import provider_config
 from tonepath.memory import (
     LAST_CONSOLIDATED_SEQUENCE_KEY,
@@ -47,7 +48,7 @@ _CATEGORY_METADATA: dict[str, dict[str, object]] = {
     },
     "personalization": {
         "label": "Personalization",
-        "description": "Feedback, active preference rules, profile evidence, and pending suggestions.",
+        "description": "Track reactions, feedback, active preference rules, profile evidence, and pending suggestions.",
         "sensitivity": "high",
         "rebuildable": False,
         "capabilities": ("inspect", "export", "delete"),
@@ -81,7 +82,7 @@ _CATEGORY_METADATA: dict[str, dict[str, object]] = {
 
 _CATEGORY_TABLES: dict[str, tuple[str, ...]] = {
     "memory": (),
-    "personalization": ("feedback", "profile_rules"),
+    "personalization": ("track_reactions", "feedback", "profile_rules"),
     "history": ("sessions", "session_phases", "session_queue_items", "session_bookmarks", "plays"),
     "library-evidence": ("tracks", "track_features", "track_enrichment"),
     "models-storage": (),
@@ -731,7 +732,7 @@ def _delete_database_category(
             store.delete_app_state(LAST_CONSOLIDATED_SEQUENCE_KEY)
             deleted = 1 if existed else 0
         elif category == "personalization":
-            deleted = before["feedback"] + before["profile_rules"]
+            deleted = before["track_reactions"] + before["feedback"] + before["profile_rules"]
             store.delete_personalization_data()
         elif category == "history":
             deleted = sum(before[table] for table in ("sessions", "session_phases", "session_queue_items", "session_bookmarks", "plays"))
@@ -762,6 +763,7 @@ def _delete_path_component(category: str, path: Path) -> PrivacyDeleteItemResult
 def _export_personalization(connection: sqlite3.Connection | None) -> dict[str, object]:
     return {
         "schema": "tonepath-personalization-export-v1",
+        "track_reactions": _export_track_reactions(connection),
         "feedback": _select_rows(
             connection,
             "feedback",
@@ -775,6 +777,54 @@ def _export_personalization(connection: sqlite3.Connection | None) -> dict[str, 
             "ORDER BY created_at, id",
         ),
     }
+
+
+def _export_track_reactions(connection: sqlite3.Connection | None) -> list[dict[str, object]]:
+    """Return current reactions with display metadata and no local paths."""
+
+    if connection is None or not _table_exists(connection, "track_reactions"):
+        return []
+    rows = connection.execute(
+        """
+        SELECT
+          track_reactions.track_id,
+          track_reactions.reaction,
+          tracks.title,
+          tracks.artist,
+          (
+            SELECT value
+            FROM track_enrichment
+            WHERE track_id = tracks.id AND field = ? AND source = ?
+            ORDER BY id DESC
+            LIMIT 1
+          ) AS title_override,
+          (
+            SELECT value
+            FROM track_enrichment
+            WHERE track_id = tracks.id AND field = ? AND source = ?
+            ORDER BY id DESC
+            LIMIT 1
+          ) AS artist_override
+        FROM track_reactions
+        JOIN tracks ON tracks.id = track_reactions.track_id
+        ORDER BY track_reactions.updated_at, track_reactions.track_id
+        """,
+        (
+            METADATA_TITLE_FIELD,
+            METADATA_OVERRIDE_SOURCE,
+            METADATA_ARTIST_FIELD,
+            METADATA_OVERRIDE_SOURCE,
+        ),
+    ).fetchall()
+    return [
+        {
+            "track_id": int(row["track_id"]),
+            "reaction": str(row["reaction"]),
+            "title": clean_metadata_text(row["title_override"]) or clean_metadata_text(row["title"]) or "unknown",
+            "artist": clean_metadata_text(row["artist_override"]) or clean_metadata_text(row["artist"]) or "unknown",
+        }
+        for row in rows
+    ]
 
 
 def _export_history(connection: sqlite3.Connection | None) -> dict[str, object]:
@@ -821,6 +871,16 @@ def _select_rows(
     if exists is None:
         return []
     return [dict(row) for row in connection.execute(f"SELECT {columns} FROM {table} {suffix}").fetchall()]
+
+
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    """Return whether one SQLite table exists."""
+
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
 
 
 def _sanitize_payload(value: Any) -> Any:

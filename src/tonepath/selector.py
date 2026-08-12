@@ -60,6 +60,10 @@ def select_path(
     """Select tracks for every phase in a session plan."""
 
     tracks = store.list_tracks(effective_metadata=True)
+    disliked_ids = {
+        int(row["track_id"])
+        for row in store.list_track_reactions("disliked")
+    }
     profile_rules = store.list_profile_rules() if profile_enabled else []
     selected: list[CandidateScore] = []
     used_ids: set[int] = set(excluded_track_ids or set())
@@ -68,7 +72,7 @@ def select_path(
         candidates = [
             score_track(store, track, phase, profile_rules=profile_rules)
             for track in tracks
-            if track.id is not None and track.id not in used_ids
+            if track.id is not None and track.id not in used_ids and track.id not in disliked_ids
             and canonical_track_key(track) not in used_keys
         ]
         candidates.sort(key=lambda candidate: candidate.score, reverse=True)
@@ -87,6 +91,19 @@ def select_path(
     return selected
 
 
+def empty_path_guidance(store: TonepathStore) -> str:
+    """Explain how to recover when selection produced no candidates."""
+
+    tracks = [track for track in store.list_tracks() if track.id is not None]
+    disliked_ids = {int(row["track_id"]) for row in store.list_track_reactions("disliked")}
+    if tracks and all(track.id in disliked_ids for track in tracks):
+        return (
+            "All scanned tracks are Disliked. Review them with `tonepath feedback reactions "
+            "--state disliked`, then restore one with `tonepath feedback clear TRACK_ID`."
+        )
+    return "No tracks found. Run `tonepath scan ~/Music` first."
+
+
 def score_track(
     store: TonepathStore,
     track: Track,
@@ -101,6 +118,7 @@ def score_track(
 
     features = store.get_features(track.id)
     feedback = store.feedback_counts_for_track(track.id)
+    reaction = store.get_track_reaction(track.id)
     score = 0.0
     reasons: list[str] = []
     confidence = "low"
@@ -194,7 +212,9 @@ def score_track(
         else:
             reasons.append("no-vocals requested but vocalness is unknown")
 
-    score += feedback.get("like", 0) * 1.5
+    if reaction == "liked":
+        score += 1.5
+        reasons.append("you liked this track")
     score -= feedback.get("skip", 0) * 2.0
     score -= feedback.get("too-loud", 0) * 1.0
     score -= feedback.get("too-slow", 0) * 0.5

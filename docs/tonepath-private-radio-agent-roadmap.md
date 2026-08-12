@@ -25,7 +25,7 @@ Tonepath currently has a working local-first CLI/TUI prototype:
 - saved-session queue snapshots, bookmarks, exact local replay, and JSON/M3U8 export;
 - five-category local privacy inventory, sanitized personal-data export, and preview-before-delete CLI controls;
 - Textual TUI with first-run Setup, prompt intake, timeline, queue, now-playing state, why panel, private Memory, Listening History, Data & Privacy, and event log;
-- feedback capture for like, skip, no-vocals, too-loud, and too-slow;
+- visible, reversible track Like/Dislike reactions plus contextual skip, no-vocals, too-loud, and too-slow feedback;
 - profile comparison plus deterministic and LLM/Codex-assisted pending suggestions;
 - benchmark/eval commands for intent, selection, suite checks, diagnostics, CLAP/hybrid bake-off, audit packs, Codex audit, and rerank preview;
 - optional DeepSeek/Qwen prompt parsing and packaged Codex audit skill;
@@ -45,8 +45,8 @@ uv run tonepath history export <session-id> --output <directory>
 
 ### Listening and Feedback
 
-- Feedback after playback is not yet visible enough in the TUI.
-- The user cannot clearly see why the next track changed after a feedback action.
+- Stable Like/Dislike is visible in Now and Queue, and Disliked tracks can be previewed and restored; real-user comprehension still needs validation.
+- The user cannot yet compare exactly why a contextual Skip changed the next candidate.
 - User profile rules do not yet feel like a first-class product surface.
 - `profile inspect` needs to become a readable preference dashboard, not only a technical summary.
 
@@ -291,12 +291,6 @@ Engineering rules:
 
 ## Immediate Next Step
 
-Guided Setup is now available in both CLI and TUI:
+The visible reaction layer is now implemented: Like and Dislike are reversible current states, Dislike hides a track from future Requests, Skip remains contextual, and the TUI can preview and restore hidden tracks without rewriting the loaded path.
 
-```bash
-uv run tonepath setup
-uv run tonepath setup --preset private
-uv run tonepath setup --preset smart
-```
-
-The TUI opens Getting Started only for a genuinely new local home, keeps `c Setup` available for later changes, and runs explicitly confirmed preparation in the background without replacing the current path. The immediate work is fresh-home and existing-config product validation, not another setup abstraction. Model downloads, external text consent, and library preparation remain separate decisions.
+The immediate work is real listening validation: confirm that fixed Like bonuses help without dominating phase fit, that Dislike recovery is understandable, and that Skip remains meaningfully different from Dislike. A larger Taste/Profile dashboard should only follow if this simpler interaction proves insufficient.

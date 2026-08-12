@@ -6,6 +6,7 @@ import json
 import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
+from typing import cast
 
 from tonepath import config
 from tonepath.display import (
@@ -16,7 +17,10 @@ from tonepath.display import (
     apply_metadata_overrides,
     metadata_override_values,
 )
-from tonepath.models import CandidateScore, EnrichmentRecord, ProfileRule, SessionPhase, SessionPlan, Track, TrackFeatures
+from tonepath.models import CandidateScore, EnrichmentRecord, ProfileRule, SessionPhase, SessionPlan, Track, TrackFeatures, TrackReaction
+
+
+TRACK_REACTIONS_MIGRATION_KEY = "track_reactions_v1_migrated"
 
 
 SCHEMA = """
@@ -113,6 +117,13 @@ CREATE TABLE IF NOT EXISTS feedback (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS track_reactions (
+  track_id INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+  reaction TEXT NOT NULL CHECK(reaction IN ('liked', 'disliked')),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS profile_rules (
   id INTEGER PRIMARY KEY,
   key TEXT NOT NULL,
@@ -162,7 +173,30 @@ class TonepathStore:
         """Create required tables if they do not exist."""
 
         self.conn.executescript(SCHEMA)
+        self.migrate_track_reactions()
         self.conn.commit()
+
+    def migrate_track_reactions(self) -> None:
+        """Import track-bound legacy likes into stable reactions once."""
+
+        migrated = self.conn.execute(
+            "SELECT 1 FROM app_state WHERE key = ?",
+            (TRACK_REACTIONS_MIGRATION_KEY,),
+        ).fetchone()
+        if migrated is not None:
+            return
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO track_reactions (track_id, reaction)
+            SELECT DISTINCT track_id, 'liked'
+            FROM feedback
+            WHERE type = 'like' AND track_id IS NOT NULL
+            """
+        )
+        self.conn.execute(
+            "INSERT OR IGNORE INTO app_state (key, value) VALUES (?, '1')",
+            (TRACK_REACTIONS_MIGRATION_KEY,),
+        )
 
     def upsert_track(self, track: Track) -> int:
         """Insert or update a local track and return its database id."""
@@ -544,6 +578,78 @@ class TonepathStore:
         )
         self.conn.commit()
 
+    def set_track_reaction(self, track_id: int, reaction: TrackReaction) -> None:
+        """Set one stable reaction for a persisted track."""
+
+        if reaction not in {"liked", "disliked"}:
+            raise ValueError(f"Unsupported track reaction: {reaction}")
+        if self.get_track(track_id) is None:
+            raise ValueError(f"Unknown track id: {track_id}")
+        self.conn.execute(
+            """
+            INSERT INTO track_reactions (track_id, reaction)
+            VALUES (?, ?)
+            ON CONFLICT(track_id) DO UPDATE SET
+              reaction=excluded.reaction,
+              updated_at=CURRENT_TIMESTAMP
+            """,
+            (track_id, reaction),
+        )
+        self.conn.commit()
+
+    def get_track_reaction(self, track_id: int) -> TrackReaction | None:
+        """Return the current stable reaction for one track."""
+
+        row = self.conn.execute(
+            "SELECT reaction FROM track_reactions WHERE track_id = ?",
+            (track_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        reaction = str(row["reaction"])
+        if reaction not in {"liked", "disliked"}:
+            raise RuntimeError(f"Invalid stored track reaction: {reaction}")
+        return cast(TrackReaction, reaction)
+
+    def clear_track_reaction(self, track_id: int) -> bool:
+        """Clear one stable reaction and report whether it existed."""
+
+        cursor = self.conn.execute("DELETE FROM track_reactions WHERE track_id = ?", (track_id,))
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def list_track_reactions(self, reaction: TrackReaction | None = None) -> list[dict[str, object]]:
+        """Return stable reactions with effective display metadata."""
+
+        if reaction is not None and reaction not in {"liked", "disliked"}:
+            raise ValueError(f"Unsupported track reaction: {reaction}")
+        rows = self.conn.execute(
+            """
+            SELECT track_id, reaction, created_at, updated_at
+            FROM track_reactions
+            WHERE (? IS NULL OR reaction = ?)
+            ORDER BY updated_at DESC, track_id
+            """,
+            (reaction, reaction),
+        ).fetchall()
+        result: list[dict[str, object]] = []
+        for row in rows:
+            track = self.get_track(int(row["track_id"]), effective_metadata=True)
+            if track is None:
+                continue
+            result.append(
+                {
+                    "track_id": int(row["track_id"]),
+                    "reaction": str(row["reaction"]),
+                    "title": track.title,
+                    "artist": track.artist,
+                    "path": track.path,
+                    "created_at": str(row["created_at"]),
+                    "updated_at": str(row["updated_at"]),
+                }
+            )
+        return result
+
     def start_play(self, session_id: int | None, track_id: int) -> int:
         """Record the start of one local playback event."""
 
@@ -566,6 +672,12 @@ class TonepathStore:
             (1 if skipped else 0, play_id),
         )
         self.conn.commit()
+
+    def play_track_id(self, play_id: int) -> int | None:
+        """Return the track associated with one playback row."""
+
+        row = self.conn.execute("SELECT track_id FROM plays WHERE id = ?", (play_id,)).fetchone()
+        return int(row["track_id"]) if row is not None else None
 
     def feedback_counts_for_track(self, track_id: int) -> dict[str, int]:
         """Return feedback counts for one track."""
@@ -590,6 +702,7 @@ class TonepathStore:
             "session_bookmarks",
             "plays",
             "feedback",
+            "track_reactions",
             "profile_rules",
         ):
             row = self.conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
@@ -800,6 +913,7 @@ class TonepathStore:
             self.conn.execute("PRAGMA secure_delete = ON")
             self.conn.execute("DELETE FROM profile_rules")
             self.conn.execute("DELETE FROM feedback")
+            self.conn.execute("DELETE FROM track_reactions")
             for table in (
                 "plays",
                 "session_bookmarks",
@@ -817,6 +931,7 @@ class TonepathStore:
             self.conn.execute("PRAGMA secure_delete = ON")
             self.conn.execute("DELETE FROM profile_rules")
             self.conn.execute("DELETE FROM feedback")
+            self.conn.execute("DELETE FROM track_reactions")
 
     def delete_history_data(self, preserve_feedback: bool = True) -> None:
         """Delete session history, optionally preserving detached feedback."""

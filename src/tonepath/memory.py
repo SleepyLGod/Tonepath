@@ -226,6 +226,8 @@ def build_memory_evidence(store: TonepathStore) -> dict[str, object]:
         "recent_memory_logs": public_memory_logs(redacted_recent_logs),
         "profile_feedback_evidence": {
             "summary": feedback_evidence.get("summary", {}),
+            "current_reactions_are_authoritative": True,
+            "track_reactions": feedback_evidence.get("track_reactions", []),
             "feedback_events": feedback_evidence.get("feedback_events", []),
         },
     }
@@ -413,6 +415,11 @@ def memory_suggestions_from_llm(evidence: dict[str, object], provider: str | Non
         "kind": "tonepath-memory-profile-suggestion-evidence",
         "privacy": evidence.get("privacy", {}),
         "summary": evidence.get("summary", {}),
+        "current_reactions_are_authoritative": profile_evidence.get(
+            "current_reactions_are_authoritative",
+            True,
+        ),
+        "track_reactions": profile_evidence.get("track_reactions", []),
         "feedback_events": profile_evidence.get("feedback_events", []),
     }
     suggestions = suggest_with_llm(suggestion_evidence, provider=provider, memory_context=memory_context_markdown(evidence))

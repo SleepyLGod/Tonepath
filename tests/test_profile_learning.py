@@ -46,11 +46,33 @@ class ProfileLearningTest(unittest.TestCase):
                 store, track_id = populated_store(tmp, loudness=-8.0, bpm=120.0, vocalness=0.2)
                 session_id = store.save_session(plan_session("focus 30m"))
                 store.record_feedback("too-loud", session_id=session_id, track_id=track_id)
-                store.record_feedback("like", session_id=session_id, track_id=track_id)
+                store.set_track_reaction(track_id, "liked")
 
                 suggestions = deterministic_suggestions(build_profile_evidence(store))
 
                 self.assertIn("prefer_lower_loudness", {item["rule_type"] for item in suggestions})
+                self.assertIn("prefer_lower_vocalness", {item["rule_type"] for item in suggestions})
+                store.close()
+
+    def test_current_reactions_are_profile_evidence_and_override_legacy_likes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(Path(tmp) / "home")}, clear=True):
+                store, track_id = populated_store(tmp, loudness=-18.0, bpm=90.0, vocalness=0.2)
+                session_id = store.save_session(plan_session("focus 30m"))
+                store.record_feedback("like", session_id=session_id, track_id=track_id)
+                store.set_track_reaction(track_id, "disliked")
+
+                evidence = build_profile_evidence(store)
+                suggestions = deterministic_suggestions(evidence)
+                rendered = json.dumps(evidence, ensure_ascii=False)
+
+                self.assertEqual(evidence["track_reactions"][0]["reaction"], "disliked")
+                self.assertTrue(evidence["current_reactions_are_authoritative"])
+                self.assertNotIn(str(Path(tmp)), rendered)
+                self.assertNotIn("prefer_lower_vocalness", {item["rule_type"] for item in suggestions})
+
+                store.set_track_reaction(track_id, "liked")
+                suggestions = deterministic_suggestions(build_profile_evidence(store))
                 self.assertIn("prefer_lower_vocalness", {item["rule_type"] for item in suggestions})
                 store.close()
 
@@ -433,7 +455,7 @@ class ProfileLearningTest(unittest.TestCase):
                 store, track_id = populated_store(tmp, loudness=-8.0, bpm=120.0, vocalness=0.2)
                 session_id = store.save_session(plan_session("focus 30m"))
                 store.record_feedback("too-loud", session_id=session_id, track_id=track_id)
-                store.record_feedback("like", session_id=session_id, track_id=track_id)
+                store.set_track_reaction(track_id, "liked")
                 evidence = build_profile_evidence(store)
                 save_suggestions(evidence, deterministic_suggestions(evidence), "deterministic")
                 store.close()
@@ -532,17 +554,14 @@ class ProfileLearningTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
-                store = TonepathStore()
-                session_id = store.save_session(plan_session("focus 30m"))
-                store.set_app_state("current_session_id", str(session_id))
+                store, track_id = populated_store(tmp, loudness=-18.0, bpm=90.0, vocalness=0.2)
                 store.close()
 
-                result = CliRunner().invoke(app, ["feedback", "like"])
+                result = CliRunner().invoke(app, ["feedback", "like", str(track_id)])
 
                 self.assertEqual(result.exit_code, 0, result.output)
                 output = plain_output(result.output)
-                self.assertIn("Recorded feedback: like", output)
-                self.assertIn("tonepath profile suggest", output)
+                self.assertIn("Liked; future Requests will remember this track.", output)
 
     def test_cli_feedback_points_to_profile_inspect_when_suggestions_exist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -556,12 +575,11 @@ class ProfileLearningTest(unittest.TestCase):
                 save_suggestions(evidence, deterministic_suggestions(evidence), "deterministic")
                 store.close()
 
-                result = CliRunner().invoke(app, ["feedback", "like"])
+                result = CliRunner().invoke(app, ["feedback", "like", str(track_id)])
 
                 self.assertEqual(result.exit_code, 0, result.output)
                 output = plain_output(result.output)
-                self.assertIn("Recorded feedback: like", output)
-                self.assertIn("tonepath profile inspect", output)
+                self.assertIn("Liked; future Requests will remember this track.", output)
 
     def test_roadmap_documents_profile_visibility_loop(self) -> None:
         roadmap = (Path(__file__).resolve().parents[1] / "docs" / "tonepath-private-radio-agent-roadmap.md").read_text(encoding="utf-8")

@@ -87,6 +87,53 @@ class SessionRunnerTest(unittest.TestCase):
             self.assertLess(after, before)
             store.close()
 
+    def test_track_reaction_toggles_without_changing_current_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            self.add_track(store, tmp, "a.mp3")
+            self.add_track(store, tmp, "b.mp3")
+            runner = SessionRunner(store, "from irritated to focus in 30 minutes")
+            current = runner.current()
+            self.assertIsNotNone(current)
+            track_id = current.track.id
+            original_queue = list(runner.queue)
+            original_index = runner.current_index
+
+            liked = runner.toggle_track_reaction("liked")
+            disliked = runner.toggle_track_reaction("disliked")
+            cleared = runner.toggle_track_reaction("disliked")
+
+            self.assertEqual(liked, "Liked; future Requests will remember this track.")
+            self.assertEqual(disliked, "Disliked; future Requests will hide this track.")
+            self.assertEqual(cleared, "Reaction cleared.")
+            self.assertIsNone(store.get_track_reaction(track_id))
+            self.assertEqual(runner.queue, original_queue)
+            self.assertEqual(runner.current_index, original_index)
+            store.close()
+
+    def test_legacy_like_feedback_uses_stable_reaction_without_rebuilding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TonepathStore(Path(tmp) / "tonepath.db")
+            self.add_track(store, tmp, "a.mp3")
+            self.add_track(store, tmp, "b.mp3")
+            runner = SessionRunner(store, "from irritated to focus in 30 minutes")
+            current = runner.current()
+            self.assertIsNotNone(current)
+            original_queue = list(runner.queue)
+            original_index = runner.current_index
+
+            message = runner.apply_feedback("like")
+
+            self.assertEqual(message, "Liked; future Requests will remember this track.")
+            self.assertEqual(store.get_track_reaction(current.track.id), "liked")
+            self.assertEqual(runner.queue, original_queue)
+            self.assertEqual(runner.current_index, original_index)
+            feedback_count = store.conn.execute(
+                "SELECT COUNT(*) AS count FROM feedback WHERE type = 'like'"
+            ).fetchone()["count"]
+            self.assertEqual(feedback_count, 0)
+            store.close()
+
     def test_rebuild_failure_keeps_active_queue_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = TonepathStore(Path(tmp) / "tonepath.db")

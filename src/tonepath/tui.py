@@ -26,12 +26,13 @@ from tonepath.memory import (
     write_memory_evidence,
 )
 from tonepath.model_runtime import model_runtime_status
-from tonepath.models import CandidateScore, FeedbackType, SessionPlan
+from tonepath.models import CandidateScore, FeedbackType, SessionPlan, TrackReaction
 from tonepath.playback_controller import PlaybackController, PlaybackState
 from tonepath.preparation import PreparationEvent, PreparationOptions, PreparationResult
 from tonepath.profile import apply_suggestion, apply_suggestion_group, list_pending_suggestions, pending_suggestion_groups, profile_learning_hint, save_suggestions
 from tonepath.readiness import LibraryStatus, library_status, readiness_blocks_session, readiness_label, status_next_action
 from tonepath.session import SessionRunner
+from tonepath.selector import empty_path_guidance
 from tonepath.tui_theme import PALETTE_BY_KEY, PALETTES, TonepathPalette, next_theme, normalize_theme
 
 try:
@@ -50,6 +51,12 @@ from tonepath.tui_privacy import (
     PrivacyScreen,
     category_delete_completed,
     database_records_cleared,
+)
+from tonepath.tui_reactions import (
+    DislikedTracksScreen,
+    ReactionPreviewRequested,
+    ReactionPreviewStopRequested,
+    TrackReactionCleared,
 )
 from tonepath.tui_setup import SetupOutcome, SetupScreen
 
@@ -241,6 +248,8 @@ class TonepathApp(App[None]):
         Binding("<", "previous_track", "Prev", key_display="<"),
         Binding("s", "skip", "Skip"),
         Binding("l", "like", "Like"),
+        Binding("u", "dislike", "Dislike", show=False),
+        Binding("h", "disliked_tracks", "Disliked tracks", show=False),
         Binding("m", "cycle_playback_mode", "Mode"),
         Binding("ctrl+l", "history", "History", key_display="Ctrl+L", show=False, priority=True),
         Binding("d", "privacy", "Data & Privacy", key_display="d", show=False),
@@ -283,6 +292,7 @@ class TonepathApp(App[None]):
         self.playback_generation = 0
         self.playback_state_busy = False
         self.playback_poll_failures = 0
+        self.reaction_preview_track_id: int | None = None
         self.model_runtime_ready = False
         self.library_status: LibraryStatus | None = None
         self.readiness = "Needs setup"
@@ -339,7 +349,7 @@ class TonepathApp(App[None]):
         self.theme = self.theme_key
         self.apply_panel_titles()
         table = self.query_one("#queue", DataTable)
-        table.add_columns("#", "Phase", "Track", "Fit", "Energy", "Conf")
+        table.add_columns("#", "Phase", "Track", "Fit", "You", "Energy", "Conf")
         suggestions = self.query_one("#memory-suggestions", DataTable)
         suggestions.add_columns("#", "Type", "Scope", "Confidence", "Rationale")
         self.show_right_panel()
@@ -551,6 +561,12 @@ class TonepathApp(App[None]):
             elif direction == "down":
                 self.screen.action_next_history()
             return True
+        if isinstance(self.screen, DislikedTracksScreen):
+            if direction == "up":
+                self.screen.action_previous_track()
+            elif direction == "down":
+                self.screen.action_next_track()
+            return True
         if isinstance(self.screen, PrivacyScreen):
             if direction == "up":
                 self.screen.action_previous_category()
@@ -680,6 +696,17 @@ class TonepathApp(App[None]):
             self.log_event("Local store is unavailable.")
             return
         self.push_screen(HistoryScreen(self.store), self.on_history_loaded)
+
+    def action_disliked_tracks(self) -> None:
+        """Open the reversible list of tracks hidden by explicit dislikes."""
+
+        if isinstance(self.screen, DislikedTracksScreen):
+            self.screen.action_close_disliked()
+            return
+        if self.store is None:
+            self.log_event("Local store is unavailable.")
+            return
+        self.push_screen(DislikedTracksScreen(self.store))
 
     def action_privacy(self) -> None:
         """Open the local Data & Privacy browser outside text input focus."""
@@ -1155,9 +1182,14 @@ class TonepathApp(App[None]):
         self.log_event("New request. Type a listening goal, then press Enter.")
 
     def action_like(self) -> None:
-        """Record local like feedback."""
+        """Toggle a stable like for the current track."""
 
-        self.apply_feedback("like")
+        self.toggle_track_reaction("liked")
+
+    def action_dislike(self) -> None:
+        """Toggle a stable dislike for the current track."""
+
+        self.toggle_track_reaction("disliked")
 
     def action_no_vocals(self) -> None:
         """Apply a no-vocals constraint to upcoming recommendations."""
@@ -1215,6 +1247,97 @@ class TonepathApp(App[None]):
         message = self.runner.apply_feedback(feedback_type)
         self.log_event(message)
         self.log_event(profile_learning_hint())
+        self.refresh_session_view()
+
+    def toggle_track_reaction(self, reaction: TrackReaction) -> None:
+        """Toggle a current-track reaction without rebuilding the active queue."""
+
+        if self.runner is None:
+            self.log_event("No active session.")
+            return
+        try:
+            message = self.runner.toggle_track_reaction(reaction)
+        except RuntimeError as exc:
+            self.log_event(str(exc))
+            return
+        self.log_event(message)
+        self.refresh_session_view()
+
+    def on_reaction_preview_requested(self, message: ReactionPreviewRequested) -> None:
+        """Preview one hidden track while preserving the loaded path."""
+
+        if self.store is None:
+            return
+        screen = self.screen if isinstance(self.screen, DislikedTracksScreen) else None
+        track = self.store.get_track(message.track_id, effective_metadata=True)
+        if track is None or not track.path.is_file():
+            if screen is not None:
+                screen.set_preview_status(None, "This track file is no longer available.")
+            return
+        if self.playback is None:
+            self.playback = PlaybackController(self.store)
+        if self.reaction_preview_track_id == message.track_id and self.playback_status in {"Playing", "Paused"}:
+            try:
+                if self.playback_status == "Playing":
+                    self.playback.pause()
+                    self.playback_status = "Paused"
+                else:
+                    self.playback.resume()
+                    self.playback_status = "Playing"
+            except RuntimeError as exc:
+                if screen is not None:
+                    screen.set_preview_status(None, f"Preview failed: {exc}")
+                return
+            if screen is not None:
+                screen.set_preview_status(
+                    message.track_id,
+                    "Preview paused." if self.playback_status == "Paused" else "Preview resumed.",
+                )
+            return
+        try:
+            self.playback.replace([track.path], session_id=None, track_id=message.track_id)
+            self.live_playback_state = self.playback.state()
+        except RuntimeError as exc:
+            self.reaction_preview_track_id = None
+            if screen is not None:
+                screen.set_preview_status(None, f"Preview failed: {exc}")
+            return
+        self.reaction_preview_track_id = message.track_id
+        self.playback_generation += 1
+        self.playback_poll_failures = 0
+        self.playback_status = "Playing"
+        self.pulse_tick = 0
+        self.ensure_playback_polling()
+        if screen is not None:
+            screen.set_preview_status(message.track_id, f"Previewing {fallback_track_label(track.title, track.path.name)}.")
+
+    def on_reaction_preview_stop_requested(self, _message: ReactionPreviewStopRequested) -> None:
+        """Stop a hidden-track preview without discarding the loaded path."""
+
+        self.stop_reaction_preview()
+
+    def on_track_reaction_cleared(self, message: TrackReactionCleared) -> None:
+        """Refresh player surfaces after restoring a hidden track."""
+
+        self.log_event(f"Restored {message.label}; future Requests may use it again.")
+        self.refresh_session_view()
+
+    def stop_reaction_preview(self) -> None:
+        """Stop an isolated preview and leave the original path ready."""
+
+        if self.reaction_preview_track_id is None:
+            return
+        if self.playback is not None:
+            self.playback.stop_current()
+        self.reaction_preview_track_id = None
+        self.playback_generation += 1
+        self.playback_state_busy = False
+        self.playback_poll_failures = 0
+        self.playback_status = "Ready" if self.runner is not None else "Stopped"
+        self.live_playback_state = PlaybackState(False, False, None, None, None)
+        self.pulse_tick = 0
+        if isinstance(self.screen, DislikedTracksScreen):
+            self.screen.set_preview_status(None, "Preview stopped. The original path is still loaded.")
         self.refresh_session_view()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -1373,13 +1496,15 @@ class TonepathApp(App[None]):
         self.intent_note = result.intent_note
         self.runner = new_runner
         self.playback = self.playback or PlaybackController(self.store)
-        self.playback_status = "Ready"
+        self.playback_status = "Ready" if new_runner.queue else "No tracks"
         prompt_input = self.query_one("#prompt-input", Input)
         prompt_input.value = result.prompt
         prompt_input.blur()
         if result.intent_note:
             self.log_event(result.intent_note)
-        if result.history_source_session_id is None:
+        if not new_runner.queue:
+            self.request_status_message = empty_path_guidance(self.store)
+        elif result.history_source_session_id is None:
             self.request_status_message = f"Ready. Press Space to play. Session: {result.prompt}"
         else:
             self.request_status_message = (
@@ -1451,6 +1576,15 @@ class TonepathApp(App[None]):
                     exclusive=True,
                     thread=True,
                 )
+            return
+        if self.reaction_preview_track_id is not None:
+            self.reaction_preview_track_id = None
+            self.playback_status = "Ready" if self.runner is not None else "Stopped"
+            self.live_playback_state = PlaybackState(False, False, None, None, None)
+            self.pulse_tick = 0
+            if isinstance(self.screen, DislikedTracksScreen):
+                self.screen.set_preview_status(None, "Preview finished. The original path is still loaded.")
+            self.refresh_session_view()
             return
         if self.runner is not None and self.playback_mode == "Repeat One":
             self.log_event("Repeating current track.")
@@ -1548,6 +1682,7 @@ class TonepathApp(App[None]):
                 queue_cell(candidate.phase.label, current=current, palette=self.palette),
                 queue_cell(truncate(fallback_track_label(candidate.track.title, candidate.track.path.name), 28), current=current, palette=self.palette),
                 fit_cell(self.fit_label(candidate), current=current, palette=self.palette),
+                reaction_cell(self.track_reaction(candidate.track.id), current=current, palette=self.palette),
                 queue_cell(self.energy_text(candidate.track.id), current=current, palette=self.palette),
                 queue_cell(confidence_label(candidate.confidence), current=current, palette=self.palette),
             )
@@ -1590,14 +1725,20 @@ class TonepathApp(App[None]):
             return "No active session."
         candidate = self.runner.current()
         if candidate is None:
-            return "Queue is empty. Run `tonepath scan` to add local music."
+            return empty_path_guidance(self.store) if self.store is not None else "Queue is empty."
         features = self.store.get_features(candidate.track.id) if self.store is not None and candidate.track.id else None
         energy = "--" if features is None or features.energy is None else f"{features.energy:.2f}"
         loudness = "--" if features is None or features.loudness is None else f"{features.loudness:.1f} dBFS"
         bpm = bpm_text(features.bpm if features is not None else None)
+        reaction = self.track_reaction(candidate.track.id)
+        reaction_label = ""
+        if reaction == "liked":
+            reaction_label = " · ♥ Liked"
+        elif reaction == "disliked":
+            reaction_label = " · × Disliked"
         return "\n".join(
             [
-                f"{self.playback_status} · {candidate.phase.label} · {self.playback_mode} · {confidence_label(candidate.confidence)}",
+                f"{self.playback_status} · {candidate.phase.label} · {self.playback_mode} · {confidence_label(candidate.confidence)}{reaction_label}",
                 truncate(fallback_track_label(candidate.track.title, candidate.track.path.name), 38),
                 truncate(display_artist(candidate.track), 38),
                 (
@@ -1607,6 +1748,13 @@ class TonepathApp(App[None]):
                 f"{self.progress_text()} · vol {self.volume_text()}",
             ]
         )
+
+    def track_reaction(self, track_id: int | None) -> TrackReaction | None:
+        """Return one visible track reaction when local state is available."""
+
+        if self.store is None or track_id is None:
+            return None
+        return self.store.get_track_reaction(track_id)
 
     def now_playing_renderable(self) -> Text:
         """Return styled now-playing content."""
@@ -1724,7 +1872,9 @@ class TonepathApp(App[None]):
                 "m          playback mode",
                 "Feedback",
                 "s          skip and record negative feedback",
-                "l          like current track",
+                "l          like / clear like; affects future Requests",
+                "u          dislike / clear dislike; hides from future Requests",
+                "h          browse, preview, and restore disliked tracks",
                 "v          prefer less vocals",
                 "+          too loud; lower upcoming energy",
                 "-          too slow; raise upcoming energy",
@@ -1954,6 +2104,7 @@ class TonepathApp(App[None]):
             ("<", "Prev"),
             ("s", "Skip"),
             ("l", "Like"),
+            ("u", "Dislike"),
             ("m", "Mode"),
             ("Ctrl+L", "History"),
             ("d", "Data"),
@@ -1962,7 +2113,9 @@ class TonepathApp(App[None]):
             ("?", "Help"),
         ]
         if not config.config_path().exists() or readiness_blocks_session(self.readiness):
-            commands.insert(6, ("c", "Setup"))
+            commands.insert(7, ("c", "Setup"))
+        if self.store is not None and self.store.list_track_reactions("disliked"):
+            commands.insert(7, ("h", "Disliked"))
         if self.right_panel == "memory":
             commands.insert(0, ("Ctrl+S", "Save"))
             commands.insert(1, ("Ctrl+Enter", "Save+Learn"))
@@ -2285,6 +2438,22 @@ def fit_cell(value: str, current: bool = False, palette: TonepathPalette | None 
         style = fit_label_style(label, active_palette, current=current)
         text.append(label, style=style)
     return text
+
+
+def reaction_cell(
+    reaction: TrackReaction | None,
+    current: bool = False,
+    palette: TonepathPalette | None = None,
+) -> Text:
+    """Render a stable personal reaction independently from fit evidence."""
+
+    active_palette = palette or PALETTE_BY_KEY["warmline"]
+    if reaction == "liked":
+        return Text("♥", style=f"bold {active_palette.success}", justify="center")
+    if reaction == "disliked":
+        return Text("×", style=f"bold {active_palette.warning}", justify="center")
+    style = f"bold {active_palette.primary}" if current else active_palette.muted
+    return Text("", style=style, justify="center")
 
 
 def fit_label_style(label: str, palette: TonepathPalette, current: bool = False) -> str:

@@ -106,7 +106,9 @@ x          stop playback
 s          skip and record negative feedback
 >          next track without feedback
 <          previous track without feedback
-l          like
+l          like / clear Like; affects future Requests only
+u          dislike / clear Dislike; hides the track from future Requests
+h          browse and preview Disliked tracks outside text input
 v          prefer less vocals
 +          too loud; lower upcoming energy
 -          too slow; raise upcoming energy
@@ -132,7 +134,7 @@ q          stop playback and quit when Request is not focused
 Ctrl+Q     stop playback and quit at any time
 ```
 
-Arrow keys remain text-editing controls while the Request or Memory editor is focused, and navigate rows inside Setup, Listening History, or Data & Privacy. Typed `c` and `d` remain ordinary text while either editor is focused. Volume is preserved while Tonepath switches tracks in the current TUI process, but Player Core v1 does not persist it across app restarts.
+Arrow keys remain text-editing controls while the Request or Memory editor is focused, and navigate rows inside Setup, Listening History, Disliked Tracks, or Data & Privacy. Typed `c`, `d`, `h`, `l`, and `u` remain ordinary text while either editor is focused. Volume is preserved while Tonepath switches tracks in the current TUI process, but Player Core v1 does not persist it across app restarts.
 
 Playback modes are TUI-local:
 
@@ -143,7 +145,9 @@ Repeat One     replay the current track
 Repeat Path    loop the generated path from the beginning
 ```
 
-Use `>` when you simply want to hear the next candidate. Use `s` when the current track is a bad fit and Tonepath should remember that feedback.
+Use `>` when you simply want to hear the next candidate. Use `s` when the track is wrong for this moment and Tonepath should rebuild the rest of this path. Use `l` for a stable Like. Use `u` for a stable Dislike: the current queue keeps playing unchanged, but future Requests hide that track.
+
+Press `h` outside Request or Memory input to open **Disliked Tracks**. Browsing does not interrupt the current song. `Space` explicitly previews the selected track, `x` stops the preview, and `Enter` restores the track to Neutral. Returning with `Esc` keeps the original path loaded; press `Space` in the player to start its current track again.
 
 `AI Assist Off` means Tonepath is using only local deterministic intent parsing for new prompts. `AI Assist Ready: deepseek` or `AI Assist Ready: qwen` means Smart mode can call the configured LLM for intent parsing on new prompts. AI Assist does not judge BPM, vocalness, tags, artist metadata, or other audio facts; those remain local evidence.
 
@@ -325,15 +329,29 @@ uv run tonepath eval rerank "我现在很烦，想半小时后进入写代码状
 
 ## Profile Learning and LLM Boundaries
 
-Feedback commands record local preference evidence:
+Stable reactions remember what you think about a song across Requests:
 
 ```bash
-uv run tonepath feedback like
+uv run tonepath feedback reactions
+uv run tonepath feedback reactions --state disliked
+uv run tonepath feedback like [TRACK_ID]
+uv run tonepath feedback dislike [TRACK_ID]
+uv run tonepath feedback clear [TRACK_ID]
+uv run tonepath feedback play TRACK_ID --background
+```
+
+Without `TRACK_ID`, Like/Dislike/Clear target the song currently playing through Tonepath. `feedback play` is a local preview: it does not call the selector or create a recommendation session. Like gives one fixed future-selection bonus; pressing Like repeatedly does not accumulate weight. Dislike excludes the song from future paths until cleared. Both operations leave the current path and playback position alone.
+
+Contextual feedback describes the current listening situation:
+
+```bash
 uv run tonepath feedback skip
 uv run tonepath feedback too-loud
 uv run tonepath feedback too-slow
 uv run tonepath feedback no-vocals
 ```
+
+Skip remains different from Dislike: Skip says "not right now" and rebuilds the future queue; Dislike says "hide this song from future Requests." Current reactions are included in privacy-safe profile evidence and take priority over old Like events.
 
 Inspect and manage profile learning:
 
@@ -390,7 +408,7 @@ uv run tonepath profile inspect
 uv run tonepath profile apply <suggestion-id>
 ```
 
-Memory-derived suggestions are advisory until applied. `profile delete --all` clears profile rules, sessions, feedback, profile Markdown/evidence, and pending suggestions, but it does not delete raw memory logs or `memory/profile.md`; those are private user-authored context.
+Memory-derived suggestions are advisory until applied. `profile delete --all` clears profile rules, stable track reactions, sessions, feedback, profile Markdown/evidence, and pending suggestions, but it does not delete raw memory logs or `memory/profile.md`; those are private user-authored context.
 
 In the TUI, press `Ctrl+O` to open the Memory panel. This means Control + the letter o, not the number 0. Hiding the panel keeps the draft. `Ctrl+S` saves the draft to the local log only. `Ctrl+Enter` saves and updates the Markdown profile when AI Assist is enabled. `Ctrl+P` shows the profile, and `Ctrl+G` shows pending suggestions. Applying a suggestion affects future requests only; it does not stop playback or rewrite the current queue.
 
@@ -464,7 +482,7 @@ Privacy Center groups local data into five understandable categories:
 | Category | What it contains | Privacy Center v1 |
 | --- | --- | --- |
 | Memory | private notes, `memory/profile.md`, consolidation evidence | inspect, export, delete |
-| Personalization | feedback, active rules, profile evidence, pending suggestions | inspect, export, delete |
+| Personalization | track reactions, feedback, active rules, profile evidence, pending suggestions | inspect, export, delete |
 | Listening History | Requests, paths, queue snapshots, bookmarks, plays, audit evidence | inspect, export, delete |
 | Library Evidence | tracks, audio features, enrichment, embeddings, separated evidence | inspect only |
 | Models & Storage | model files, isolated runtimes, package caches | inspect only |
@@ -498,7 +516,7 @@ uv run tonepath privacy delete --all-personal
 
 After reading the exact delete/keep list, rerun the same command with `--confirm`. `--all-personal` removes Memory, Personalization, and Listening History while preserving config, tracks, audio features, model/runtime storage, caches outside those personal categories, and original music.
 
-Deleting Memory by itself keeps active profile rules, which may continue to affect future recommendations. Deleting History while preserving Personalization detaches feedback from deleted sessions. Deletion enables SQLite secure deletion, but Tonepath cannot promise removal from system backups, APFS snapshots, or SSD forensic recovery.
+Deleting Memory by itself keeps active profile rules and track reactions, which may continue to affect future recommendations. Deleting History while preserving Personalization detaches feedback from deleted sessions and keeps track reactions. Deletion enables SQLite secure deletion, but Tonepath cannot promise removal from system backups, APFS snapshots, or SSD forensic recovery.
 
 The same controls are available in the TUI. Outside the Request and Memory editors, press `d` to open **Data & Privacy**. Use `Up/Down` or `j/k` to browse, `e` to export, and `d` to open a deletion preview. Deletion runs only after you type the exact lowercase word `delete`; `Esc` returns without changing data. Inventory, export, preview, and deletion work run in the background so the interface remains responsive.
 

@@ -10,7 +10,7 @@ import subprocess
 import sys
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 try:
     import typer
@@ -66,7 +66,7 @@ from tonepath.model_runtime import (
     setup_clap_runtime,
     setup_essentia_tf_runtime,
 )
-from tonepath.models import CandidateScore, SessionPlan, Track
+from tonepath.models import CandidateScore, SessionPlan, Track, TrackReaction
 from tonepath.planner import plan_session, request_constraints
 from tonepath.playback import MpvAdapter
 from tonepath.playback_controller import PlaybackController
@@ -111,7 +111,7 @@ from tonepath.readiness import (
     readiness_label,
     status_next_action,
 )
-from tonepath.selector import select_path
+from tonepath.selector import empty_path_guidance, select_path
 from tonepath.setup import SetupDraft, setup_review, setup_summary, validate_music_directories
 from tonepath.tui import run_tui
 from tonepath import config as tonepath_config
@@ -566,7 +566,7 @@ def run_planned_session(
 
     candidates = select_path(store, plan, limit_per_phase=limit_per_phase)
     if not candidates:
-        console.print("No tracks found. Run `tonepath scan ~/Music` first.")
+        console.print(empty_path_guidance(store))
         raise typer.Exit(code=1)
 
     render_plan(candidates)
@@ -1331,10 +1331,93 @@ def config_add_music_dir(path: Annotated[Path, typer.Argument(help="Music direct
 
 
 @feedback_app.command("like")
-def feedback_like() -> None:
-    """Record a like feedback event."""
+def feedback_like(
+    track_id: Annotated[int | None, typer.Argument(help="Track id; defaults to active playback.")] = None,
+) -> None:
+    """Like a track for future requests."""
 
-    record_feedback("like")
+    set_cli_track_reaction("liked", track_id)
+
+
+@feedback_app.command("dislike")
+def feedback_dislike(
+    track_id: Annotated[int | None, typer.Argument(help="Track id; defaults to active playback.")] = None,
+) -> None:
+    """Hide a track from future requests."""
+
+    set_cli_track_reaction("disliked", track_id)
+
+
+@feedback_app.command("clear")
+def feedback_clear(
+    track_id: Annotated[int | None, typer.Argument(help="Track id; defaults to active playback.")] = None,
+) -> None:
+    """Clear the stable reaction for one track."""
+
+    store = TonepathStore()
+    try:
+        resolved_id = resolve_reaction_track_id(store, track_id)
+        existed = store.clear_track_reaction(resolved_id)
+    finally:
+        store.close()
+    console.print("Reaction cleared." if existed else "Track reaction was already neutral.")
+
+
+@feedback_app.command("reactions")
+def feedback_reactions(
+    state: Annotated[str | None, typer.Option("--state", help="Filter by liked or disliked.")] = None,
+) -> None:
+    """List stable track reactions."""
+
+    if state is not None and state not in {"liked", "disliked"}:
+        raise typer.BadParameter("Reaction state must be liked or disliked.")
+    store = TonepathStore()
+    try:
+        rows = store.list_track_reactions(cast(TrackReaction | None, state))
+    finally:
+        store.close()
+    if not rows:
+        console.print("No matching track reactions.")
+        return
+    table = Table("Track ID", "Reaction", "Track", "Artist", "Updated", box=box.SIMPLE)
+    for row in rows:
+        table.add_row(
+            str(row["track_id"]),
+            str(row["reaction"]),
+            str(row["title"] or "unknown"),
+            str(row["artist"] or "unknown"),
+            str(row["updated_at"]),
+        )
+    console.print(table)
+
+
+@feedback_app.command("play")
+def feedback_play(
+    track_id: Annotated[int, typer.Argument(help="Track id to preview.")],
+    background: Annotated[bool, typer.Option("--background", help="Start mpv and return immediately.")] = False,
+) -> None:
+    """Preview one track without creating a recommendation session."""
+
+    store = TonepathStore()
+    try:
+        track = store.get_track(track_id, effective_metadata=True)
+        if track is None:
+            raise typer.BadParameter(f"Unknown track id: {track_id}")
+        if not track.path.is_file():
+            raise typer.BadParameter(f"Track file is missing: {track.path}")
+        controller = PlaybackController(store)
+        process = controller.replace([track.path], session_id=None, track_id=track_id)
+        console.print(f"Previewing {display_label(track)} with mpv PID {process.pid}.")
+        if background:
+            console.print("Run `tonepath stop` to stop background playback.")
+            return
+        try:
+            controller.wait_foreground(process)
+        except KeyboardInterrupt:
+            console.print("Playback stopped.")
+            raise typer.Exit(code=130) from None
+    finally:
+        store.close()
 
 
 @feedback_app.command("skip")
@@ -1774,6 +1857,40 @@ def record_feedback(feedback_type: str) -> None:
         store.close()
     console.print(f"Recorded feedback: {feedback_type}")
     console.print(profile_learning_hint())
+
+
+def set_cli_track_reaction(reaction: TrackReaction, track_id: int | None) -> None:
+    """Set one CLI track reaction using an explicit or active track id."""
+
+    store = TonepathStore()
+    try:
+        resolved_id = resolve_reaction_track_id(store, track_id)
+        store.set_track_reaction(resolved_id, reaction)
+    finally:
+        store.close()
+    label = "Liked" if reaction == "liked" else "Disliked"
+    effect = "remember" if reaction == "liked" else "hide"
+    console.print(f"{label}; future Requests will {effect} this track.")
+
+
+def resolve_reaction_track_id(store: TonepathStore, track_id: int | None) -> int:
+    """Resolve an explicit track id or the active managed playback track."""
+
+    if track_id is not None:
+        if store.get_track(track_id) is None:
+            raise typer.BadParameter(f"Unknown track id: {track_id}")
+        return track_id
+    raw_play_id = store.get_app_state("current_play_id")
+    if raw_play_id is None:
+        raise typer.BadParameter("No active track. Pass a track id from `tonepath feedback reactions`.")
+    try:
+        play_id = int(raw_play_id)
+    except ValueError:
+        raise typer.BadParameter("No active track. Pass a track id from `tonepath feedback reactions`.") from None
+    active_track_id = store.play_track_id(play_id)
+    if active_track_id is None:
+        raise typer.BadParameter("No active track. Pass a track id from `tonepath feedback reactions`.")
+    return active_track_id
 
 
 def print_json_payload(payload: object) -> None:
