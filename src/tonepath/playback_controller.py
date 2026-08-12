@@ -53,7 +53,7 @@ class PlaybackController:
         except RuntimeError:
             self.adapter.stop_process(process)
             self.process = None
-            self.ipc_path = None
+            self.ipc_path = ipc_path
             self.clear()
             raise
         self.process = process
@@ -192,6 +192,7 @@ class PlaybackController:
     def clear(self, mark_skipped: bool = False) -> None:
         """Clear managed playback process, PID state, and active play state."""
 
+        ipc_path = self.active_ipc_path()
         play_id = self.current_play_id()
         if play_id is not None:
             self.store.end_play(play_id, skipped=mark_skipped)
@@ -200,6 +201,7 @@ class PlaybackController:
         self.store.delete_app_state(CURRENT_MPV_PID_KEY)
         self.store.delete_app_state(CURRENT_PLAY_ID_KEY)
         self.store.delete_app_state(CURRENT_MPV_IPC_PATH_KEY)
+        remove_managed_ipc_socket(ipc_path)
 
 
 def parse_int(value: str | None) -> int | None:
@@ -241,3 +243,17 @@ def new_ipc_path() -> Path:
     run_dir = config.ensure_data_dir() / "run"
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir / f"mpv-{uuid4().hex}.sock"
+
+
+def remove_managed_ipc_socket(path: Path | None) -> None:
+    """Remove one Tonepath-generated mpv socket without touching other paths."""
+
+    if path is None or path.parent != config.data_dir() / "run":
+        return
+    name = path.name
+    if not name.startswith("mpv-") or not name.endswith(".sock"):
+        return
+    token = name[len("mpv-") : -len(".sock")]
+    if len(token) != 32 or any(character not in "0123456789abcdef" for character in token):
+        return
+    path.unlink(missing_ok=True)

@@ -1,6 +1,8 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tonepath.db import TonepathStore
 from tonepath.models import Track
@@ -99,6 +101,24 @@ class PlaybackControllerTest(unittest.TestCase):
             self.assertIsNone(store.get_app_state(CURRENT_MPV_PID_KEY))
             self.assertIsNone(store.get_app_state("current_mpv_ipc_path"))
             store.close()
+
+    def test_start_failure_removes_generated_ipc_socket(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            ipc_path = self.make_ipc_file(home, "mpv-11111111111111111111111111111111.sock")
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True), patch(
+                "tonepath.playback_controller.new_ipc_path", return_value=ipc_path
+            ):
+                store = TonepathStore(Path(tmp) / "tonepath.db")
+                adapter = FakeAdapter()
+                adapter.wait_error = RuntimeError("socket unavailable")
+                controller = PlaybackController(store, adapter=adapter)  # type: ignore[arg-type]
+
+                with self.assertRaisesRegex(RuntimeError, "socket unavailable"):
+                    controller.start([Path("/tmp/a.mp3")])
+
+                self.assertFalse(ipc_path.exists())
+                store.close()
 
     def test_state_reads_live_mpv_properties(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -199,6 +219,26 @@ class PlaybackControllerTest(unittest.TestCase):
             self.assertEqual(store.get_app_state(CURRENT_MPV_PID_KEY), str(new.pid))
             store.close()
 
+    def test_replace_removes_old_socket_and_keeps_new_socket_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            old_ipc = self.make_ipc_file(home, "mpv-22222222222222222222222222222222.sock")
+            new_ipc = self.make_ipc_file(home, "mpv-33333333333333333333333333333333.sock")
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True), patch(
+                "tonepath.playback_controller.new_ipc_path", side_effect=[old_ipc, new_ipc]
+            ):
+                store = TonepathStore(Path(tmp) / "tonepath.db")
+                controller = PlaybackController(store, adapter=FakeAdapter())  # type: ignore[arg-type]
+                controller.start([Path("/tmp/a.mp3")])
+
+                controller.replace([Path("/tmp/b.mp3")])
+
+                self.assertFalse(old_ipc.exists())
+                self.assertTrue(new_ipc.exists())
+                controller.stop_current()
+                self.assertFalse(new_ipc.exists())
+                store.close()
+
     def test_stop_recorded_clears_stale_pid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = TonepathStore(Path(tmp) / "tonepath.db")
@@ -244,6 +284,44 @@ class PlaybackControllerTest(unittest.TestCase):
             self.assertIsNotNone(row["ended_at"])
             self.assertEqual(row["skipped"], 0)
             store.close()
+
+    def test_natural_finish_removes_generated_ipc_socket(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            ipc_path = self.make_ipc_file(home, "mpv-44444444444444444444444444444444.sock")
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True), patch(
+                "tonepath.playback_controller.new_ipc_path", return_value=ipc_path
+            ):
+                store = TonepathStore(Path(tmp) / "tonepath.db")
+                controller = PlaybackController(store, adapter=FakeAdapter())  # type: ignore[arg-type]
+                process = controller.start([Path("/tmp/a.mp3")])
+                process.returncode = 0
+
+                self.assertTrue(controller.finish_if_exited())
+                self.assertFalse(ipc_path.exists())
+                store.close()
+
+    def test_clear_does_not_remove_non_tonepath_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            outside = Path(tmp) / "do-not-remove.sock"
+            outside.write_text("external", encoding="utf-8")
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                store = TonepathStore(Path(tmp) / "tonepath.db")
+                store.set_app_state("current_mpv_ipc_path", str(outside))
+                controller = PlaybackController(store, adapter=FakeAdapter())  # type: ignore[arg-type]
+
+                controller.clear()
+
+                self.assertTrue(outside.exists())
+                store.close()
+
+    def make_ipc_file(self, home: Path, name: str) -> Path:
+        run_dir = home / "run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        path = run_dir / name
+        path.write_text("socket", encoding="utf-8")
+        return path
 
     def add_track(self, store: TonepathStore, tmp: str) -> int:
         path = Path(tmp) / "song.mp3"
