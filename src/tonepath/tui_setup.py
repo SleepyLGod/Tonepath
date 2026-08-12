@@ -322,6 +322,8 @@ class SetupScreen(Screen[SetupOutcome | None]):
         except ValueError as exc:
             self.status_message = str(exc)
             self.refresh_details()
+            event.input.focus()
+            event.input.action_select_all()
             return
         if self.first_run and self._return_state == "review":
             self.draft = self.draft.replace_music_dirs((raw_path,))

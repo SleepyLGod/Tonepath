@@ -308,6 +308,8 @@ class TonepathApp(App[None]):
         self.memory_suggestions: list[dict[str, object]] = []
         self.selected_memory_suggestion_index = 0
         self.request_busy = False
+        self.request_pending_prompt: str | None = None
+        self.request_prompt_interacted = False
         self.request_status_message = ""
         self.setup_prepare_busy = False
         self.setup_prepare_status = ""
@@ -352,6 +354,7 @@ class TonepathApp(App[None]):
         table.add_columns("#", "Phase", "Track", "Fit", "You", "Energy", "Conf")
         suggestions = self.query_one("#memory-suggestions", DataTable)
         suggestions.add_columns("#", "Type", "Scope", "Confidence", "Rationale")
+        suggestions.cursor_type = "row"
         self.show_right_panel()
 
         self.model_runtime_ready = model_runtime_status().ready
@@ -692,6 +695,8 @@ class TonepathApp(App[None]):
         if isinstance(self.screen, HistoryScreen):
             self.screen.dismiss(None)
             return
+        if self.tool_screen_is_open():
+            return
         if self.store is None:
             self.log_event("Local store is unavailable.")
             return
@@ -703,6 +708,8 @@ class TonepathApp(App[None]):
         if isinstance(self.screen, DislikedTracksScreen):
             self.screen.action_close_disliked()
             return
+        if self.tool_screen_is_open():
+            return
         if self.store is None:
             self.log_event("Local store is unavailable.")
             return
@@ -713,6 +720,8 @@ class TonepathApp(App[None]):
 
         if isinstance(self.screen, PrivacyScreen):
             return
+        if self.tool_screen_is_open():
+            return
         self.push_screen(PrivacyScreen())
 
     def action_setup(self) -> None:
@@ -720,10 +729,17 @@ class TonepathApp(App[None]):
 
         if isinstance(self.screen, SetupScreen):
             return
+        if self.tool_screen_is_open():
+            return
         if self.setup_prepare_busy:
             self.log_event("Library preparation is already running. Wait for it to finish before changing setup.")
             return
         self.push_setup_screen(first_run=not config.config_path().exists())
+
+    def tool_screen_is_open(self) -> bool:
+        """Return whether a full-screen tool is already above the player."""
+
+        return len(self.screen_stack) > 1
 
     def push_setup_screen(self, *, first_run: bool) -> None:
         """Open the guided setup screen with current non-secret runtime state."""
@@ -1053,12 +1069,14 @@ class TonepathApp(App[None]):
             return
         self.memory_busy = False
         self.memory_worker_kind = None
+        focus_suggestions = False
         if event.state == WorkerState.SUCCESS:
             result = worker.result
             if isinstance(result, MemoryWorkerResult):
                 self.memory_status_message = result.status_message
                 if result.kind == "suggestions":
                     self.load_memory_suggestions()
+                    focus_suggestions = True
                 self.log_event(result.event_message)
             else:
                 self.memory_status_message = "Memory task finished, but returned an unreadable result."
@@ -1070,6 +1088,8 @@ class TonepathApp(App[None]):
             self.memory_status_message = "Memory task was cancelled. Current queue is unchanged."
             self.log_event(self.memory_status_message)
         self.refresh_session_view()
+        if focus_suggestions:
+            self.query_one("#memory-suggestions", DataTable).focus()
 
     def finish_setup_preparation_worker(self, worker: Worker[Any], state: WorkerState) -> None:
         """Apply completed preparation without replacing the active path."""
@@ -1163,6 +1183,8 @@ class TonepathApp(App[None]):
     def action_focus_prompt(self) -> None:
         """Focus the prompt input bar."""
 
+        if self.request_busy:
+            self.request_prompt_interacted = True
         self.query_one("#prompt-input", Input).focus()
         self.query_one("#command-bar", Static).update(self.command_bar_renderable(prompt_focused=True))
 
@@ -1347,6 +1369,17 @@ class TonepathApp(App[None]):
             return
         self.start_request_planning(event.value)
 
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Remember prompt edits made while a background request is planning."""
+
+        if (
+            event.input.id == "prompt-input"
+            and self.request_busy
+            and self.request_pending_prompt is not None
+            and event.value.strip() != self.request_pending_prompt
+        ):
+            self.request_prompt_interacted = True
+
     def start_request_planning(
         self,
         prompt: str,
@@ -1382,6 +1415,8 @@ class TonepathApp(App[None]):
             )
             return
         self.request_busy = True
+        self.request_pending_prompt = cleaned
+        self.request_prompt_interacted = False
         self.request_status_message = "Planning next path in background; current playback continues."
         prompt_input = self.query_one("#prompt-input", Input)
         prompt_input.value = cleaned
@@ -1424,8 +1459,14 @@ class TonepathApp(App[None]):
 
         self.request_busy = False
         if state == WorkerState.SUCCESS and isinstance(worker.result, RequestWorkerResult):
-            self.activate_session(worker.result)
+            prompt_input = self.query_one("#prompt-input", Input)
+            preserve_prompt = self.request_prompt_interacted or prompt_input.value.strip() != worker.result.prompt
+            self.request_pending_prompt = None
+            self.request_prompt_interacted = False
+            self.activate_session(worker.result, preserve_prompt=preserve_prompt)
             return
+        self.request_pending_prompt = None
+        self.request_prompt_interacted = False
         if state == WorkerState.ERROR:
             self.request_status_message = f"Request planning failed: {worker.error}. Current path is unchanged."
         elif state == WorkerState.CANCELLED:
@@ -1471,7 +1512,7 @@ class TonepathApp(App[None]):
             )
         )
 
-    def activate_session(self, result: RequestWorkerResult) -> None:
+    def activate_session(self, result: RequestWorkerResult, *, preserve_prompt: bool = False) -> None:
         """Persist and activate a completed request plan without autoplay."""
 
         if self.store is None:
@@ -1498,8 +1539,8 @@ class TonepathApp(App[None]):
         self.playback = self.playback or PlaybackController(self.store)
         self.playback_status = "Ready" if new_runner.queue else "No tracks"
         prompt_input = self.query_one("#prompt-input", Input)
-        prompt_input.value = result.prompt
-        prompt_input.blur()
+        if not preserve_prompt:
+            prompt_input.value = result.prompt
         if result.intent_note:
             self.log_event(result.intent_note)
         if not new_runner.queue:
@@ -1513,6 +1554,8 @@ class TonepathApp(App[None]):
             )
         self.log_event(self.request_status_message)
         self.refresh_session_view()
+        if not preserve_prompt:
+            self.query_one("#queue", DataTable).focus()
 
     def start_current_playback(self, mark_previous_skipped: bool = False) -> None:
         """Start playback for the current candidate if one exists."""
@@ -2394,6 +2437,24 @@ class TonepathApp(App[None]):
                 queue_cell(str(item["confidence"]), current=current, palette=self.palette),
                 queue_cell(truncate(str(item["rationale"]), 54), current=current, palette=self.palette),
             )
+        table.move_cursor(row=self.selected_memory_suggestion_index, column=0, animate=False)
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """Keep the selected memory suggestion aligned with the table cursor."""
+
+        if event.data_table.id != "memory-suggestions" or self.right_panel != "memory_suggestions":
+            return
+        if event.cursor_row < len(self.memory_suggestions):
+            self.selected_memory_suggestion_index = event.cursor_row
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Apply the highlighted memory suggestion from the Enter key path."""
+
+        if event.data_table.id != "memory-suggestions" or self.right_panel != "memory_suggestions":
+            return
+        event.stop()
+        self.selected_memory_suggestion_index = event.cursor_row
+        self.action_apply_memory_suggestion()
 
 
 def run_tui(prompt: str | None = None) -> None:

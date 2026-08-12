@@ -32,7 +32,7 @@ from tonepath.tui import (
 from tonepath.tui_theme import PALETTE_BY_KEY, PALETTES
 from textual.theme import Theme
 from textual.worker import WorkerState
-from textual.widgets import Input, Static, TextArea
+from textual.widgets import DataTable, Input, Static, TextArea
 
 
 class FakeProcess:
@@ -985,7 +985,9 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                         await self.wait_for_memory_idle(app, pilot)
                         self.assertEqual(app.right_panel, "memory_suggestions")
                         self.assertTrue(app.memory_suggestions)
-                        app.action_apply_memory_suggestion()
+                        self.assertTrue(app.query_one("#memory-suggestions", DataTable).has_focus)
+                        await pilot.press("enter")
+                        await pilot.pause()
                         after_queue = [candidate.track.id for candidate in app.runner.queue] if app.runner is not None else []
                         self.assertEqual(before_queue, after_queue)
                         self.assertIn("future requests", app.memory_status_message)
@@ -996,6 +998,102 @@ class TonepathTuiTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(store.profile_summary()["profile_rules"], 1)
                 finally:
                     store.close()
+
+    async def test_tui_request_worker_preserves_new_prompt_draft_and_focus(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            env = {"TONEPATH_HOME": str(home), "TONEPATH_LLM_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": "secret"}
+            with patch.dict(os.environ, env, clear=True):
+                config.write_config(config.preset_config("smart", music_dir=Path(tmp), send_to_llm=True))
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                self.add_ready_track(store, tmp, "b.mp3")
+                store.close()
+                started = threading.Event()
+                release = threading.Event()
+
+                def slow_plan(prompt: str, _settings: config.TonepathConfig) -> tuple[object, str]:
+                    started.set()
+                    release.wait(2)
+                    return plan_session(prompt), "LLM intent: test"
+
+                app = TonepathApp()
+                with patch("tonepath.tui.smart_plan_session", side_effect=slow_plan):
+                    async with app.run_test() as pilot:
+                        prompt_input = app.query_one("#prompt-input", Input)
+                        prompt_input.value = "first request"
+                        await pilot.press("enter")
+                        for _ in range(40):
+                            if started.is_set():
+                                break
+                            await pilot.pause(0.05)
+                        self.assertTrue(started.is_set())
+
+                        prompt_input.focus()
+                        await pilot.press("end", *(["backspace"] * len("first request")))
+                        await pilot.press(*list("second request"))
+                        self.assertEqual(prompt_input.value, "second request")
+
+                        release.set()
+                        for _ in range(80):
+                            if not app.request_busy:
+                                break
+                            await pilot.pause(0.05)
+
+                        self.assertFalse(app.request_busy)
+                        self.assertIsNotNone(app.runner)
+                        self.assertEqual(app.runner.active_plan().request.prompt, "first request")
+                        self.assertEqual(prompt_input.value, "second request")
+                        self.assertTrue(prompt_input.has_focus)
+                        await pilot.press("ctrl+q")
+
+    async def test_tui_request_worker_focuses_player_when_prompt_is_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            env = {"TONEPATH_HOME": str(home), "TONEPATH_LLM_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": "secret"}
+            with patch.dict(os.environ, env, clear=True):
+                config.write_config(config.preset_config("smart", music_dir=Path(tmp), send_to_llm=True))
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp()
+                with patch("tonepath.tui.smart_plan_session", return_value=(plan_session("focus 30m"), "LLM intent: test")):
+                    async with app.run_test() as pilot:
+                        prompt_input = app.query_one("#prompt-input", Input)
+                        prompt_input.value = "focus 30m"
+                        await pilot.press("enter")
+                        for _ in range(80):
+                            if not app.request_busy:
+                                break
+                            await pilot.pause(0.05)
+
+                        self.assertTrue(app.query_one("#queue", DataTable).has_focus)
+                        await pilot.press("ctrl+q")
+
+    async def test_tui_full_screen_tools_do_not_stack(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                config.write_config(config.preset_config("private", music_dir=Path(tmp)))
+                store = TonepathStore()
+                self.add_ready_track(store, tmp, "a.mp3")
+                store.close()
+
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    app.query_one("#prompt-input", Input).blur()
+                    await pilot.press("c")
+                    await pilot.pause()
+                    setup_screen = app.screen
+                    stack_size = len(app.screen_stack)
+
+                    await pilot.press("d", "h", "ctrl+l")
+                    await pilot.pause()
+
+                    self.assertIs(app.screen, setup_screen)
+                    self.assertEqual(len(app.screen_stack), stack_size)
+                    await pilot.press("escape")
 
     async def test_tui_memory_suggestions_do_not_start_duplicate_workers(self) -> None:
         suggestion = {

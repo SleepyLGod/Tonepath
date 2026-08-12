@@ -191,6 +191,32 @@ class TuiSetupTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("does not exist", screen.status_message)
                     self.assertIn("does not exist", screen.query_one("#setup-status").render().plain)
 
+    async def test_invalid_music_path_is_selected_for_direct_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            missing = Path(tmp) / "missing"
+            music = Path(tmp) / "music"
+            music.mkdir()
+            with patch.dict(os.environ, {"TONEPATH_HOME": str(home)}, clear=True):
+                app = TonepathApp()
+                async with app.run_test() as pilot:
+                    await self.wait_until(pilot, lambda: isinstance(app.screen, SetupScreen))
+                    screen = app.screen
+                    music_input = screen.query_one("#setup-music-input", Input)
+                    music_input.value = str(missing)
+
+                    await pilot.press("enter")
+
+                    self.assertEqual(screen.state, "music-input")
+                    self.assertTrue(music_input.has_focus)
+                    self.assertEqual(music_input.selected_text, str(missing))
+
+                    await pilot.press(*list(str(music)))
+                    await pilot.press("enter")
+
+                    self.assertEqual(screen.state, "experience")
+                    self.assertEqual(screen.draft.music_dirs, (str(music),))
+
     async def test_first_run_private_flow_saves_only_after_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
